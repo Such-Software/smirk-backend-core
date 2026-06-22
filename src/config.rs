@@ -1,0 +1,655 @@
+//! Configuration: the single source of environment-driven settings.
+//!
+//! [`Config::from_env`] is the ONLY place that reads `std::env`; every other
+//! module receives typed config. `from_env` calls [`Config::validate`], which
+//! **fails closed**: the server refuses to start on a weak or placeholder
+//! secret, or an inconsistent feature configuration, rather than booting and
+//! logging success while a security control is silently defeated.
+//!
+//! Secrets are never logged, never placed in defaults, and never emitted in the
+//! OpenAPI spec. Structs that hold secrets deliberately do not derive `Debug`.
+
+use std::env;
+use std::net::IpAddr;
+use std::str::FromStr;
+
+use ipnetwork::IpNetwork;
+
+use crate::error::AppError;
+
+fn cfg_err(msg: impl Into<String>) -> AppError {
+    AppError::ConfigError(msg.into())
+}
+
+/// Substrings we refuse to accept as real secrets in production.
+const PLACEHOLDERS: &[&str] = &[
+    "change_me",
+    "changeme",
+    "your-",
+    "example",
+    "placeholder",
+    "dev-",
+    "xxxx",
+    "0000000000",
+];
+
+fn looks_placeholder(s: &str) -> bool {
+    let l = s.to_lowercase();
+    PLACEHOLDERS.iter().any(|p| l.contains(p))
+}
+
+// ── env helpers ─────────────────────────────────────────────────────────────
+
+/// Non-empty env value, or `None`.
+fn env_opt(key: &str) -> Option<String> {
+    env::var(key).ok().filter(|s| !s.is_empty())
+}
+
+fn env_or(key: &str, default: &str) -> String {
+    env_opt(key).unwrap_or_else(|| default.to_string())
+}
+
+fn env_bool(key: &str, default: bool) -> bool {
+    match env::var(key) {
+        Ok(v) => matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Err(_) => default,
+    }
+}
+
+/// Parse a typed value. Errors if the var is *present but unparseable* (so a
+/// `doctor` preflight can distinguish "set but invalid" from "unset"); falls
+/// back to `default` only when truly absent/empty.
+fn env_parse<T: FromStr>(key: &str, default: T) -> Result<T, AppError> {
+    match env_opt(key) {
+        Some(v) => v
+            .parse()
+            .map_err(|_| cfg_err(format!("{key} is set but not a valid value"))),
+        None => Ok(default),
+    }
+}
+
+fn env_list(key: &str) -> Vec<String> {
+    env_opt(key)
+        .map(|s| {
+            s.split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Parse a comma-separated list of CIDRs or bare IPs into networks.
+fn parse_networks(key: &str) -> Result<Vec<IpNetwork>, AppError> {
+    let mut out = Vec::new();
+    for tok in env_list(key) {
+        let net = IpNetwork::from_str(&tok)
+            .or_else(|_| IpAddr::from_str(&tok).map(IpNetwork::from))
+            .map_err(|_| cfg_err(format!("{key} contains an invalid CIDR/IP: {tok}")))?;
+        out.push(net);
+    }
+    Ok(out)
+}
+
+// ── config tree ─────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DeploymentMode {
+    /// Single instance (default). In-memory challenge state is permitted.
+    Single,
+    /// Load-balanced fleet. Requires shared/stateless challenge state.
+    Fleet,
+}
+
+/// Top-level application configuration. Does not derive `Debug` (holds secrets).
+#[derive(Clone)]
+pub struct Config {
+    pub server_host: String,
+    pub server_port: u16,
+    pub deployment_mode: DeploymentMode,
+    pub environment: String,
+
+    pub database_url: String,
+
+    pub auth: AuthConfig,
+    pub identity: IdentityConfig,
+    pub secrets: SecretConfig,
+    /// Networks whose `X-Forwarded-For` is trusted. Empty (default) means the
+    /// real TCP peer is always used for rate-limiting and audit IPs.
+    pub trusted_proxies: Vec<IpNetwork>,
+
+    pub features: FeatureFlags,
+    pub chains: ChainConfig,
+    pub pow: PowConfig,
+    pub admin: AdminConfig,
+    pub landing: LandingConfig,
+    pub retention: RetentionConfig,
+}
+
+#[derive(Clone)]
+pub struct AuthConfig {
+    /// HS256 signing key. Length-checked (>= 32 bytes) and placeholder-checked.
+    pub jwt_secret: String,
+    pub jwt_expiry_hours: u64,
+}
+
+#[derive(Clone)]
+pub struct IdentityConfig {
+    /// Public absolute API base URL (e.g. `https://backend.example.org/api/v1`).
+    /// Required when Nostr identity is enabled: it is the canonical value the
+    /// NIP-98 `u` tag is verified against — never the request `Host` header.
+    pub public_api_url: Option<String>,
+}
+
+/// HMAC peppers and salts. Fail-closed: required and length-checked. These make
+/// stored fingerprints non-reproducible from a candidate seed and unlink IPs.
+#[derive(Clone)]
+pub struct SecretConfig {
+    pub seed_fingerprint_pepper: String,
+    pub refresh_token_pepper: String,
+    pub ip_salt: String,
+}
+
+#[derive(Clone)]
+pub struct FeatureFlags {
+    pub chains: ChainFlags,
+    pub prices: bool,
+    pub prices_provider: String,
+    pub prices_interval_secs: u64,
+    /// Parked feature; off by default.
+    pub tips: bool,
+    /// Nostr-native identity (NIP-98 login/link, NIP-05 directory).
+    pub nostr_identity: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct ChainFlags {
+    pub btc: bool,
+    pub ltc: bool,
+    pub xmr: bool,
+    pub wow: bool,
+    pub grin: bool,
+}
+
+#[derive(Clone)]
+pub struct ChainConfig {
+    pub btc: UtxoConfig,
+    pub ltc: UtxoConfig,
+    pub xmr: LwsConfig,
+    pub wow: LwsConfig,
+    pub grin: GrinConfig,
+}
+
+/// Bitcoin/Litecoin node + Electrum configuration.
+#[derive(Clone)]
+pub struct UtxoConfig {
+    pub network: String,
+    pub use_local_node: bool,
+    pub rpc_url: String,
+    pub rpc_user: String,
+    pub rpc_pass: String,
+    pub electrum_primary: Option<String>,
+    pub electrum_fallbacks: Vec<String>,
+}
+
+/// Monero/Wownero daemon + light-wallet-server configuration.
+#[derive(Clone)]
+pub struct LwsConfig {
+    pub lws_url: String,
+    pub lws_admin_url: String,
+    pub lws_admin_key: String,
+    pub daemon_url: String,
+}
+
+#[derive(Clone)]
+pub struct GrinConfig {
+    pub owner_api_url: String,
+    pub owner_api_secret: String,
+    pub wallet_password: String,
+    pub foreign_api_url: String,
+    pub node_api_url: String,
+    pub node_api_user: String,
+    pub node_api_pass: String,
+    pub node_foreign_api_url: String,
+    pub node_foreign_api_secret: String,
+}
+
+/// Proof-of-work signup gate (ALTCHA). Feature-gated; when enabled the HMAC key
+/// is required (no source-visible fallback).
+#[derive(Clone)]
+pub struct PowConfig {
+    pub enabled: bool,
+    pub hmac_key: String,
+    pub required: bool,
+    pub cost: u64,
+    /// Lowercase hex pubkey hashes that always require PoW (opt-in testing).
+    pub required_for_pubkeys: Vec<String>,
+}
+
+/// Admin surface. Default posture is loopback/Tor; allowlist mutation is
+/// CLI/loopback-only in v1. Only public keys are stored — never a seed.
+#[derive(Clone)]
+pub struct AdminConfig {
+    pub enabled: bool,
+    pub bind: String,
+    pub jwt_secret: String,
+    /// MAC secret protecting admin/setup trust anchors against DB tampering.
+    pub key_integrity_secret: String,
+    pub pubkeys: Vec<String>,
+    pub max_keys: u32,
+    pub pending_key_ttl_days: u32,
+}
+
+/// Public landing page. Off by default; full + per-field tunable when enabled.
+#[derive(Clone)]
+pub struct LandingConfig {
+    pub enabled: bool,
+    pub expose_features: bool,
+    pub expose_uptime: bool,
+    pub stats_enabled: bool,
+    pub stats_cache_hours: u64,
+}
+
+#[derive(Clone)]
+pub struct RetentionConfig {
+    pub login_events_days: u64,
+    pub audit_days: u64,
+    pub erasure_enabled: bool,
+    pub purge_login_events: bool,
+    pub export_per_day: u32,
+}
+
+impl Config {
+    /// Load configuration from the environment and validate it (fail-closed).
+    pub fn from_env() -> Result<Self, AppError> {
+        let cfg = Self {
+            server_host: env_or("SERVER_HOST", "0.0.0.0"),
+            server_port: env_parse("SERVER_PORT", 8080u16)?,
+            deployment_mode: match env_or("DEPLOYMENT_MODE", "single").to_lowercase().as_str() {
+                "fleet" => DeploymentMode::Fleet,
+                "single" => DeploymentMode::Single,
+                other => {
+                    return Err(cfg_err(format!(
+                        "DEPLOYMENT_MODE must be single|fleet, got {other}"
+                    )))
+                }
+            },
+            environment: env_or("ENVIRONMENT", "development"),
+
+            database_url: env_opt("DATABASE_URL")
+                .ok_or_else(|| cfg_err("DATABASE_URL is required"))?,
+
+            auth: AuthConfig {
+                jwt_secret: env_or("JWT_SECRET", ""),
+                jwt_expiry_hours: env_parse("JWT_EXPIRY_HOURS", 24u64)?,
+            },
+            identity: IdentityConfig {
+                public_api_url: env_opt("PUBLIC_API_URL"),
+            },
+            secrets: SecretConfig {
+                seed_fingerprint_pepper: env_or("SEED_FINGERPRINT_PEPPER", ""),
+                refresh_token_pepper: env_or("REFRESH_TOKEN_PEPPER", ""),
+                ip_salt: env_or("IP_SALT", ""),
+            },
+            trusted_proxies: parse_networks("TRUSTED_PROXIES")?,
+
+            features: FeatureFlags {
+                chains: ChainFlags {
+                    btc: env_bool("FEATURE_BTC", true),
+                    ltc: env_bool("FEATURE_LTC", true),
+                    xmr: env_bool("FEATURE_XMR", true),
+                    wow: env_bool("FEATURE_WOW", true),
+                    grin: env_bool("FEATURE_GRIN", true),
+                },
+                prices: env_bool("FEATURE_PRICES", true),
+                prices_provider: env_or("PRICES_PROVIDER", "coingecko"),
+                prices_interval_secs: env_parse("PRICES_FETCH_INTERVAL_SECS", 300u64)?,
+                tips: env_bool("FEATURE_TIPS", false),
+                nostr_identity: env_bool("FEATURE_NOSTR_IDENTITY", true),
+            },
+            chains: ChainConfig {
+                btc: UtxoConfig {
+                    network: env_or("BTC_NETWORK", "mainnet"),
+                    use_local_node: env_bool("BTC_USE_LOCAL_NODE", false),
+                    rpc_url: env_or("BTC_RPC_URL", "http://127.0.0.1:8332"),
+                    rpc_user: env_or("BTC_RPC_USER", "bitcoinrpc"),
+                    rpc_pass: env_or("BTC_RPC_PASS", ""),
+                    electrum_primary: env_opt("BTC_ELECTRUM_URL"),
+                    electrum_fallbacks: env_list("BTC_ELECTRUM_FALLBACKS"),
+                },
+                ltc: UtxoConfig {
+                    network: env_or("LTC_NETWORK", "mainnet"),
+                    use_local_node: env_bool("LTC_USE_LOCAL_NODE", false),
+                    rpc_url: env_or("LTC_RPC_URL", "http://127.0.0.1:9332"),
+                    rpc_user: env_or("LTC_RPC_USER", "litecoinrpc"),
+                    rpc_pass: env_or("LTC_RPC_PASS", ""),
+                    electrum_primary: env_opt("LTC_ELECTRUM_URL"),
+                    electrum_fallbacks: env_list("LTC_ELECTRUM_FALLBACKS"),
+                },
+                xmr: LwsConfig {
+                    lws_url: env_or("XMR_LWS_URL", "http://127.0.0.1:8443"),
+                    lws_admin_url: env_or("XMR_LWS_ADMIN_URL", "http://127.0.0.1:9443"),
+                    lws_admin_key: env_or("XMR_LWS_ADMIN_KEY", ""),
+                    daemon_url: env_or("XMR_DAEMON_URL", "http://127.0.0.1:18081"),
+                },
+                wow: LwsConfig {
+                    lws_url: env_or("WOW_LWS_URL", "http://127.0.0.1:18443"),
+                    lws_admin_url: env_or("WOW_LWS_ADMIN_URL", "http://127.0.0.1:19443"),
+                    lws_admin_key: env_or("WOW_LWS_ADMIN_KEY", ""),
+                    daemon_url: env_or("WOW_DAEMON_URL", "http://127.0.0.1:34568"),
+                },
+                grin: GrinConfig {
+                    owner_api_url: env_or("GRIN_OWNER_API_URL", "http://127.0.0.1:3420/v3/owner"),
+                    owner_api_secret: env_or("GRIN_OWNER_API_SECRET", ""),
+                    wallet_password: env_or("GRIN_WALLET_PASSWORD", ""),
+                    foreign_api_url: env_or(
+                        "GRIN_FOREIGN_API_URL",
+                        "http://127.0.0.1:3415/v2/foreign",
+                    ),
+                    node_api_url: env_or("GRIN_NODE_API_URL", "http://127.0.0.1:3413/v2/owner"),
+                    node_api_user: env_or("GRIN_NODE_API_USER", "grin"),
+                    node_api_pass: env_or("GRIN_NODE_API_PASS", ""),
+                    node_foreign_api_url: env_or(
+                        "GRIN_NODE_FOREIGN_API_URL",
+                        "http://127.0.0.1:3413/v2/foreign",
+                    ),
+                    node_foreign_api_secret: env_or("GRIN_NODE_FOREIGN_API_SECRET", ""),
+                },
+            },
+            pow: PowConfig {
+                enabled: env_bool("FEATURE_POW", false),
+                hmac_key: env_or("ALTCHA_HMAC_KEY", ""),
+                required: env_bool("POW_REQUIRED", false),
+                cost: env_parse("ALTCHA_COST", 100_000u64)?,
+                required_for_pubkeys: env_list("TEST_POW_REQUIRED_FOR_PUBKEYS")
+                    .into_iter()
+                    .map(|s| s.to_lowercase())
+                    .collect(),
+            },
+            admin: AdminConfig {
+                enabled: env_bool("ADMIN_ENABLED", false),
+                bind: env_or("ADMIN_BIND", "127.0.0.1:8081"),
+                jwt_secret: env_or("ADMIN_JWT_SECRET", ""),
+                key_integrity_secret: env_or("ADMIN_KEY_INTEGRITY_SECRET", ""),
+                pubkeys: env_list("ADMIN_PUBKEYS"),
+                max_keys: env_parse("ADMIN_MAX_KEYS", 8u32)?,
+                pending_key_ttl_days: env_parse("ADMIN_PENDING_KEY_TTL_DAYS", 7u32)?,
+            },
+            landing: LandingConfig {
+                enabled: env_bool("PUBLIC_LANDING_ENABLED", false),
+                expose_features: env_bool("PUBLIC_EXPOSE_FEATURES", false),
+                expose_uptime: env_bool("PUBLIC_EXPOSE_UPTIME", false),
+                stats_enabled: env_bool("PUBLIC_STATS_ENABLED", false),
+                stats_cache_hours: env_parse("PUBLIC_STATS_CACHE_HOURS", 24u64)?,
+            },
+            retention: RetentionConfig {
+                login_events_days: env_parse("RETENTION_LOGIN_EVENTS_DAYS", 90u64)?,
+                audit_days: env_parse("RETENTION_AUDIT_DAYS", 365u64)?,
+                erasure_enabled: env_bool("ERASURE_ENABLED", false),
+                purge_login_events: env_bool("ERASURE_PURGE_LOGIN_EVENTS", true),
+                export_per_day: env_parse("ERASURE_EXPORT_PER_DAY", 3u32)?,
+            },
+        };
+
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    pub fn is_production(&self) -> bool {
+        self.environment == "production"
+    }
+
+    /// Fail-closed validation. Returns `Err` (aborting startup) on any weak,
+    /// missing, or inconsistent security-relevant setting.
+    pub fn validate(&self) -> Result<(), AppError> {
+        let prod = self.is_production();
+
+        // A secret that must be present, long enough, and (in prod) not a placeholder.
+        let require_secret = |name: &str, val: &str, min: usize| -> Result<(), AppError> {
+            if val.len() < min {
+                return Err(cfg_err(format!(
+                    "{name} must be set and at least {min} bytes"
+                )));
+            }
+            if prod && looks_placeholder(val) {
+                return Err(cfg_err(format!(
+                    "{name} looks like a placeholder; set a real value"
+                )));
+            }
+            Ok(())
+        };
+
+        // Core auth + identity secrets are always required.
+        require_secret("JWT_SECRET", &self.auth.jwt_secret, 32)?;
+        require_secret(
+            "SEED_FINGERPRINT_PEPPER",
+            &self.secrets.seed_fingerprint_pepper,
+            32,
+        )?;
+        require_secret(
+            "REFRESH_TOKEN_PEPPER",
+            &self.secrets.refresh_token_pepper,
+            32,
+        )?;
+        require_secret("IP_SALT", &self.secrets.ip_salt, 16)?;
+
+        // Nostr identity: PUBLIC_API_URL must be a real absolute URL.
+        if self.features.nostr_identity {
+            let url = self.identity.public_api_url.as_deref().ok_or_else(|| {
+                cfg_err("PUBLIC_API_URL is required when FEATURE_NOSTR_IDENTITY is on")
+            })?;
+            let parsed = url::Url::parse(url)
+                .map_err(|_| cfg_err("PUBLIC_API_URL must be an absolute URL"))?;
+            if prod && parsed.scheme() != "https" {
+                return Err(cfg_err("PUBLIC_API_URL must be https in production"));
+            }
+            if prod && looks_placeholder(url) {
+                return Err(cfg_err(
+                    "PUBLIC_API_URL looks like a placeholder; set your own domain",
+                ));
+            }
+        }
+
+        // PoW gate: a real HMAC key when enabled (no source-visible fallback).
+        if self.pow.enabled {
+            require_secret("ALTCHA_HMAC_KEY", &self.pow.hmac_key, 32)?;
+        }
+
+        // Admin surface: dedicated secrets when enabled.
+        if self.admin.enabled {
+            require_secret("ADMIN_JWT_SECRET", &self.admin.jwt_secret, 32)?;
+            require_secret(
+                "ADMIN_KEY_INTEGRITY_SECRET",
+                &self.admin.key_integrity_secret,
+                32,
+            )?;
+        }
+
+        // Fleet mode cannot rely on in-process challenge state.
+        if self.deployment_mode == DeploymentMode::Fleet {
+            tracing::info!(
+                "deployment_mode=fleet: challenge/nonce state must be shared-store backed"
+            );
+        }
+
+        // Per-enabled-chain infra secrets: hard error in production, warn in dev.
+        let mut chain_warnings: Vec<&str> = Vec::new();
+        if self.features.chains.xmr && self.chains.xmr.lws_admin_key.is_empty() {
+            chain_warnings.push("XMR_LWS_ADMIN_KEY");
+        }
+        if self.features.chains.wow && self.chains.wow.lws_admin_key.is_empty() {
+            chain_warnings.push("WOW_LWS_ADMIN_KEY");
+        }
+        if self.features.chains.grin && self.chains.grin.owner_api_secret.is_empty() {
+            chain_warnings.push("GRIN_OWNER_API_SECRET");
+        }
+        if !chain_warnings.is_empty() {
+            if prod {
+                return Err(cfg_err(format!(
+                    "missing required secrets for enabled chains: {}",
+                    chain_warnings.join(", ")
+                )));
+            }
+            for w in &chain_warnings {
+                tracing::warn!("{w} is empty — set this before enabling that chain in production");
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Fail-closed validation regression tests. `validate()` must reject weak
+    //! or inconsistent security settings rather than booting.
+    use super::*;
+
+    fn valid() -> Config {
+        let utxo = || UtxoConfig {
+            network: "mainnet".into(),
+            use_local_node: false,
+            rpc_url: String::new(),
+            rpc_user: String::new(),
+            rpc_pass: String::new(),
+            electrum_primary: None,
+            electrum_fallbacks: vec![],
+        };
+        let lws = || LwsConfig {
+            lws_url: String::new(),
+            lws_admin_url: String::new(),
+            lws_admin_key: String::new(),
+            daemon_url: String::new(),
+        };
+        Config {
+            server_host: "0.0.0.0".into(),
+            server_port: 8080,
+            deployment_mode: DeploymentMode::Single,
+            environment: "development".into(),
+            database_url: "postgres://localhost/smirk".into(),
+            auth: AuthConfig {
+                jwt_secret: "a".repeat(32),
+                jwt_expiry_hours: 24,
+            },
+            identity: IdentityConfig {
+                public_api_url: Some("https://backend.example.org/api/v1".into()),
+            },
+            secrets: SecretConfig {
+                seed_fingerprint_pepper: "p".repeat(32),
+                refresh_token_pepper: "r".repeat(32),
+                ip_salt: "s".repeat(16),
+            },
+            trusted_proxies: vec![],
+            features: FeatureFlags {
+                chains: ChainFlags {
+                    btc: false,
+                    ltc: false,
+                    xmr: false,
+                    wow: false,
+                    grin: false,
+                },
+                prices: false,
+                prices_provider: "coingecko".into(),
+                prices_interval_secs: 300,
+                tips: false,
+                nostr_identity: true,
+            },
+            chains: ChainConfig {
+                btc: utxo(),
+                ltc: utxo(),
+                xmr: lws(),
+                wow: lws(),
+                grin: GrinConfig {
+                    owner_api_url: String::new(),
+                    owner_api_secret: String::new(),
+                    wallet_password: String::new(),
+                    foreign_api_url: String::new(),
+                    node_api_url: String::new(),
+                    node_api_user: String::new(),
+                    node_api_pass: String::new(),
+                    node_foreign_api_url: String::new(),
+                    node_foreign_api_secret: String::new(),
+                },
+            },
+            pow: PowConfig {
+                enabled: false,
+                hmac_key: String::new(),
+                required: false,
+                cost: 100_000,
+                required_for_pubkeys: vec![],
+            },
+            admin: AdminConfig {
+                enabled: false,
+                bind: "127.0.0.1:8081".into(),
+                jwt_secret: String::new(),
+                key_integrity_secret: String::new(),
+                pubkeys: vec![],
+                max_keys: 8,
+                pending_key_ttl_days: 7,
+            },
+            landing: LandingConfig {
+                enabled: false,
+                expose_features: false,
+                expose_uptime: false,
+                stats_enabled: false,
+                stats_cache_hours: 24,
+            },
+            retention: RetentionConfig {
+                login_events_days: 90,
+                audit_days: 365,
+                erasure_enabled: false,
+                purge_login_events: true,
+                export_per_day: 3,
+            },
+        }
+    }
+
+    #[test]
+    fn valid_config_passes() {
+        assert!(valid().validate().is_ok());
+    }
+
+    #[test]
+    fn short_jwt_secret_rejected() {
+        let mut c = valid();
+        c.auth.jwt_secret = "tooshort".into();
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn placeholder_jwt_rejected_in_production() {
+        let mut c = valid();
+        c.environment = "production".into();
+        c.auth.jwt_secret = "CHANGE_ME_CHANGE_ME_CHANGE_ME_1234".into();
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn nostr_requires_public_api_url() {
+        let mut c = valid();
+        c.identity.public_api_url = None;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn missing_pepper_rejected() {
+        let mut c = valid();
+        c.secrets.seed_fingerprint_pepper.clear();
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn pow_enabled_requires_key() {
+        let mut c = valid();
+        c.pow.enabled = true;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn enabled_chain_requires_secret_in_production() {
+        let mut c = valid();
+        c.environment = "production".into();
+        c.features.chains.xmr = true; // xmr.lws_admin_key is empty
+        assert!(c.validate().is_err());
+    }
+}

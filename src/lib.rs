@@ -9,3 +9,5 @@
 //! wallet's generated TypeScript client.
 
 pub mod api;
+pub mod config;
+pub mod error;
