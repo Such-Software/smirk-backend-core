@@ -6,11 +6,10 @@
 
 use std::sync::Arc;
 
-use axum::{routing::get, Router};
 use sqlx::postgres::PgPoolOptions;
 
 use smirk_backend_core::{
-    api::health, config::Config, core::session::SessionManager, infra::db::Database, AppState,
+    build_router, config::Config, core::session::SessionManager, infra::db::Database, AppState,
 };
 
 #[tokio::main]
@@ -57,15 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    let api_v1 = smirk_backend_core::api::auth::routes()
-        .merge(smirk_backend_core::api::website::routes())
-        .merge(smirk_backend_core::api::users::routes());
-
-    let app = Router::new()
-        .route("/health", get(health::health))
-        .merge(smirk_backend_core::api::nip05::routes())
-        .nest("/api/v1", api_v1)
-        .with_state(state);
+    let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("smirk-backend-core listening on http://{addr}");

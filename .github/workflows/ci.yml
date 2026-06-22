@@ -51,6 +51,29 @@ jobs:
       - run: cargo test --locked
       - run: cargo test --doc
 
+  integration:
+    name: integration (postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: smirk
+          POSTGRES_PASSWORD: smirk
+          POSTGRES_DB: smirk_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      # Fundless L1 harness: a throwaway DB. The harness sets its own non-secret
+      # test JWT/peppers internally.
+      TEST_DATABASE_URL: postgres://smirk:smirk@localhost:5432/smirk_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --test auth_flow --test db_queries
+
   supply-chain:
     name: cargo-deny
     runs-on: ubuntu-latest
