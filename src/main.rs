@@ -43,9 +43,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         web_challenges: Arc::default(),
     });
 
+    // Periodic GC of expired website-auth challenges. Bounds the single-node
+    // in-memory store so the unauthenticated challenge endpoint cannot grow it
+    // without limit. (The fleet path moves this state to a shared store.)
+    {
+        let challenges = state.web_challenges.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(120));
+            loop {
+                tick.tick().await;
+                challenges.write().await.retain(|_, c| !c.is_expired());
+            }
+        });
+    }
+
+    let api_v1 = smirk_backend_core::api::auth::routes()
+        .merge(smirk_backend_core::api::website::routes())
+        .merge(smirk_backend_core::api::users::routes());
+
     let app = Router::new()
         .route("/health", get(health::health))
-        .nest("/api/v1", smirk_backend_core::api::auth::routes())
+        .merge(smirk_backend_core::api::nip05::routes())
+        .nest("/api/v1", api_v1)
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;

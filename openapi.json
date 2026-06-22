@@ -13,6 +13,39 @@
     "version": "0.3.0"
   },
   "paths": {
+    "/.well-known/nostr.json": {
+      "get": {
+        "tags": [
+          "nip05"
+        ],
+        "summary": "NIP-05 resolution for Smirk usernames.",
+        "description": "Looks up the user by lowercased `?name=` and, if they have a linked\n`nostr_pubkey`, returns it in `names` (with the default relay hints under\n`relays`). An unknown name, an unlinked user, or an absent `name` parameter\nall return an empty document — this endpoint never errors on the lookup path\nand never discloses which usernames exist.",
+        "operationId": "well_known_nostr",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "query",
+            "description": "NIP-05 local part to resolve",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "NIP-05 directory document (empty when unresolved)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WellKnownResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/auth/check-restore": {
       "post": {
         "tags": [
@@ -242,6 +275,79 @@
         }
       }
     },
+    "/auth/website/challenge": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Issue a website-auth challenge bound to the requesting origin.",
+        "description": "The challenge is stored in `state.web_challenges` keyed by its own nonce and\nexpires shortly (see [`WebChallenge`]). The returned `challenge` message is\nwhat the wallet signs; `challenge_id` is the nonce to present at verify.",
+        "operationId": "website_challenge",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebsiteChallengeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Website authentication challenge created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebsiteChallengeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid origin"
+          }
+        }
+      }
+    },
+    "/auth/website/verify": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Verify a website-auth signature and mint a `Platform::Web` session.",
+        "description": "The challenge is CONSUMED (removed from the map) before any signature work,\nso it is strictly single-use: a replayed `challenge_id` — or the loser of two\nconcurrent verifies — finds nothing and is rejected. After consume we check\nexpiry, verify the signature over the challenge message with the algorithm\nfor the submitted asset, resolve the ALREADY-registered user by the proven\nkey's `pubkey_hash` (never creating one), and issue a session. All failure\nmessages are literals (no oracle).",
+        "operationId": "website_verify",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebsiteVerifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Website authentication verified; session issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid asset or signature format"
+          },
+          "401": {
+            "description": "Invalid/expired challenge, bad signature, or unknown wallet"
+          }
+        }
+      }
+    },
     "/health": {
       "get": {
         "tags": [
@@ -260,6 +366,220 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/keys": {
+      "post": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Register or update one of the authenticated user's per-asset public keys.",
+        "description": "Idempotent: the DB upsert keys on `(user_id, asset, key_type)`, so re-posting\nthe same asset replaces the stored key material in place.",
+        "operationId": "register_key",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Key registered or updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserKeyInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid asset"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          }
+        }
+      }
+    },
+    "/users/by-username/{username}": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Resolve a username to its user and that user's receiving public keys.",
+        "description": "Public: this is how a sender discovers where to send. The lookup is\ncase-insensitive (the handle is canonicalized lowercase). An unknown handle\nreturns the same constant-shape response with `registered: false`.",
+        "operationId": "lookup_username",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "description": "Username to resolve",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Username resolution result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LookupUsernameResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/users/me/username": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "The authenticated user's own username (or `null`).",
+        "operationId": "get_my_username",
+        "responses": {
+          "200": {
+            "description": "Caller's username",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MyUsernameResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Claim or update the authenticated user's username.",
+        "description": "The submitted value is lowercased, validated, and checked against the\nreserved list before the DB write. The UNIQUE constraint is the atomic claim:\na collision (taken or reserved) is a 409, never a 500.",
+        "operationId": "set_username",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetUsernameRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Username claimed or updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetUsernameResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "409": {
+            "description": "Username is taken or reserved"
+          }
+        }
+      }
+    },
+    "/users/{user_id}/keys": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "List a user's per-asset receiving public keys.",
+        "description": "Public: a sender fetches these to construct a payment to `user_id`.",
+        "operationId": "get_user_keys",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "User id (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The user's public keys",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserKeysResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed user id"
+          }
+        }
+      }
+    },
+    "/users/{user_id}/keys/{asset}": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Fetch a user's receiving public key for one asset.",
+        "operationId": "get_user_key_for_asset",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "User id (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "asset",
+            "in": "path",
+            "description": "Asset (btc, ltc, xmr, wow, grin)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The user's key for this asset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserKeyInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid asset"
+          },
+          "404": {
+            "description": "User has no key for this asset"
           }
         }
       }
@@ -287,6 +607,29 @@
               "null"
             ],
             "description": "XMR/WOW only: public spend key."
+          }
+        }
+      },
+      "AssetSignature": {
+        "type": "object",
+        "description": "One asset's signature over the challenge message.",
+        "required": [
+          "asset",
+          "signature",
+          "public_key"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string",
+            "description": "Asset whose key produced the signature (`btc`, `ltc`, `xmr`, `wow`, `grin`)."
+          },
+          "public_key": {
+            "type": "string",
+            "description": "The public key that produced the signature (format depends on asset)."
+          },
+          "signature": {
+            "type": "string",
+            "description": "Signature over the challenge message. BIP-137 base64 for BTC/LTC; 64-byte\nhex Ed25519 for XMR/WOW/Grin."
           }
         }
       },
@@ -487,6 +830,56 @@
           }
         }
       },
+      "LookupUsernameResponse": {
+        "type": "object",
+        "description": "Result of resolving a username. Constant-shape: the same fields are always\npresent, so the response is not a structure oracle.",
+        "required": [
+          "registered"
+        ],
+        "properties": {
+          "public_keys": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PublicKeysInfo",
+                "description": "The user's per-asset receiving public keys, if registered."
+              }
+            ]
+          },
+          "registered": {
+            "type": "boolean",
+            "description": "Whether a user owns this username."
+          },
+          "user_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The resolved user id (UUID string), if registered."
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The canonical (lowercased) username, if registered."
+          }
+        }
+      },
+      "MyUsernameResponse": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The caller's username, or `null` if they have not claimed one."
+          }
+        }
+      },
       "NostrLinkRequest": {
         "type": "object",
         "description": "Link a Nostr identity to the authenticated user. This is a STATE CHANGE, so\nit carries a signed-action proof, not a login-grade token.",
@@ -517,6 +910,42 @@
           }
         }
       },
+      "PublicKeysInfo": {
+        "type": "object",
+        "description": "A user's per-asset receiving public keys, by asset.",
+        "properties": {
+          "btc": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "grin": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ltc": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "wow": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "xmr": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "RefreshTokenRequest": {
         "type": "object",
         "required": [
@@ -525,6 +954,55 @@
         "properties": {
           "refresh_token": {
             "type": "string"
+          }
+        }
+      },
+      "RegisterKeyRequest": {
+        "type": "object",
+        "description": "Register or update one of the caller's per-asset public keys.",
+        "required": [
+          "asset",
+          "public_key"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string",
+            "description": "Asset the key is for (`btc`, `ltc`, `xmr`, `wow`, `grin`)."
+          },
+          "public_key": {
+            "type": "string",
+            "description": "The public key (format depends on the asset)."
+          },
+          "public_spend_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "XMR/WOW only: the public spend key."
+          }
+        }
+      },
+      "SetUsernameRequest": {
+        "type": "object",
+        "required": [
+          "username"
+        ],
+        "properties": {
+          "username": {
+            "type": "string",
+            "description": "Desired username (3-32 chars, lowercase `[a-z0-9_]`, no leading/trailing\nunderscore). Submitted values are lowercased before validation."
+          }
+        }
+      },
+      "SetUsernameResponse": {
+        "type": "object",
+        "required": [
+          "username"
+        ],
+        "properties": {
+          "username": {
+            "type": "string",
+            "description": "The username as stored (lowercased)."
           }
         }
       },
@@ -550,6 +1028,132 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "UserKeyInfo": {
+        "type": "object",
+        "description": "A single per-asset public key.",
+        "required": [
+          "asset",
+          "public_key"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string",
+            "description": "Asset the key is for (lowercase: `btc`, `ltc`, `xmr`, `wow`, `grin`)."
+          },
+          "public_key": {
+            "type": "string"
+          },
+          "public_spend_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "XMR/WOW only: the public spend key."
+          }
+        }
+      },
+      "UserKeysResponse": {
+        "type": "object",
+        "description": "A user's full set of per-asset public keys.",
+        "required": [
+          "keys"
+        ],
+        "properties": {
+          "keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UserKeyInfo"
+            }
+          }
+        }
+      },
+      "WebsiteChallengeRequest": {
+        "type": "object",
+        "description": "Request a website-auth challenge for a calling origin.",
+        "required": [
+          "origin"
+        ],
+        "properties": {
+          "origin": {
+            "type": "string",
+            "description": "Origin of the requesting website (e.g. `https://smirk.cash`). Bound into\nthe challenge message so a signature for one origin is not reusable at\nanother."
+          }
+        }
+      },
+      "WebsiteChallengeResponse": {
+        "type": "object",
+        "description": "The challenge to sign, with the handle and expiry the wallet echoes back.",
+        "required": [
+          "challenge",
+          "challenge_id",
+          "expires_at"
+        ],
+        "properties": {
+          "challenge": {
+            "type": "string",
+            "description": "The exact message string to sign with the wallet's key."
+          },
+          "challenge_id": {
+            "type": "string",
+            "description": "Opaque handle to present at verify time (this is the challenge nonce)."
+          },
+          "expires_at": {
+            "type": "string",
+            "description": "When the challenge expires (RFC 3339)."
+          }
+        }
+      },
+      "WebsiteVerifyRequest": {
+        "type": "object",
+        "description": "Verify a website-auth challenge with a single asset signature.",
+        "required": [
+          "challenge_id",
+          "signature"
+        ],
+        "properties": {
+          "challenge_id": {
+            "type": "string",
+            "description": "The `challenge_id` returned by [`website_challenge`] (the challenge nonce)."
+          },
+          "signature": {
+            "$ref": "#/components/schemas/AssetSignature",
+            "description": "The wallet's signature over the challenge message."
+          }
+        }
+      },
+      "WellKnownResponse": {
+        "type": "object",
+        "description": "NIP-05 well-known document.\n\n* `names` maps each resolved local part to its x-only Nostr pubkey (hex).\n* `relays` maps each returned pubkey to a list of recommended relay URLs.\n\nBoth maps are empty when the name is unknown, unlinked, or omitted.",
+        "required": [
+          "names",
+          "relays"
+        ],
+        "properties": {
+          "names": {
+            "type": "object",
+            "description": "`{ local_part: nostr_pubkey_hex }`. Empty when nothing resolved.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "relays": {
+            "type": "object",
+            "description": "`{ nostr_pubkey_hex: [relay_url, ...] }`. Empty when nothing resolved.",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           }
         }
       }
