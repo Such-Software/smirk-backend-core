@@ -1,0 +1,36 @@
+# cargo-deny configuration — supply-chain gate for the public backend.
+# Run locally with: cargo deny check
+
+[advisories]
+version = 2
+# Fail on known-vulnerable or yanked crates (RUSTSEC advisory DB).
+yanked = "deny"
+
+[bans]
+# Duplicate versions bloat the build and the audit surface; surface but don't block.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[licenses]
+version = 2
+# Permissive + weak-copyleft licenses we accept in the dependency tree.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "OpenSSL",
+]
+confidence-threshold = 0.9
+
+[sources]
+# Only crates.io; no unvetted git or alternate registries.
+unknown-registry = "deny"
+unknown-git = "deny"

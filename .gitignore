@@ -1,0 +1,32 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+
+# Cargo.lock IS tracked — this is a deployable binary, so we want reproducible builds.
+# (Do not ignore it.)
+
+# Environment / secrets — never commit anything but the example.
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+secrets/
+secret_store/
+
+# Runtime / data
+*.log
+data/
+*.sqlite
+*.db
+
+# Tor hidden-service keys (admin onion) must never enter the repo.
+tor/
+hs_ed25519_secret_key
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,115 @@
+[package]
+name = "smirk-backend-core"
+version = "0.3.0"
+edition = "2021"
+authors = ["John Winter Murphy <jw@such.software>"]
+description = "Open, self-hostable backend for the Smirk non-custodial multi-chain wallet"
+repository = "https://github.com/smirk-cash/smirk-backend-core"
+# license: TBD — deciding MIT vs AGPL-3.0-or-later (see README). Left unset until chosen.
+# Not a library for crates.io; this is a deployable server. Guard against accidental publish.
+publish = false
+
+[lib]
+name = "smirk_backend_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "smirk-backend-core"
+path = "src/main.rs"
+
+# Additional binaries (gen_openapi, smirk-admin, ...) are auto-discovered from src/bin/*.rs.
+
+[dependencies]
+# Async Runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Web Framework
+axum = { version = "0.7", features = ["ws", "macros"] }
+axum-extra = { version = "0.9", features = ["typed-header"] }
+tower = { version = "0.4", features = ["limit", "timeout", "load-shed", "util"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "compression-gzip"] }
+tower_governor = "0.4"
+governor = "0.6"
+
+# Database
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "ipnetwork"] }
+ipnetwork = "0.20"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# OpenAPI generation (autodocs): the public API spec is derived from the handlers
+# via utoipa, then drives the generated TypeScript client. Single source of truth.
+utoipa = { version = "5", features = ["chrono", "uuid"] }
+
+# HTTP Client
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+
+# Cryptography
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+jsonwebtoken = "9.2"
+rand = "0.8"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+urlencoding = "2.1"
+base64 = "0.22"
+aes-gcm = "0.10"
+# Proof-of-work gate for wallet registration (ALTCHA v2, PBKDF2/SHA-256).
+altcha = "0.1"
+# Constant-time byte comparison for token/secret verification. Never use == on secrets.
+subtle = "2.5"
+# secp256k1 for Grin ECDH/ECDSA and Nostr (NIP-98) BIP-340 schnorr verification.
+k256 = { version = "0.13", features = ["ecdh", "ecdsa", "schnorr"] }
+# Ed25519 for website auth signature verification.
+ed25519-dalek = "2.1"
+
+# Bitcoin/Litecoin RPC
+bitcoincore-rpc = "0.18"
+
+# Electrum protocol (balance/UTXO/history via public or self-hosted servers)
+tokio-rustls = "0.25"
+rustls = "0.22"
+rustls-pki-types = "1.0"
+webpki-roots = "0.26"
+bs58 = "0.5"
+
+# Monero/Wownero address parsing
+monero = "0.20"
+
+# ZeroMQ (LWS real-time 0-conf notifications)
+zeromq = "0.4"
+
+# MessagePack (LWS msgpack wire format)
+rmp-serde = "1.3"
+
+# URL parsing
+url = "2.5"
+
+# Configuration
+dotenvy = "0.15"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Async utilities
+futures = "0.3"
+async-trait = "0.1"
+
+# Validation
+validator = { version = "0.16", features = ["derive"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+mockall = "0.12"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "unwind"
+strip = true

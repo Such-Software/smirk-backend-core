@@ -1,0 +1,62 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "smirk-backend-core",
+    "description": "Open, self-hostable backend for the Smirk non-custodial multi-chain wallet.",
+    "contact": {
+      "name": "John Winter Murphy",
+      "email": "jw@such.software"
+    },
+    "license": {
+      "name": ""
+    },
+    "version": "0.3.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Liveness probe.",
+        "description": "Returns `200` with `{ \"status\": \"ok\" }` whenever the server is up. Used by\nload balancers and uptime checks; requires no authentication.",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "Service is up",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "description": "Liveness response.",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "Always `\"ok\"` when the service is reachable."
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "system",
+      "description": "Service health and metadata."
+    }
+  ]
+}
