@@ -4,5 +4,7 @@
 //! this layer straightforward to test in isolation.
 
 pub mod crypto;
+pub mod pow;
+pub mod session;
 
-// session, pow, address, and grin_confirmation are wired in as they land.
+// address and grin_confirmation are wired in as they land.
