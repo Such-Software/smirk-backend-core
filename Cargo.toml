@@ -113,3 +113,5 @@ lto = true
 codegen-units = 1
 panic = "unwind"
 strip = true
+# Trap integer overflow in release too (defense-in-depth for crypto/auth paths).
+overflow-checks = true
