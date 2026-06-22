@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::error::AppError;
 use crate::models::db::{NewUser, User};
 
-use super::Database;
+use super::{unique_violation_as, Database};
 
 /// Explicit `users` columns (matches `User` field names; FromRow maps by name).
 const USER_COLS: &str = "id, username, pubkey_hash, nostr_pubkey, wallet_birthday, \
@@ -247,16 +247,5 @@ impl Database {
                 .fetch_one(self.pool())
                 .await?,
         )
-    }
-}
-
-/// Map a unique-constraint violation to a 409 CONFLICT with `msg`; pass other
-/// errors through.
-fn unique_violation_as(msg: &'static str) -> impl Fn(sqlx::Error) -> AppError {
-    move |e| match &e {
-        sqlx::Error::Database(db_err) if db_err.is_unique_violation() => {
-            AppError::Conflict(msg.to_string())
-        }
-        _ => AppError::from(e),
     }
 }

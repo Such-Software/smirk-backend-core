@@ -6,7 +6,15 @@
 //! `seed_fingerprint`) are peppered inside these methods so the plaintext never
 //! reaches a column and the peppering cannot drift between call sites.
 
+mod audit;
+mod grin_slatepacks;
+mod login_events;
+mod restore_attempts;
+mod sessions;
+mod user_keys;
 mod users;
+
+pub use login_events::LoginStats;
 
 use sqlx::PgPool;
 
@@ -36,9 +44,9 @@ impl Database {
         &self.pool
     }
 
-    /// Salt for IP hashing (used by login_events / restore_attempts).
-    pub fn ip_salt(&self) -> &str {
-        &self.ip_salt
+    /// Salted hash of a client IP for analytics/abuse tables (never store raw).
+    pub(crate) fn hash_ip(&self, ip: &str) -> String {
+        peppered_hex(&self.ip_salt, "ip", ip)
     }
 
     /// Pepper an identity value for storage/lookup (see [`peppered_hex`]).
@@ -52,5 +60,16 @@ impl Database {
             .fetch_one(&self.pool)
             .await?;
         Ok(true)
+    }
+}
+
+/// Map a unique-constraint violation to a 409 CONFLICT with `msg`; pass other
+/// errors through. Shared by the entity query modules.
+pub(crate) fn unique_violation_as(msg: &'static str) -> impl Fn(sqlx::Error) -> AppError {
+    move |e| match &e {
+        sqlx::Error::Database(db_err) if db_err.is_unique_violation() => {
+            AppError::Conflict(msg.to_string())
+        }
+        _ => AppError::from(e),
     }
 }
