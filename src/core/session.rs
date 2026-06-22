@@ -318,6 +318,6 @@ mod tests {
         for p in [Platform::Extension, Platform::Web, Platform::Nostr] {
             assert_eq!(Platform::from_str(p.as_str()).unwrap(), p);
         }
-        assert!(Platform::from_str("telegram").is_err());
+        assert!(Platform::from_str("carrier-pigeon").is_err());
     }
 }
