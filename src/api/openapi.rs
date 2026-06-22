@@ -14,8 +14,34 @@ use utoipa::OpenApi;
         version = "0.3.0",
         description = "Open, self-hostable backend for the Smirk non-custodial multi-chain wallet."
     ),
-    paths(crate::api::health::health),
-    components(schemas(crate::api::health::HealthResponse)),
-    tags((name = "system", description = "Service health and metadata."))
+    paths(
+        crate::api::health::health,
+        crate::api::auth::pow_challenge,
+        crate::api::auth::extension_register,
+        crate::api::auth::check_restore,
+        crate::api::auth::refresh_token,
+        crate::api::auth::logout,
+        crate::api::auth::get_me,
+        crate::api::auth::nostr_login,
+        crate::api::auth::nostr_link,
+    ),
+    components(schemas(
+        crate::api::health::HealthResponse,
+        crate::api::auth::AuthResponse,
+        crate::api::auth::UserInfo,
+        crate::api::auth::AssetPublicKey,
+        crate::api::auth::ExtensionRegisterRequest,
+        crate::api::auth::CheckRestoreRequest,
+        crate::api::auth::CheckRestoreResponse,
+        crate::api::auth::RefreshTokenRequest,
+        crate::api::auth::LogoutRequest,
+        crate::api::auth::LogoutResponse,
+        crate::api::auth::NostrLinkRequest,
+        crate::api::auth::NostrLinkResponse,
+    )),
+    tags(
+        (name = "system", description = "Service health and metadata."),
+        (name = "auth", description = "Wallet authentication: registration, restore, refresh, sessions, Nostr identity.")
+    )
 )]
 pub struct ApiDoc;

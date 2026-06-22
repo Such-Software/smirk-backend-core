@@ -13,6 +13,235 @@
     "version": "0.3.0"
   },
   "paths": {
+    "/auth/check-restore": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Check whether a wallet restore is valid (created here + keys match).",
+        "description": "Two governors run BEFORE any user lookup: a per-IP limit\n([`RESTORE_IP_THRESHOLD`]) that bounds distinct-fingerprint scanning, and a\nper-fingerprint failure limit ([`RESTORE_FAIL_THRESHOLD`]); either trips a\n429. The per-IP limit uses [`client_ip`] so an untrusted `X-Forwarded-For`\ncannot evade it. Every attempt is recorded (peppered fingerprint, salted IP).\n\nThe known/unknown branches are equalized: the unknown branch runs the same\nkey-comparison loop against an empty stored set, so the two paths do the same\nwork and the response does not become a timing oracle for existence beyond the\nalready-intentional `exists` field.",
+        "operationId": "check_restore",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckRestoreRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Restore validation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckRestoreResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/extension": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Register a new extension wallet or authenticate an existing one.",
+        "description": "The BTC pubkey hash is the unique identity. A signed timestamp proves control\nof the BTC private key (defeats registration with a stolen public key). When\nthe PoW gate applies and the wallet is new, a valid `altcha_solution` is\nrequired; a returning user (a known `pubkey_hash`) bypasses PoW.\n\n## Derivation rotation is authenticated (account-takeover defense)\n\nA known `seed_fingerprint` at a NEW `pubkey_hash` (the wallet changed its\nderivation scheme) may re-point the existing user row — but ONLY when the\nrequest also carries a `rotation_signature` that verifies against the BTC key\nalready on file for that user (proving control of the seed-derived key, not\nmerely knowledge of the fingerprint, which `check_restore` discloses and is\nnot secret). A bare fingerprint match WITHOUT a valid rotation proof is\ntreated as a brand-new identity: a fresh user row is created on the new\n`pubkey_hash` and the matched victim row is never modified. The rotation path\nis gated by PoW exactly like any other new-pubkey registration.",
+        "operationId": "extension_register",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtensionRegisterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Wallet registered or authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Revoke the session backing a refresh token. Idempotent: an unknown or\nalready-revoked token still returns success (logout should never error).",
+        "operationId": "logout",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LogoutRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Session revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogoutResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/me": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "The authenticated user's own info.",
+        "operationId": "get_me",
+        "responses": {
+          "200": {
+            "description": "Current authenticated user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserInfo"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          }
+        }
+      }
+    },
+    "/auth/nostr": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Sign in with a Nostr identity (NIP-98 HTTP Auth, login grade).",
+        "description": "The `Nostr <base64(event)>` token is read from the `Authorization` header and\nverified against the canonical `config.identity.public_api_url` + `/auth/nostr`\n(never the request Host). The npub must ALREADY be linked to a user (see\n[`nostr_link`]); this endpoint NEVER creates a user — an unlinked npub is 401.",
+        "operationId": "nostr_login",
+        "responses": {
+          "200": {
+            "description": "Session for the linked Nostr identity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid NIP-98 token or no linked account"
+          }
+        }
+      }
+    },
+    "/auth/nostr/link": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Link a Nostr identity (npub) to the authenticated user.",
+        "description": "Dual auth: the Bearer JWT identifies the user; a NIP-98 *signed-action* proof\n(not a login token) proves control of the npub AND binds a server-issued\nsingle-use `nonce`, the purpose `nostr_link`, and this exact request via the\nrequest-descriptor hash. On success the npub is stored so a later\n[`nostr_login`] resolves to the same wallet; a collision is 409.\n\n## Descriptor binding is a CONTRACT (not an implementation detail)\n\nThe `payload` tag binds `descriptor_sha256(request_descriptor(\"POST\",\n\"/api/v1/auth/nostr/link\", \"\", b\"\"))` — an EMPTY body hash, with no query.\nThe JSON `{nostr_token, nonce}` rides in the HTTP body but is deliberately NOT\npart of the signed descriptor (it carries the proof itself, so it cannot also\nbe inside it). The wallet MUST build the identical descriptor. This exact\nmethod/path/query/empty-body shape is a cross-impl contract and must be pinned\nin a shared test vector (mirroring the nip98.rs interop test) before\n`consume_link_nonce` is un-stubbed — otherwise the binding silently breaks or\nweakens at integration time.\n\nTODO(operator-surface): the server-nonce *issue* (`GET\n/auth/nostr/link-challenge`, rand 32 bytes, stored) + the ATOMIC single-use\n*consume* (a `DELETE ... WHERE nonce=$1 RETURNING` so a replay loses the race,\nnever check-then-delete), plus the wallet's signed-action token builder, are\nwired in the operator-surface phase. Until then [`consume_link_nonce`] always\nreturns `false` and this handler FAILS CLOSED: it validates the full proof\nshape but refuses every link, because it cannot yet prove the nonce was issued\nby this server and is unused.",
+        "operationId": "nostr_link",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NostrLinkRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Linked npub",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NostrLinkResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid proof or missing session"
+          },
+          "409": {
+            "description": "npub already linked to another account"
+          }
+        }
+      }
+    },
+    "/auth/pow-challenge": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Issue a fresh proof-of-work challenge for the wallet to solve before calling\n`/auth/extension`. The solved payload is sent back as the request's\n`altcha_solution`.",
+        "description": "Stateless: the challenge embeds an HMAC signature over its own fields plus an\nexpiry, so no issued-challenge store is needed. See [`crate::core::pow`].",
+        "operationId": "pow_challenge",
+        "responses": {
+          "200": {
+            "description": "Proof-of-work challenge for wallet registration"
+          }
+        }
+      }
+    },
+    "/auth/refresh": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Rotate a refresh token.",
+        "description": "Verifies the JWT, then re-looks-up the ACTIVE session by peppered hash\n(`get_session_by_token_hash` already filters revoked/expired) — a missing row\nmeans the token was revoked, expired, or already rotated, and is rejected.\nThe session's `user_id` is asserted equal to the JWT `sub` (defense-in-depth\nagainst any future token-confusion class). The old session is revoked and a\nfresh pair issued (revoke-then-issue); the `revoke_session` race-loser also\nrejects, so a stolen token cannot be reused.",
+        "operationId": "refresh_token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Token refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/health": {
       "get": {
         "tags": [
@@ -38,6 +267,191 @@
   },
   "components": {
     "schemas": {
+      "AssetPublicKey": {
+        "type": "object",
+        "description": "A per-asset public key submitted by the wallet.",
+        "required": [
+          "asset",
+          "public_key"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string"
+          },
+          "public_key": {
+            "type": "string"
+          },
+          "public_spend_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "XMR/WOW only: public spend key."
+          }
+        }
+      },
+      "AuthResponse": {
+        "type": "object",
+        "description": "Successful session response: a JWT pair plus minimal user info.",
+        "required": [
+          "access_token",
+          "refresh_token",
+          "expires_in",
+          "user",
+          "is_new"
+        ],
+        "properties": {
+          "access_token": {
+            "type": "string"
+          },
+          "expires_in": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Access-token lifetime in seconds."
+          },
+          "is_new": {
+            "type": "boolean",
+            "description": "`true` when this request created the user (extension registration only)."
+          },
+          "refresh_token": {
+            "type": "string"
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserInfo"
+          }
+        }
+      },
+      "CheckRestoreRequest": {
+        "type": "object",
+        "description": "Ask whether a wallet (by seed fingerprint) was created on this backend, and\nwhether the submitted keys match.",
+        "required": [
+          "fingerprint",
+          "keys"
+        ],
+        "properties": {
+          "fingerprint": {
+            "type": "string",
+            "description": "Seed fingerprint (16 or 64 hex chars)."
+          },
+          "keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AssetPublicKey"
+            },
+            "description": "Submitted per-asset public keys, for verification."
+          }
+        }
+      },
+      "CheckRestoreResponse": {
+        "type": "object",
+        "description": "Restore-check result. Constant-shape: the same fields are always present so\nthe response is not a structure oracle, and `user_id` is never returned (no\nenumeration).\n\nNOTE: `exists` is an INTENTIONAL disclosure (the wallet uses it to decide\nwhether to offer a restore). It is throttled per fingerprint AND per IP, and\nnothing downstream treats fingerprint-existence as authority — the\nderivation-rotation path in [`extension_register`] requires a key-control\nproof, not a bare fingerprint.",
+        "required": [
+          "exists"
+        ],
+        "properties": {
+          "exists": {
+            "type": "boolean",
+            "description": "Whether the fingerprint exists on this backend."
+          },
+          "keys_valid": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether every submitted key matches the stored key. `None` when the\nfingerprint does not exist."
+          },
+          "wow_start_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "WOW scan-start height, if the wallet was created here."
+          },
+          "xmr_start_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "XMR scan-start height, if the wallet was created here."
+          }
+        }
+      },
+      "ExtensionRegisterRequest": {
+        "type": "object",
+        "description": "Register a new extension wallet or re-authenticate an existing one.",
+        "required": [
+          "keys",
+          "signed_timestamp",
+          "signature"
+        ],
+        "properties": {
+          "altcha_solution": {
+            "type": "object",
+            "description": "Optional proof-of-work solution. Required when the PoW gate applies to\nthis pubkey (see [`pow_applies`]); otherwise ignored."
+          },
+          "keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AssetPublicKey"
+            },
+            "description": "Public keys for each supported asset. A `btc` key is required (it is the\nidentity)."
+          },
+          "rotation_signature": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Derivation-rotation proof: BIP-137 base64 signature of the SAME\n`smirk-auth-{signed_timestamp}` message under the BTC key ALREADY ON FILE\nfor the user identified by `seed_fingerprint`. Required to re-point an\nexisting user row; without it (or if it does not verify against the stored\nkey) a fingerprint match is treated as a brand-new identity and the\nexisting row is never touched. See [`extension_register`]."
+          },
+          "seed_fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Seed fingerprint `hex(SHA256(SHA256(seed))[..])`. Used for restore and to\nLOCATE a candidate user row for the derivation-rotation path. By itself it\nis NOT authority: a rotation also requires `rotation_signature` below."
+          },
+          "signature": {
+            "type": "string",
+            "description": "BIP-137 base64 signature of `smirk-auth-{signed_timestamp}` under the\nSUBMITTED (new) BTC key. Proves control of the key in `keys`."
+          },
+          "signed_timestamp": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds that were signed to prove BTC key ownership."
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional reserved username."
+          },
+          "wallet_birthday": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Wallet creation time (unix seconds), to bound chain scans."
+          },
+          "wow_start_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "xmr_start_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        }
+      },
       "HealthResponse": {
         "type": "object",
         "description": "Liveness response.",
@@ -50,6 +464,94 @@
             "description": "Always `\"ok\"` when the service is reachable."
           }
         }
+      },
+      "LogoutRequest": {
+        "type": "object",
+        "required": [
+          "refresh_token"
+        ],
+        "properties": {
+          "refresh_token": {
+            "type": "string"
+          }
+        }
+      },
+      "LogoutResponse": {
+        "type": "object",
+        "required": [
+          "success"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "NostrLinkRequest": {
+        "type": "object",
+        "description": "Link a Nostr identity to the authenticated user. This is a STATE CHANGE, so\nit carries a signed-action proof, not a login-grade token.",
+        "required": [
+          "nostr_token",
+          "nonce"
+        ],
+        "properties": {
+          "nonce": {
+            "type": "string",
+            "description": "The server-issued single-use nonce the signed action must bind (the\nevent's `challenge` tag)."
+          },
+          "nostr_token": {
+            "type": "string",
+            "description": "The `Nostr <base64(event)>` signed-action token proving control of the\nnpub AND committing to the server nonce + this request."
+          }
+        }
+      },
+      "NostrLinkResponse": {
+        "type": "object",
+        "required": [
+          "nostr_pubkey"
+        ],
+        "properties": {
+          "nostr_pubkey": {
+            "type": "string",
+            "description": "The linked x-only Nostr pubkey (hex)."
+          }
+        }
+      },
+      "RefreshTokenRequest": {
+        "type": "object",
+        "required": [
+          "refresh_token"
+        ],
+        "properties": {
+          "refresh_token": {
+            "type": "string"
+          }
+        }
+      },
+      "UserInfo": {
+        "type": "object",
+        "description": "Minimal, non-enumerable user info returned to a signed-in client.",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "nostr_pubkey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Linked Nostr pubkey (x-only hex), if any."
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
       }
     }
   },
@@ -57,6 +559,10 @@
     {
       "name": "system",
       "description": "Service health and metadata."
+    },
+    {
+      "name": "auth",
+      "description": "Wallet authentication: registration, restore, refresh, sessions, Nostr identity."
     }
   ]
 }

@@ -45,6 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .route("/health", get(health::health))
+        .nest("/api/v1", smirk_backend_core::api::auth::routes())
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
