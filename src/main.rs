@@ -80,6 +80,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("smirk-backend-core listening on http://{addr}");
-    axum::serve(listener, app).await?;
+    // ConnectInfo carries the peer IP that the per-IP rate limiter keys on.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

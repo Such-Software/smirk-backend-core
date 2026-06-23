@@ -23,6 +23,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::http::{header, HeaderValue, Method};
 use axum::{routing::get, Router};
 use tokio::sync::RwLock;
+use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::timeout::TimeoutLayer;
@@ -38,6 +39,15 @@ const MAX_BODY_BYTES: usize = 1024 * 1024;
 /// Global request deadline (backstop above the chain clients' own ~30s timeouts,
 /// so their errors surface first for chain calls; bounds any slow handler).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+// Per-IP rate-limit tiers (one token replenished per period; `burst` = bucket).
+// STRICT throttles the unauthenticated, abuse-prone surface (auth + website);
+// NORMAL covers the authenticated wallet/identity API. Sane defaults; operator-
+// tunable config can follow.
+const STRICT_PERIOD_MS: u64 = 500; // ~2 req/s sustained
+const STRICT_BURST: u32 = 20;
+const NORMAL_PERIOD_MS: u64 = 100; // ~10 req/s sustained
+const NORMAL_BURST: u32 = 60;
 
 /// Shared application state injected into handlers via `State<Arc<AppState>>`.
 #[derive(Clone)]
@@ -59,10 +69,34 @@ pub struct AppState {
 pub fn build_router(state: Arc<AppState>) -> Router {
     let cors = cors_layer(&state.config);
 
+    // Per-IP rate limiting (PeerIpKeyExtractor reads ConnectInfo — `main` serves
+    // with `into_make_service_with_connect_info`; the test harness injects it).
+    // Tiered: stricter on the unauthenticated auth/website surface (closes the
+    // website-challenge growth vector), looser on the wallet/identity API.
+    let mut strict_cfg = GovernorConfigBuilder::default();
+    strict_cfg
+        .per_millisecond(STRICT_PERIOD_MS)
+        .burst_size(STRICT_BURST);
+    let strict = GovernorLayer {
+        config: Arc::new(strict_cfg.finish().expect("valid strict governor config")),
+    };
+
+    let mut normal_cfg = GovernorConfigBuilder::default();
+    normal_cfg
+        .per_millisecond(NORMAL_PERIOD_MS)
+        .burst_size(NORMAL_BURST);
+    let normal = GovernorLayer {
+        config: Arc::new(normal_cfg.finish().expect("valid normal governor config")),
+    };
+
     let api_v1 = api::auth::routes()
         .merge(api::website::routes())
-        .merge(api::users::routes())
-        .merge(api::wallet::routes());
+        .layer(strict)
+        .merge(
+            api::users::routes()
+                .merge(api::wallet::routes())
+                .layer(normal),
+        );
 
     Router::new()
         .route("/health", get(api::health::health))

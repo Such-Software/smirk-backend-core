@@ -112,7 +112,18 @@ impl TestApp {
         token: Option<&str>,
         body: Option<Value>,
     ) -> (StatusCode, Value) {
-        let mut builder = Request::builder().method(method).uri(uri);
+        // The per-IP rate limiter keys on ConnectInfo; in production `main`
+        // supplies it via into_make_service_with_connect_info. oneshot requests
+        // don't, so inject a loopback peer (each test builds a fresh router with
+        // fresh limiter state, so this never trips across tests).
+        let mut builder =
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                    [127, 0, 0, 1],
+                    0,
+                ))));
         if let Some(t) = token {
             builder = builder.header("authorization", format!("Bearer {t}"));
         }
