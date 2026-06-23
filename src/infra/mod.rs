@@ -3,3 +3,4 @@
 
 pub mod db;
 pub mod electrum;
+pub mod lws;

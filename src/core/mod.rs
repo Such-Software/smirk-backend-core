@@ -5,6 +5,7 @@
 
 pub mod crypto;
 pub mod pow;
+pub mod secret;
 pub mod session;
 
 // address and grin_confirmation are wired in as they land.
