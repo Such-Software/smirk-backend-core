@@ -583,10 +583,268 @@
           }
         }
       }
+    },
+    "/wallet/utxo/balance": {
+      "post": {
+        "tags": [
+          "btc_ltc"
+        ],
+        "summary": "Confirmed/unconfirmed balance for a BTC/LTC address.",
+        "operationId": "balance",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddressRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Address balance in satoshis",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BalanceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid/disabled asset or address"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "503": {
+            "description": "Upstream node unavailable"
+          }
+        }
+      }
+    },
+    "/wallet/utxo/broadcast": {
+      "post": {
+        "tags": [
+          "btc_ltc"
+        ],
+        "summary": "Broadcast a finalized, signed BTC/LTC transaction.",
+        "operationId": "broadcast",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BroadcastRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Broadcast accepted; returns the txid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BroadcastResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid/disabled asset or malformed tx hex"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "503": {
+            "description": "Upstream node unavailable"
+          }
+        }
+      }
+    },
+    "/wallet/utxo/fee": {
+      "post": {
+        "tags": [
+          "btc_ltc"
+        ],
+        "summary": "Fee-rate estimate (sat/vB) for confirmation within `blocks` blocks.",
+        "operationId": "fee",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Fee estimate",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid/disabled asset"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "503": {
+            "description": "Upstream node unavailable"
+          }
+        }
+      }
+    },
+    "/wallet/utxo/history": {
+      "post": {
+        "tags": [
+          "btc_ltc"
+        ],
+        "summary": "Confirmed + mempool transaction history for a BTC/LTC address.",
+        "operationId": "history",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddressRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Transaction history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid/disabled asset or address"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "503": {
+            "description": "Upstream node unavailable"
+          }
+        }
+      }
+    },
+    "/wallet/utxo/tip": {
+      "post": {
+        "tags": [
+          "btc_ltc"
+        ],
+        "summary": "Best-chain tip height (for client-side confirmation counting).",
+        "operationId": "tip",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Chain tip height",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TipResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid/disabled asset"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "503": {
+            "description": "Upstream node unavailable"
+          }
+        }
+      }
+    },
+    "/wallet/utxo/utxos": {
+      "post": {
+        "tags": [
+          "btc_ltc"
+        ],
+        "summary": "Unspent outputs for a BTC/LTC address.",
+        "operationId": "utxos",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddressRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Unspent outputs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UtxosResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid/disabled asset or address"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "503": {
+            "description": "Upstream node unavailable"
+          }
+        }
+      }
     }
   },
   "components": {
     "schemas": {
+      "AddressRequest": {
+        "type": "object",
+        "description": "An address query for a UTXO asset.",
+        "required": [
+          "asset",
+          "address"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The address to query (validated by the Electrum client)."
+          },
+          "asset": {
+            "type": "string",
+            "description": "`btc` or `ltc`."
+          }
+        }
+      },
       "AssetPublicKey": {
         "type": "object",
         "description": "A per-asset public key submitted by the wallet.",
@@ -607,6 +865,19 @@
               "null"
             ],
             "description": "XMR/WOW only: public spend key."
+          }
+        }
+      },
+      "AssetRequest": {
+        "type": "object",
+        "description": "An asset-only query.",
+        "required": [
+          "asset"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string",
+            "description": "`btc` or `ltc`."
           }
         }
       },
@@ -661,6 +932,63 @@
           },
           "user": {
             "$ref": "#/components/schemas/UserInfo"
+          }
+        }
+      },
+      "BalanceResponse": {
+        "type": "object",
+        "description": "Confirmed/unconfirmed balance in satoshis. The client computes any total\n(kept as separate integer fields — no lossy server-side sum).",
+        "required": [
+          "asset",
+          "address",
+          "confirmed",
+          "unconfirmed"
+        ],
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "asset": {
+            "type": "string"
+          },
+          "confirmed": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "unconfirmed": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "BroadcastRequest": {
+        "type": "object",
+        "description": "A broadcast request: a finalized, signed raw transaction.",
+        "required": [
+          "asset",
+          "tx_hex"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string",
+            "description": "`btc` or `ltc`."
+          },
+          "tx_hex": {
+            "type": "string",
+            "description": "Hex-encoded signed transaction."
+          }
+        }
+      },
+      "BroadcastResponse": {
+        "type": "object",
+        "required": [
+          "txid"
+        ],
+        "properties": {
+          "txid": {
+            "type": "string",
+            "description": "The broadcast transaction id."
           }
         }
       },
@@ -795,6 +1123,45 @@
           }
         }
       },
+      "FeeRequest": {
+        "type": "object",
+        "description": "A fee-estimate request.",
+        "required": [
+          "asset",
+          "blocks"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string",
+            "description": "`btc` or `ltc`."
+          },
+          "blocks": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Target confirmation within this many blocks.",
+            "minimum": 0
+          }
+        }
+      },
+      "FeeResponse": {
+        "type": "object",
+        "required": [
+          "asset"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string"
+          },
+          "sat_per_vb": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Estimated fee rate in sat/vB, or `null` if the server can't estimate."
+          }
+        }
+      },
       "HealthResponse": {
         "type": "object",
         "description": "Liveness response.",
@@ -805,6 +1172,55 @@
           "status": {
             "type": "string",
             "description": "Always `\"ok\"` when the service is reachable."
+          }
+        }
+      },
+      "HistoryEntry": {
+        "type": "object",
+        "description": "A transaction-history entry.",
+        "required": [
+          "txid",
+          "height"
+        ],
+        "properties": {
+          "fee": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Fee in satoshis (mempool entries only).",
+            "minimum": 0
+          },
+          "height": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Block height (`0`/negative for unconfirmed)."
+          },
+          "txid": {
+            "type": "string"
+          }
+        }
+      },
+      "HistoryResponse": {
+        "type": "object",
+        "required": [
+          "asset",
+          "address",
+          "transactions"
+        ],
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "asset": {
+            "type": "string"
+          },
+          "transactions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HistoryEntry"
+            }
           }
         }
       },
@@ -1006,6 +1422,23 @@
           }
         }
       },
+      "TipResponse": {
+        "type": "object",
+        "required": [
+          "asset",
+          "height"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string"
+          },
+          "height": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Best-chain tip height."
+          }
+        }
+      },
       "UserInfo": {
         "type": "object",
         "description": "Minimal, non-enumerable user info returned to a signed-in client.",
@@ -1066,6 +1499,59 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/UserKeyInfo"
+            }
+          }
+        }
+      },
+      "Utxo": {
+        "type": "object",
+        "description": "A single unspent output.",
+        "required": [
+          "txid",
+          "vout",
+          "value",
+          "height"
+        ],
+        "properties": {
+          "height": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Block height; `0` if unconfirmed.",
+            "minimum": 0
+          },
+          "txid": {
+            "type": "string"
+          },
+          "value": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "vout": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "UtxosResponse": {
+        "type": "object",
+        "required": [
+          "asset",
+          "address",
+          "utxos"
+        ],
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "asset": {
+            "type": "string"
+          },
+          "utxos": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Utxo"
             }
           }
         }
@@ -1167,6 +1653,10 @@
     {
       "name": "auth",
       "description": "Wallet authentication: registration, restore, refresh, sessions, Nostr identity."
+    },
+    {
+      "name": "btc_ltc",
+      "description": "Bitcoin/Litecoin chain access via Electrum (balance, UTXOs, history, tip, fee, broadcast)."
     }
   ]
 }

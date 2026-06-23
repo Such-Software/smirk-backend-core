@@ -46,7 +46,8 @@ pub struct AppState {
 pub fn build_router(state: Arc<AppState>) -> Router {
     let api_v1 = api::auth::routes()
         .merge(api::website::routes())
-        .merge(api::users::routes());
+        .merge(api::users::routes())
+        .merge(api::wallet::routes());
 
     Router::new()
         .route("/health", get(api::health::health))

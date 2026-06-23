@@ -32,6 +32,12 @@ use utoipa::OpenApi;
         crate::api::users::register_key,
         crate::api::users::get_user_keys,
         crate::api::users::get_user_key_for_asset,
+        crate::api::wallet::btc_ltc::balance,
+        crate::api::wallet::btc_ltc::utxos,
+        crate::api::wallet::btc_ltc::history,
+        crate::api::wallet::btc_ltc::tip,
+        crate::api::wallet::btc_ltc::fee,
+        crate::api::wallet::btc_ltc::broadcast,
         crate::api::nip05::well_known_nostr,
     ),
     components(schemas(
@@ -59,11 +65,24 @@ use utoipa::OpenApi;
         crate::api::users::RegisterKeyRequest,
         crate::api::users::UserKeyInfo,
         crate::api::users::UserKeysResponse,
+        crate::api::wallet::btc_ltc::AddressRequest,
+        crate::api::wallet::btc_ltc::BalanceResponse,
+        crate::api::wallet::btc_ltc::Utxo,
+        crate::api::wallet::btc_ltc::UtxosResponse,
+        crate::api::wallet::btc_ltc::HistoryEntry,
+        crate::api::wallet::btc_ltc::HistoryResponse,
+        crate::api::wallet::btc_ltc::AssetRequest,
+        crate::api::wallet::btc_ltc::TipResponse,
+        crate::api::wallet::btc_ltc::FeeRequest,
+        crate::api::wallet::btc_ltc::FeeResponse,
+        crate::api::wallet::btc_ltc::BroadcastRequest,
+        crate::api::wallet::btc_ltc::BroadcastResponse,
         crate::api::nip05::WellKnownResponse,
     )),
     tags(
         (name = "system", description = "Service health and metadata."),
-        (name = "auth", description = "Wallet authentication: registration, restore, refresh, sessions, Nostr identity.")
+        (name = "auth", description = "Wallet authentication: registration, restore, refresh, sessions, Nostr identity."),
+        (name = "btc_ltc", description = "Bitcoin/Litecoin chain access via Electrum (balance, UTXOs, history, tip, fee, broadcast).")
     )
 )]
 pub struct ApiDoc;

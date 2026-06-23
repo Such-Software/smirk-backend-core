@@ -6,4 +6,5 @@ pub mod middleware;
 pub mod nip05;
 pub mod openapi;
 pub mod users;
+pub mod wallet;
 pub mod website;
