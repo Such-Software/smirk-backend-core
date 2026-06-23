@@ -38,6 +38,14 @@ use utoipa::OpenApi;
         crate::api::wallet::btc_ltc::tip,
         crate::api::wallet::btc_ltc::fee,
         crate::api::wallet::btc_ltc::broadcast,
+        crate::api::wallet::xmr_wow::register,
+        crate::api::wallet::xmr_wow::balance,
+        crate::api::wallet::xmr_wow::history,
+        crate::api::wallet::xmr_wow::unspent_outs,
+        crate::api::wallet::xmr_wow::random_outs,
+        crate::api::wallet::xmr_wow::submit_tx,
+        crate::api::wallet::xmr_wow::height,
+        crate::api::wallet::xmr_wow::confirmations,
         crate::api::nip05::well_known_nostr,
     ),
     components(schemas(
@@ -77,12 +85,31 @@ use utoipa::OpenApi;
         crate::api::wallet::btc_ltc::FeeResponse,
         crate::api::wallet::btc_ltc::BroadcastRequest,
         crate::api::wallet::btc_ltc::BroadcastResponse,
+        crate::api::wallet::xmr_wow::ViewRequest,
+        crate::api::wallet::xmr_wow::RegisterRequest,
+        crate::api::wallet::xmr_wow::RandomOutsRequest,
+        crate::api::wallet::xmr_wow::SubmitRequest,
+        crate::api::wallet::xmr_wow::LwsAssetRequest,
+        crate::api::wallet::xmr_wow::ConfirmationsRequest,
+        crate::api::wallet::xmr_wow::LwsBalanceResponse,
+        crate::api::wallet::xmr_wow::SpentOutputDto,
+        crate::api::wallet::xmr_wow::TxDto,
+        crate::api::wallet::xmr_wow::LwsHistoryResponse,
+        crate::api::wallet::xmr_wow::UnspentOutputDto,
+        crate::api::wallet::xmr_wow::UnspentOutsResponse,
+        crate::api::wallet::xmr_wow::RandomOutputDto,
+        crate::api::wallet::xmr_wow::AmountOutsDto,
+        crate::api::wallet::xmr_wow::RandomOutsResponse,
+        crate::api::wallet::xmr_wow::HeightResponse,
+        crate::api::wallet::xmr_wow::ConfirmationsResponse,
+        crate::api::wallet::xmr_wow::OkResponse,
         crate::api::nip05::WellKnownResponse,
     )),
     tags(
         (name = "system", description = "Service health and metadata."),
         (name = "auth", description = "Wallet authentication: registration, restore, refresh, sessions, Nostr identity."),
-        (name = "btc_ltc", description = "Bitcoin/Litecoin chain access via Electrum (balance, UTXOs, history, tip, fee, broadcast).")
+        (name = "btc_ltc", description = "Bitcoin/Litecoin chain access via Electrum (balance, UTXOs, history, tip, fee, broadcast)."),
+        (name = "xmr_wow", description = "Monero/Wownero chain access via LWS (register, balance, history, unspent/random outs, submit, height, confirmations).")
     )
 )]
 pub struct ApiDoc;

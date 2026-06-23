@@ -584,6 +584,326 @@
         }
       }
     },
+    "/wallet/lws/balance": {
+      "post": {
+        "tags": [
+          "xmr_wow"
+        ],
+        "summary": "Balance + scan state for an account.",
+        "operationId": "balance",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ViewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Account balance and scan state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LwsBalanceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid/disabled asset, address, or view key"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "503": {
+            "description": "Upstream node unavailable"
+          }
+        }
+      }
+    },
+    "/wallet/lws/confirmations": {
+      "post": {
+        "tags": [
+          "xmr_wow"
+        ],
+        "summary": "Confirmation count for a transaction (daemon).",
+        "operationId": "confirmations",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmationsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Confirmation count",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfirmationsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid/disabled asset or txid"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "503": {
+            "description": "Upstream node unavailable"
+          }
+        }
+      }
+    },
+    "/wallet/lws/height": {
+      "post": {
+        "tags": [
+          "xmr_wow"
+        ],
+        "summary": "Current chain height (daemon) for confirmation counting.",
+        "operationId": "height",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LwsAssetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Chain height",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HeightResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid/disabled asset"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "503": {
+            "description": "Upstream node unavailable"
+          }
+        }
+      }
+    },
+    "/wallet/lws/history": {
+      "post": {
+        "tags": [
+          "xmr_wow"
+        ],
+        "summary": "Transaction history (confirmed + mempool) for an account.",
+        "operationId": "history",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ViewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Account transaction history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LwsHistoryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid/disabled asset, address, or view key"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "503": {
+            "description": "Upstream node unavailable"
+          }
+        }
+      }
+    },
+    "/wallet/lws/random_outs": {
+      "post": {
+        "tags": [
+          "xmr_wow"
+        ],
+        "summary": "Random decoy outputs for ring construction.",
+        "operationId": "random_outs",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RandomOutsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Decoy outputs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RandomOutsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid/disabled asset or request"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "503": {
+            "description": "Upstream node unavailable"
+          }
+        }
+      }
+    },
+    "/wallet/lws/register": {
+      "post": {
+        "tags": [
+          "xmr_wow"
+        ],
+        "summary": "Register an account (its view key) with the LWS so it begins scanning.\nIdempotent at the LWS; pass `start_height` to scan from a wallet birthday.",
+        "operationId": "register",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Account registered for scanning",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid/disabled asset, address, or view key"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "503": {
+            "description": "Upstream node unavailable"
+          }
+        }
+      }
+    },
+    "/wallet/lws/submit_tx": {
+      "post": {
+        "tags": [
+          "xmr_wow"
+        ],
+        "summary": "Broadcast a finalized, signed Monero/Wownero transaction.",
+        "operationId": "submit_tx",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Transaction submitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid/disabled asset or malformed tx hex"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "503": {
+            "description": "Upstream node unavailable"
+          }
+        }
+      }
+    },
+    "/wallet/lws/unspent_outs": {
+      "post": {
+        "tags": [
+          "xmr_wow"
+        ],
+        "summary": "Unspent outputs for an account (for client-side spend construction).",
+        "operationId": "unspent_outs",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ViewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Unspent outputs + fee parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnspentOutsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid/disabled asset, address, or view key"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "503": {
+            "description": "Upstream node unavailable"
+          }
+        }
+      }
+    },
     "/wallet/utxo/balance": {
       "post": {
         "tags": [
@@ -845,6 +1165,24 @@
           }
         }
       },
+      "AmountOutsDto": {
+        "type": "object",
+        "required": [
+          "amount",
+          "outputs"
+        ],
+        "properties": {
+          "amount": {
+            "type": "string"
+          },
+          "outputs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RandomOutputDto"
+            }
+          }
+        }
+      },
       "AssetPublicKey": {
         "type": "object",
         "description": "A per-asset public key submitted by the wallet.",
@@ -1049,6 +1387,43 @@
           }
         }
       },
+      "ConfirmationsRequest": {
+        "type": "object",
+        "description": "Confirmation-count query for a tx.",
+        "required": [
+          "asset",
+          "txid"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string"
+          },
+          "txid": {
+            "type": "string",
+            "description": "Transaction id (64 hex)."
+          }
+        }
+      },
+      "ConfirmationsResponse": {
+        "type": "object",
+        "required": [
+          "asset"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string"
+          },
+          "confirmations": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Confirmations, or `null` if the tx is unknown / not yet in a block.",
+            "minimum": 0
+          }
+        }
+      },
       "ExtensionRegisterRequest": {
         "type": "object",
         "description": "Register a new extension wallet or re-authenticate an existing one.",
@@ -1175,6 +1550,23 @@
           }
         }
       },
+      "HeightResponse": {
+        "type": "object",
+        "required": [
+          "asset",
+          "height"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string"
+          },
+          "height": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "HistoryEntry": {
         "type": "object",
         "description": "A transaction-history entry.",
@@ -1284,6 +1676,85 @@
           }
         }
       },
+      "LwsAssetRequest": {
+        "type": "object",
+        "description": "Asset-only query.",
+        "required": [
+          "asset"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string",
+            "description": "`xmr` or `wow`."
+          }
+        }
+      },
+      "LwsBalanceResponse": {
+        "type": "object",
+        "description": "Balance + scan state. `total_received` is the balance (an LWS cannot confirm\nspends without the spend key; the wallet subtracts its own known spends).",
+        "required": [
+          "asset",
+          "total_received",
+          "unlocked",
+          "locked",
+          "scanned_height",
+          "blockchain_height",
+          "transaction_count"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string"
+          },
+          "blockchain_height": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "locked": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "scanned_height": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "total_received": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "transaction_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "unlocked": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "LwsHistoryResponse": {
+        "type": "object",
+        "required": [
+          "asset",
+          "transactions"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string"
+          },
+          "transactions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TxDto"
+            }
+          }
+        }
+      },
       "MyUsernameResponse": {
         "type": "object",
         "properties": {
@@ -1326,6 +1797,17 @@
           }
         }
       },
+      "OkResponse": {
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          }
+        }
+      },
       "PublicKeysInfo": {
         "type": "object",
         "description": "A user's per-asset receiving public keys, by asset.",
@@ -1359,6 +1841,73 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "RandomOutputDto": {
+        "type": "object",
+        "description": "A decoy output.",
+        "required": [
+          "global_index",
+          "public_key",
+          "rct"
+        ],
+        "properties": {
+          "global_index": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "public_key": {
+            "type": "string"
+          },
+          "rct": {
+            "type": "string"
+          }
+        }
+      },
+      "RandomOutsRequest": {
+        "type": "object",
+        "description": "Request decoy outputs for ring construction.",
+        "required": [
+          "asset",
+          "count",
+          "amounts"
+        ],
+        "properties": {
+          "amounts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Amounts to request decoys for (`[\"0\"]` for RingCT)."
+          },
+          "asset": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Decoys per real output (protocol ring size; clamped server-side).",
+            "minimum": 0
+          }
+        }
+      },
+      "RandomOutsResponse": {
+        "type": "object",
+        "required": [
+          "asset",
+          "amount_outs"
+        ],
+        "properties": {
+          "amount_outs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AmountOutsDto"
+            }
+          },
+          "asset": {
+            "type": "string"
           }
         }
       },
@@ -1398,6 +1947,36 @@
           }
         }
       },
+      "RegisterRequest": {
+        "type": "object",
+        "description": "Register (or import-with-height) an account for LWS scanning.",
+        "required": [
+          "asset",
+          "address",
+          "view_key"
+        ],
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "asset": {
+            "type": "string"
+          },
+          "start_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Scan from this block height (wallet birthday). Omit to scan from now.",
+            "minimum": 0
+          },
+          "view_key": {
+            "type": "string",
+            "description": "Private view key (64 hex). Forwarded to the LWS; never stored or logged."
+          }
+        }
+      },
       "SetUsernameRequest": {
         "type": "object",
         "required": [
@@ -1422,6 +2001,57 @@
           }
         }
       },
+      "SpentOutputDto": {
+        "type": "object",
+        "description": "A candidate spent output (verify with the spend key before trusting).",
+        "required": [
+          "amount",
+          "key_image",
+          "tx_pub_key",
+          "out_index",
+          "mixin"
+        ],
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "key_image": {
+            "type": "string"
+          },
+          "mixin": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "out_index": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "tx_pub_key": {
+            "type": "string"
+          }
+        }
+      },
+      "SubmitRequest": {
+        "type": "object",
+        "description": "Submit a finalized, signed transaction.",
+        "required": [
+          "asset",
+          "tx_hex"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string"
+          },
+          "tx_hex": {
+            "type": "string",
+            "description": "Hex-encoded signed transaction blob."
+          }
+        }
+      },
       "TipResponse": {
         "type": "object",
         "required": [
@@ -1436,6 +2066,160 @@
             "type": "integer",
             "format": "int64",
             "description": "Best-chain tip height."
+          }
+        }
+      },
+      "TxDto": {
+        "type": "object",
+        "description": "A transaction in the account's history.",
+        "required": [
+          "hash",
+          "height",
+          "timestamp",
+          "total_received",
+          "total_sent",
+          "mempool",
+          "unlock_time",
+          "spent_outputs"
+        ],
+        "properties": {
+          "hash": {
+            "type": "string"
+          },
+          "height": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "mempool": {
+            "type": "boolean"
+          },
+          "payment_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "spent_outputs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SpentOutputDto"
+            }
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "total_received": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "total_sent": {
+            "type": "integer",
+            "format": "int64",
+            "description": "\"Possible\" sent — candidate spends, not authoritative.",
+            "minimum": 0
+          },
+          "unlock_time": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "UnspentOutputDto": {
+        "type": "object",
+        "description": "An unspent output for spend construction.",
+        "required": [
+          "amount",
+          "public_key",
+          "tx_pub_key",
+          "index",
+          "global_index",
+          "height",
+          "timestamp",
+          "tx_hash",
+          "rct",
+          "spend_key_images"
+        ],
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "global_index": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "height": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "index": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "public_key": {
+            "type": "string"
+          },
+          "rct": {
+            "type": "string"
+          },
+          "spend_key_images": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Key images seen on-chain that may correspond to this output being spent."
+          },
+          "timestamp": {
+            "type": "string"
+          },
+          "tx_hash": {
+            "type": "string"
+          },
+          "tx_pub_key": {
+            "type": "string"
+          }
+        }
+      },
+      "UnspentOutsResponse": {
+        "type": "object",
+        "required": [
+          "asset",
+          "outputs",
+          "per_byte_fee",
+          "fee_mask",
+          "fork_version"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string"
+          },
+          "fee_mask": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "fork_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "outputs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UnspentOutputDto"
+            }
+          },
+          "per_byte_fee": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           }
         }
       },
@@ -1556,6 +2340,28 @@
           }
         }
       },
+      "ViewRequest": {
+        "type": "object",
+        "description": "Address + private view key for a per-account query.",
+        "required": [
+          "asset",
+          "address",
+          "view_key"
+        ],
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "asset": {
+            "type": "string",
+            "description": "`xmr` or `wow`."
+          },
+          "view_key": {
+            "type": "string",
+            "description": "Private view key (64 hex). Forwarded to the LWS; never stored or logged."
+          }
+        }
+      },
       "WebsiteChallengeRequest": {
         "type": "object",
         "description": "Request a website-auth challenge for a calling origin.",
@@ -1657,6 +2463,10 @@
     {
       "name": "btc_ltc",
       "description": "Bitcoin/Litecoin chain access via Electrum (balance, UTXOs, history, tip, fee, broadcast)."
+    },
+    {
+      "name": "xmr_wow",
+      "description": "Monero/Wownero chain access via LWS (register, balance, history, unspent/random outs, submit, height, confirmations)."
     }
   ]
 }
