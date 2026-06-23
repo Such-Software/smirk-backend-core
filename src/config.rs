@@ -117,6 +117,10 @@ pub struct Config {
     /// Networks whose `X-Forwarded-For` is trusted. Empty (default) means the
     /// real TCP peer is always used for rate-limiting and audit IPs.
     pub trusted_proxies: Vec<IpNetwork>,
+    /// Browser origins allowed by CORS (e.g. the web wallet). Empty (default)
+    /// allows any origin — safe here because auth is a Bearer token, not cookies,
+    /// so no ambient credentials ride a cross-origin request.
+    pub cors_allowed_origins: Vec<String>,
 
     pub features: FeatureFlags,
     pub chains: ChainConfig,
@@ -296,6 +300,7 @@ impl Config {
                 ip_salt: env_or("IP_SALT", ""),
             },
             trusted_proxies: parse_networks("TRUSTED_PROXIES")?,
+            cors_allowed_origins: env_list("CORS_ALLOWED_ORIGINS"),
 
             features: FeatureFlags {
                 chains: ChainFlags {
@@ -533,6 +538,7 @@ mod tests {
                 ip_salt: "s".repeat(16),
             },
             trusted_proxies: vec![],
+            cors_allowed_origins: vec![],
             features: FeatureFlags {
                 chains: ChainFlags {
                     btc: false,

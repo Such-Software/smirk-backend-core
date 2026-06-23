@@ -16,7 +16,12 @@
 
 use std::sync::Arc;
 
-use axum::{extract::State, http::HeaderMap, routing::post, Json, Router};
+use axum::{
+    extract::{DefaultBodyLimit, State},
+    http::HeaderMap,
+    routing::post,
+    Json, Router,
+};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
@@ -539,7 +544,12 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/wallet/lws/history", post(history))
         .route("/wallet/lws/unspent_outs", post(unspent_outs))
         .route("/wallet/lws/random_outs", post(random_outs))
-        .route("/wallet/lws/submit_tx", post(submit_tx))
+        // submit_tx carries a raw tx hex (up to MAX_CN_TX_HEX_LEN); raise its
+        // body cap above the global limit, with headroom for the JSON envelope.
+        .route(
+            "/wallet/lws/submit_tx",
+            post(submit_tx).layer(DefaultBodyLimit::max(MAX_CN_TX_HEX_LEN + 64 * 1024)),
+        )
         .route("/wallet/lws/height", post(height))
         .route("/wallet/lws/confirmations", post(confirmations))
 }
