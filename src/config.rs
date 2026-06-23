@@ -180,14 +180,14 @@ pub struct ChainConfig {
     pub grin: GrinConfig,
 }
 
-/// Bitcoin/Litecoin node + Electrum configuration.
+/// Bitcoin/Litecoin chain access via Electrum/Fulcrum. The backend runs no
+/// BTC/LTC node — reads, fee estimation, and broadcast all go through Electrum.
+/// (A self-hosted Fulcrum relays broadcasts to its own backing node, so no
+/// separate Core-RPC path is needed; a future MWEB/node provider would slot in
+/// at the provider seam rather than extending this config.)
 #[derive(Clone)]
 pub struct UtxoConfig {
     pub network: String,
-    pub use_local_node: bool,
-    pub rpc_url: String,
-    pub rpc_user: String,
-    pub rpc_pass: String,
     pub electrum_primary: Option<String>,
     pub electrum_fallbacks: Vec<String>,
 }
@@ -310,19 +310,11 @@ impl Config {
             chains: ChainConfig {
                 btc: UtxoConfig {
                     network: env_or("BTC_NETWORK", "mainnet"),
-                    use_local_node: env_bool("BTC_USE_LOCAL_NODE", false),
-                    rpc_url: env_or("BTC_RPC_URL", "http://127.0.0.1:8332"),
-                    rpc_user: env_or("BTC_RPC_USER", "bitcoinrpc"),
-                    rpc_pass: env_or("BTC_RPC_PASS", ""),
                     electrum_primary: env_opt("BTC_ELECTRUM_URL"),
                     electrum_fallbacks: env_list("BTC_ELECTRUM_FALLBACKS"),
                 },
                 ltc: UtxoConfig {
                     network: env_or("LTC_NETWORK", "mainnet"),
-                    use_local_node: env_bool("LTC_USE_LOCAL_NODE", false),
-                    rpc_url: env_or("LTC_RPC_URL", "http://127.0.0.1:9332"),
-                    rpc_user: env_or("LTC_RPC_USER", "litecoinrpc"),
-                    rpc_pass: env_or("LTC_RPC_PASS", ""),
                     electrum_primary: env_opt("LTC_ELECTRUM_URL"),
                     electrum_fallbacks: env_list("LTC_ELECTRUM_FALLBACKS"),
                 },
@@ -508,10 +500,6 @@ mod tests {
     fn valid() -> Config {
         let utxo = || UtxoConfig {
             network: "mainnet".into(),
-            use_local_node: false,
-            rpc_url: String::new(),
-            rpc_user: String::new(),
-            rpc_pass: String::new(),
             electrum_primary: None,
             electrum_fallbacks: vec![],
         };

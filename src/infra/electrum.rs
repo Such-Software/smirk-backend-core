@@ -773,10 +773,6 @@ mod tests {
     fn cfg() -> UtxoConfig {
         UtxoConfig {
             network: "mainnet".into(),
-            use_local_node: false,
-            rpc_url: String::new(),
-            rpc_user: String::new(),
-            rpc_pass: String::new(),
             electrum_primary: None,
             electrum_fallbacks: vec![],
         }

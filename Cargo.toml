@@ -65,10 +65,8 @@ k256 = { version = "0.13", features = ["ecdh", "ecdsa", "schnorr"] }
 # Ed25519 for website auth signature verification.
 ed25519-dalek = "2.1"
 
-# Bitcoin/Litecoin RPC
-bitcoincore-rpc = "0.18"
-
-# Electrum protocol (balance/UTXO/history via public or self-hosted servers)
+# Bitcoin/Litecoin chain access — Electrum/Fulcrum only (reads, fee, broadcast).
+# No Core-RPC client: a self-hosted Fulcrum relays broadcasts to its own node.
 tokio-rustls = "0.25"
 rustls = "0.22"
 rustls-pki-types = "1.0"
