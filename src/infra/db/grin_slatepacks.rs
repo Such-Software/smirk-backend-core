@@ -42,7 +42,12 @@ impl Database {
             .bind(input.amount_nanogrin)
             .bind(input.expires_at)
             .fetch_one(self.pool())
-            .await?;
+            .await
+            // slate_id is UNIQUE: a duplicate is a 409, never a second row that
+            // the slate_id-keyed auth/state machine could be tricked across.
+            .map_err(super::unique_violation_as(
+                "a relay for this slate_id already exists",
+            ))?;
         Ok(slatepack)
     }
 
@@ -87,63 +92,72 @@ impl Database {
             .await?)
     }
 
-    /// Attach the recipient's response slatepack, advancing the relay to
-    /// `PendingSender` so the sender can finalize.
+    /// Attach the recipient's response, advancing `PendingRecipient` →
+    /// `PendingSender`. Targets the authorized row by primary key `id`, and the
+    /// status + expiry preconditions live in the `WHERE` clause so the transition
+    /// is atomic (no read-check-write race). `None` = the row no longer qualifies
+    /// (wrong status / expired) → the caller maps it to a 409.
     #[instrument(skip(self, response_slatepack))]
     pub async fn add_slatepack_response(
         &self,
-        slate_id: &str,
+        id: Uuid,
         response_slatepack: &str,
-    ) -> Result<GrinSlatepack, AppError> {
+    ) -> Result<Option<GrinSlatepack>, AppError> {
         let sql = format!(
             "UPDATE grin_slatepacks \
              SET response_slatepack = $2, status = $3, updated_at = NOW() \
-             WHERE slate_id = $1 RETURNING {GRIN_SLATEPACK_COLS}"
+             WHERE id = $1 AND status = $4 AND expires_at > NOW() \
+             RETURNING {GRIN_SLATEPACK_COLS}"
         );
-        let slatepack = sqlx::query_as::<_, GrinSlatepack>(&sql)
-            .bind(slate_id)
+        Ok(sqlx::query_as::<_, GrinSlatepack>(&sql)
+            .bind(id)
             .bind(response_slatepack)
             .bind(SlatepackStatus::PendingSender)
-            .fetch_one(self.pool())
-            .await?;
-        Ok(slatepack)
+            .bind(SlatepackStatus::PendingRecipient)
+            .fetch_optional(self.pool())
+            .await?)
     }
 
-    /// Mark a slatepack as finalized once the transaction is broadcast.
+    /// Mark a relay finalized once the sender has broadcast. Atomic: only from
+    /// `PendingSender` and not expired, by primary key. `None` → 409.
     #[instrument(skip(self))]
     pub async fn finalize_slatepack(
         &self,
-        slate_id: &str,
+        id: Uuid,
         tx_hash: &str,
-    ) -> Result<GrinSlatepack, AppError> {
+    ) -> Result<Option<GrinSlatepack>, AppError> {
         let sql = format!(
             "UPDATE grin_slatepacks \
              SET status = $2, tx_hash = $3, finalized_at = NOW(), updated_at = NOW() \
-             WHERE slate_id = $1 RETURNING {GRIN_SLATEPACK_COLS}"
+             WHERE id = $1 AND status = $4 AND expires_at > NOW() \
+             RETURNING {GRIN_SLATEPACK_COLS}"
         );
-        let slatepack = sqlx::query_as::<_, GrinSlatepack>(&sql)
-            .bind(slate_id)
+        Ok(sqlx::query_as::<_, GrinSlatepack>(&sql)
+            .bind(id)
             .bind(SlatepackStatus::Finalized)
             .bind(tx_hash)
-            .fetch_one(self.pool())
-            .await?;
-        Ok(slatepack)
+            .bind(SlatepackStatus::PendingSender)
+            .fetch_optional(self.pool())
+            .await?)
     }
 
-    /// Cancel a slatepack relay.
+    /// Cancel a relay (by primary key). Atomic: only from an active state
+    /// (`PendingRecipient`/`PendingSender`), so a finalized/cancelled/expired
+    /// relay cannot be flipped. `None` → 409.
     #[instrument(skip(self))]
-    pub async fn cancel_slatepack(&self, slate_id: &str) -> Result<GrinSlatepack, AppError> {
+    pub async fn cancel_slatepack(&self, id: Uuid) -> Result<Option<GrinSlatepack>, AppError> {
         let sql = format!(
             "UPDATE grin_slatepacks \
              SET status = $2, updated_at = NOW() \
-             WHERE slate_id = $1 RETURNING {GRIN_SLATEPACK_COLS}"
+             WHERE id = $1 AND status IN ($3, $4) RETURNING {GRIN_SLATEPACK_COLS}"
         );
-        let slatepack = sqlx::query_as::<_, GrinSlatepack>(&sql)
-            .bind(slate_id)
+        Ok(sqlx::query_as::<_, GrinSlatepack>(&sql)
+            .bind(id)
             .bind(SlatepackStatus::Cancelled)
-            .fetch_one(self.pool())
-            .await?;
-        Ok(slatepack)
+            .bind(SlatepackStatus::PendingRecipient)
+            .bind(SlatepackStatus::PendingSender)
+            .fetch_optional(self.pool())
+            .await?)
     }
 
     /// Expire pending slatepacks whose `expires_at` has passed. Returns the

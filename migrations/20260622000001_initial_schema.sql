@@ -84,7 +84,10 @@ CREATE INDEX idx_user_keys_user_id ON user_keys (user_id);
 -- ── grin_slatepacks ─────────────────────────────────────────────────────────
 CREATE TABLE grin_slatepacks (
     id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    slate_id          TEXT NOT NULL,
+    -- UNIQUE: the relay's authorization + state machine key off slate_id, so it
+    -- must map to exactly one row (a collision would let mutations keyed on
+    -- slate_id touch another user's relay). Also serves as the lookup index.
+    slate_id          TEXT NOT NULL UNIQUE,
     sender_user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     recipient_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
     recipient_address TEXT,
@@ -98,7 +101,7 @@ CREATE TABLE grin_slatepacks (
     finalized_at      TIMESTAMPTZ,
     tx_hash           TEXT
 );
-CREATE INDEX idx_grin_slatepacks_slate_id ON grin_slatepacks (slate_id);
+-- (slate_id lookup index is provided by the UNIQUE constraint above.)
 CREATE INDEX idx_grin_slatepacks_sender ON grin_slatepacks (sender_user_id);
 CREATE INDEX idx_grin_slatepacks_recipient ON grin_slatepacks (recipient_user_id);
 CREATE INDEX idx_grin_slatepacks_status ON grin_slatepacks (status);

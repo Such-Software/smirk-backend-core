@@ -160,6 +160,10 @@ pub struct FeatureFlags {
     pub tips: bool,
     /// Nostr-native identity (NIP-98 login/link, NIP-05 directory).
     pub nostr_identity: bool,
+    /// Grin slatepack relay (async store-and-forward mailbox for interactive
+    /// Grin transfers). A non-custodial encrypted mailbox; operators can disable
+    /// it independently of Grin chain access.
+    pub grin_relay: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -306,6 +310,7 @@ impl Config {
                 prices_interval_secs: env_parse("PRICES_FETCH_INTERVAL_SECS", 300u64)?,
                 tips: env_bool("FEATURE_TIPS", false),
                 nostr_identity: env_bool("FEATURE_NOSTR_IDENTITY", true),
+                grin_relay: env_bool("FEATURE_GRIN_RELAY", true),
             },
             chains: ChainConfig {
                 btc: UtxoConfig {
@@ -541,6 +546,7 @@ mod tests {
                 prices_interval_secs: 300,
                 tips: false,
                 nostr_identity: true,
+                grin_relay: true,
             },
             chains: ChainConfig {
                 btc: utxo(),

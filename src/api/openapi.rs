@@ -49,6 +49,12 @@ use utoipa::OpenApi;
         crate::api::wallet::grin::scan,
         crate::api::wallet::grin::height,
         crate::api::wallet::grin::broadcast,
+        crate::api::wallet::grin_relay::create,
+        crate::api::wallet::grin_relay::pending,
+        crate::api::wallet::grin_relay::get_relay,
+        crate::api::wallet::grin_relay::respond,
+        crate::api::wallet::grin_relay::finalize,
+        crate::api::wallet::grin_relay::cancel,
         crate::api::nip05::well_known_nostr,
     ),
     components(schemas(
@@ -112,6 +118,12 @@ use utoipa::OpenApi;
         crate::api::wallet::grin::GrinHeightResponse,
         crate::api::wallet::grin::GrinBroadcastRequest,
         crate::api::wallet::grin::GrinBroadcastResponse,
+        crate::api::wallet::grin_relay::CreateRelayRequest,
+        crate::api::wallet::grin_relay::RespondRelayRequest,
+        crate::api::wallet::grin_relay::FinalizeRelayRequest,
+        crate::api::wallet::grin_relay::SlateIdRequest,
+        crate::api::wallet::grin_relay::RelayEntry,
+        crate::api::wallet::grin_relay::PendingRelaysResponse,
         crate::api::nip05::WellKnownResponse,
     )),
     tags(
@@ -119,7 +131,8 @@ use utoipa::OpenApi;
         (name = "auth", description = "Wallet authentication: registration, restore, refresh, sessions, Nostr identity."),
         (name = "btc_ltc", description = "Bitcoin/Litecoin chain access via Electrum (balance, UTXOs, history, tip, fee, broadcast)."),
         (name = "xmr_wow", description = "Monero/Wownero chain access via LWS (register, balance, history, unspent/random outs, submit, height, confirmations)."),
-        (name = "grin", description = "Grin view-only chain access (rewind_hash scan, tip height, broadcast).")
+        (name = "grin", description = "Grin view-only chain access (rewind_hash scan, tip height, broadcast)."),
+        (name = "grin_relay", description = "Grin slatepack relay: async non-custodial mailbox for interactive Grin transfers (feature-flagged).")
     )
 )]
 pub struct ApiDoc;

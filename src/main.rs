@@ -59,6 +59,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Periodic expiry of stale Grin relay slatepacks (only when the relay is
+    // enabled). The respond/finalize paths already reject expired relays in their
+    // UPDATE guard; this sweep flips past-TTL rows to Expired so the table stays
+    // bounded and the lifecycle reflects reality.
+    if state.config.features.grin_relay {
+        let db = state.db.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                if let Err(e) = db.expire_old_slatepacks().await {
+                    tracing::warn!(error = %e, "grin slatepack expiry sweep failed");
+                }
+            }
+        });
+    }
+
     let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;

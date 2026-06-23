@@ -654,6 +654,236 @@
         }
       }
     },
+    "/wallet/grin/relay/cancel": {
+      "post": {
+        "tags": [
+          "grin_relay"
+        ],
+        "summary": "Cancel a relay (sender or recipient), unless already finalized.",
+        "operationId": "cancel",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SlateIdRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Relay cancelled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelayEntry"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "404": {
+            "description": "Relay not found, not yours, or feature disabled"
+          },
+          "409": {
+            "description": "Relay is already finalized"
+          }
+        }
+      }
+    },
+    "/wallet/grin/relay/create": {
+      "post": {
+        "tags": [
+          "grin_relay"
+        ],
+        "summary": "Post a slatepack addressed to a registered recipient (sender = caller).",
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRelayRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Relay created (PendingRecipient)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelayEntry"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input or unregistered recipient"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "404": {
+            "description": "Relay feature disabled"
+          }
+        }
+      }
+    },
+    "/wallet/grin/relay/finalize": {
+      "post": {
+        "tags": [
+          "grin_relay"
+        ],
+        "summary": "Record that the sender finalized + broadcast the transaction (sender only).\nThe backend does NOT finalize or broadcast — the wallet does that locally and\nreports the resulting tx hash here.",
+        "operationId": "finalize",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FinalizeRelayRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Relay marked finalized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelayEntry"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid tx hash"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "404": {
+            "description": "Relay not found, not yours, or feature disabled"
+          },
+          "409": {
+            "description": "Relay is not awaiting finalization"
+          }
+        }
+      }
+    },
+    "/wallet/grin/relay/get": {
+      "post": {
+        "tags": [
+          "grin_relay"
+        ],
+        "summary": "Poll a relay's current state (sender or recipient). The sender uses this to\nfetch the recipient's response once status is `pending_sender`.",
+        "operationId": "get_relay",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SlateIdRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The relay entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelayEntry"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "404": {
+            "description": "Relay not found, not yours, or feature disabled"
+          }
+        }
+      }
+    },
+    "/wallet/grin/relay/pending": {
+      "get": {
+        "tags": [
+          "grin_relay"
+        ],
+        "summary": "The caller's inbox: relays awaiting their response.",
+        "operationId": "pending",
+        "responses": {
+          "200": {
+            "description": "Relays awaiting the caller's response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PendingRelaysResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "404": {
+            "description": "Relay feature disabled"
+          }
+        }
+      }
+    },
+    "/wallet/grin/relay/respond": {
+      "post": {
+        "tags": [
+          "grin_relay"
+        ],
+        "summary": "Attach the recipient's response, advancing to `pending_sender`.",
+        "operationId": "respond",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RespondRelayRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Response stored (PendingSender)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelayEntry"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid response slatepack"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "404": {
+            "description": "Relay not found, not yours, or feature disabled"
+          },
+          "409": {
+            "description": "Relay is not awaiting a recipient response"
+          }
+        }
+      }
+    },
     "/wallet/grin/scan": {
       "post": {
         "tags": [
@@ -1534,6 +1764,36 @@
           }
         }
       },
+      "CreateRelayRequest": {
+        "type": "object",
+        "description": "Create a relay: post an (encrypted) slatepack addressed to a registered user.",
+        "required": [
+          "recipient_user_id",
+          "slate_id",
+          "slatepack",
+          "amount_nanogrin"
+        ],
+        "properties": {
+          "amount_nanogrin": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Amount in nanogrin (informational; the real amount is in the slate)."
+          },
+          "recipient_user_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Recipient (a registered Smirk user id)."
+          },
+          "slate_id": {
+            "type": "string",
+            "description": "The Grin slate id (the transaction's slate UUID)."
+          },
+          "slatepack": {
+            "type": "string",
+            "description": "The armored slatepack (encrypted to the recipient)."
+          }
+        }
+      },
       "ExtensionRegisterRequest": {
         "type": "object",
         "description": "Register a new extension wallet or re-authenticate an existing one.",
@@ -1644,6 +1904,23 @@
             ],
             "format": "double",
             "description": "Estimated fee rate in sat/vB, or `null` if the server can't estimate."
+          }
+        }
+      },
+      "FinalizeRelayRequest": {
+        "type": "object",
+        "description": "Record that the sender finalized + broadcast the transaction.",
+        "required": [
+          "slate_id",
+          "tx_hash"
+        ],
+        "properties": {
+          "slate_id": {
+            "type": "string"
+          },
+          "tx_hash": {
+            "type": "string",
+            "description": "The broadcast transaction hash/kernel (recorded for reference)."
           }
         }
       },
@@ -2045,6 +2322,20 @@
           }
         }
       },
+      "PendingRelaysResponse": {
+        "type": "object",
+        "required": [
+          "relays"
+        ],
+        "properties": {
+          "relays": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RelayEntry"
+            }
+          }
+        }
+      },
       "PublicKeysInfo": {
         "type": "object",
         "description": "A user's per-asset receiving public keys, by asset.",
@@ -2214,6 +2505,86 @@
           }
         }
       },
+      "RelayEntry": {
+        "type": "object",
+        "description": "A relay entry as returned to an authorized party.",
+        "required": [
+          "slate_id",
+          "sender_user_id",
+          "slatepack_content",
+          "amount_nanogrin",
+          "status",
+          "created_at",
+          "expires_at"
+        ],
+        "properties": {
+          "amount_nanogrin": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "finalized_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recipient_user_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_slatepack": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The recipient's response slatepack, once provided."
+          },
+          "sender_user_id": {
+            "type": "string"
+          },
+          "slate_id": {
+            "type": "string"
+          },
+          "slatepack_content": {
+            "type": "string",
+            "description": "The sender's armored slatepack (what the recipient responds to)."
+          },
+          "status": {
+            "type": "string"
+          },
+          "tx_hash": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "RespondRelayRequest": {
+        "type": "object",
+        "description": "The recipient's response to a pending relay.",
+        "required": [
+          "slate_id",
+          "response_slatepack"
+        ],
+        "properties": {
+          "response_slatepack": {
+            "type": "string",
+            "description": "The armored response slatepack (recipient's partial signature added)."
+          },
+          "slate_id": {
+            "type": "string"
+          }
+        }
+      },
       "SetUsernameRequest": {
         "type": "object",
         "required": [
@@ -2235,6 +2606,18 @@
           "username": {
             "type": "string",
             "description": "The username as stored (lowercased)."
+          }
+        }
+      },
+      "SlateIdRequest": {
+        "type": "object",
+        "description": "Identify a relay by its slate id (poll / cancel).",
+        "required": [
+          "slate_id"
+        ],
+        "properties": {
+          "slate_id": {
+            "type": "string"
           }
         }
       },
@@ -2708,6 +3091,10 @@
     {
       "name": "grin",
       "description": "Grin view-only chain access (rewind_hash scan, tip height, broadcast)."
+    },
+    {
+      "name": "grin_relay",
+      "description": "Grin slatepack relay: async non-custodial mailbox for interactive Grin transfers (feature-flagged)."
     }
   ]
 }
