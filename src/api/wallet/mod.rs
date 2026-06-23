@@ -12,11 +12,14 @@ use crate::error::AppError;
 use crate::AppState;
 
 pub mod btc_ltc;
+pub mod grin;
 pub mod xmr_wow;
 
 /// All wallet routes, RELATIVE to the `/api/v1` mount point.
 pub fn routes() -> Router<Arc<AppState>> {
-    btc_ltc::routes().merge(xmr_wow::routes())
+    btc_ltc::routes()
+        .merge(xmr_wow::routes())
+        .merge(grin::routes())
 }
 
 // ── shared input validators ───────────────────────────────────────────────────
@@ -40,15 +43,21 @@ pub(crate) fn validate_hex(value: &str, field: &str, max: usize) -> Result<(), A
     Ok(())
 }
 
-/// A Monero/Wownero private view key: 32 bytes = 64 hex chars. Validated only by
-/// shape; never logged.
-pub(crate) fn validate_view_key(view_key: &str) -> Result<(), AppError> {
-    if view_key.len() != 64 || !view_key.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(AppError::ValidationError(
-            "view_key must be 64 hexadecimal characters".into(),
-        ));
+/// Exactly 32 bytes as 64 hex chars — the shape of the view credentials this
+/// backend forwards (Monero/Wownero private view key; Grin `rewind_hash`).
+/// `field` names the value for the error; the value itself is never logged.
+pub(crate) fn validate_hex64(value: &str, field: &str) -> Result<(), AppError> {
+    if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(AppError::ValidationError(format!(
+            "{field} must be 64 hexadecimal characters"
+        )));
     }
     Ok(())
+}
+
+/// A Monero/Wownero private view key (64 hex). Validated by shape; never logged.
+pub(crate) fn validate_view_key(view_key: &str) -> Result<(), AppError> {
+    validate_hex64(view_key, "view_key")
 }
 
 /// A CryptoNote address — base58, ~95 (standard) to ~106 (integrated) chars.

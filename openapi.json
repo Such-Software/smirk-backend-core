@@ -584,6 +584,116 @@
         }
       }
     },
+    "/wallet/grin/broadcast": {
+      "post": {
+        "tags": [
+          "grin"
+        ],
+        "summary": "Broadcast a finalized, signed Grin transaction.",
+        "operationId": "broadcast",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrinBroadcastRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Transaction broadcast",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GrinBroadcastResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Grin disabled or malformed transaction"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "503": {
+            "description": "Upstream node unavailable"
+          }
+        }
+      }
+    },
+    "/wallet/grin/height": {
+      "get": {
+        "tags": [
+          "grin"
+        ],
+        "summary": "Current Grin chain tip height (for confirmation counting).",
+        "operationId": "height",
+        "responses": {
+          "200": {
+            "description": "Chain tip height",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GrinHeightResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Grin disabled"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "503": {
+            "description": "Upstream node unavailable"
+          }
+        }
+      }
+    },
+    "/wallet/grin/scan": {
+      "post": {
+        "tags": [
+          "grin"
+        ],
+        "summary": "View-only scan for the outputs a `rewind_hash` recognizes.",
+        "operationId": "scan",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrinScanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Recognized outputs + balance + resume index",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GrinScanResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Grin disabled or malformed rewind_hash"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "503": {
+            "description": "Upstream node unavailable"
+          }
+        }
+      }
+    },
     "/wallet/lws/balance": {
       "post": {
         "tags": [
@@ -1537,6 +1647,133 @@
           }
         }
       },
+      "GrinBroadcastRequest": {
+        "type": "object",
+        "description": "Broadcast a finalized, signed Grin transaction (built + signed by the wallet).",
+        "required": [
+          "tx"
+        ],
+        "properties": {
+          "tx": {
+            "type": "object",
+            "description": "The finalized transaction object (grin node `push_transaction` input)."
+          }
+        }
+      },
+      "GrinBroadcastResponse": {
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          }
+        }
+      },
+      "GrinHeightResponse": {
+        "type": "object",
+        "required": [
+          "height"
+        ],
+        "properties": {
+          "height": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "GrinOutput": {
+        "type": "object",
+        "description": "A single output recovered by a view-only scan. Amounts are nanogrin.",
+        "required": [
+          "commit",
+          "value",
+          "height",
+          "mmr_index",
+          "is_coinbase",
+          "lock_height"
+        ],
+        "properties": {
+          "commit": {
+            "type": "string"
+          },
+          "height": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "is_coinbase": {
+            "type": "boolean"
+          },
+          "lock_height": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "mmr_index": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "value": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "GrinScanRequest": {
+        "type": "object",
+        "description": "A view-only scan request. Carries the `rewind_hash` view credential, so it\ndeliberately omits `Debug` (never logged).",
+        "required": [
+          "rewind_hash"
+        ],
+        "properties": {
+          "rewind_hash": {
+            "type": "string",
+            "description": "The wallet's `rewind_hash` (64 hex). Forwarded to grin-wallet; not stored."
+          },
+          "start_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Scan from this block height (wallet birthday / last scanned). Omit for full.",
+            "minimum": 0
+          }
+        }
+      },
+      "GrinScanResponse": {
+        "type": "object",
+        "description": "Result of a view-only scan: recognized outputs, total, and the resume index.",
+        "required": [
+          "outputs",
+          "total_balance",
+          "last_pmmr_index"
+        ],
+        "properties": {
+          "last_pmmr_index": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Resume point (`last_pmmr_index`) for the next incremental scan.",
+            "minimum": 0
+          },
+          "outputs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GrinOutput"
+            }
+          },
+          "total_balance": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "HealthResponse": {
         "type": "object",
         "description": "Liveness response.",
@@ -2467,6 +2704,10 @@
     {
       "name": "xmr_wow",
       "description": "Monero/Wownero chain access via LWS (register, balance, history, unspent/random outs, submit, height, confirmations)."
+    },
+    {
+      "name": "grin",
+      "description": "Grin view-only chain access (rewind_hash scan, tip height, broadcast)."
     }
   ]
 }

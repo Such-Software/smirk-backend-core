@@ -46,6 +46,9 @@ use utoipa::OpenApi;
         crate::api::wallet::xmr_wow::submit_tx,
         crate::api::wallet::xmr_wow::height,
         crate::api::wallet::xmr_wow::confirmations,
+        crate::api::wallet::grin::scan,
+        crate::api::wallet::grin::height,
+        crate::api::wallet::grin::broadcast,
         crate::api::nip05::well_known_nostr,
     ),
     components(schemas(
@@ -103,13 +106,20 @@ use utoipa::OpenApi;
         crate::api::wallet::xmr_wow::HeightResponse,
         crate::api::wallet::xmr_wow::ConfirmationsResponse,
         crate::api::wallet::xmr_wow::OkResponse,
+        crate::api::wallet::grin::GrinScanRequest,
+        crate::api::wallet::grin::GrinOutput,
+        crate::api::wallet::grin::GrinScanResponse,
+        crate::api::wallet::grin::GrinHeightResponse,
+        crate::api::wallet::grin::GrinBroadcastRequest,
+        crate::api::wallet::grin::GrinBroadcastResponse,
         crate::api::nip05::WellKnownResponse,
     )),
     tags(
         (name = "system", description = "Service health and metadata."),
         (name = "auth", description = "Wallet authentication: registration, restore, refresh, sessions, Nostr identity."),
         (name = "btc_ltc", description = "Bitcoin/Litecoin chain access via Electrum (balance, UTXOs, history, tip, fee, broadcast)."),
-        (name = "xmr_wow", description = "Monero/Wownero chain access via LWS (register, balance, history, unspent/random outs, submit, height, confirmations).")
+        (name = "xmr_wow", description = "Monero/Wownero chain access via LWS (register, balance, history, unspent/random outs, submit, height, confirmations)."),
+        (name = "grin", description = "Grin view-only chain access (rewind_hash scan, tip height, broadcast).")
     )
 )]
 pub struct ApiDoc;
