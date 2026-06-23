@@ -23,6 +23,7 @@ use tokio::sync::RwLock;
 
 use crate::config::Config;
 use crate::core::session::{SessionManager, WebChallenge};
+use crate::infra::chains::ChainClients;
 use crate::infra::db::Database;
 
 /// Shared application state injected into handlers via `State<Arc<AppState>>`.
@@ -31,6 +32,8 @@ pub struct AppState {
     pub config: Config,
     pub db: Database,
     pub sessions: SessionManager,
+    /// Per-chain data-source clients (present only for enabled chains).
+    pub chains: ChainClients,
     /// In-memory website-auth challenges, keyed by nonce. Single-node store;
     /// a shared/stateless variant is the load-balanced-fleet path.
     pub web_challenges: Arc<RwLock<HashMap<String, WebChallenge>>>,

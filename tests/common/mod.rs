@@ -21,7 +21,8 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use smirk_backend_core::{
-    build_router, config::Config, core::session::SessionManager, infra::db::Database, AppState,
+    build_router, config::Config, core::session::SessionManager, infra::chains::ChainClients,
+    infra::db::Database, AppState,
 };
 
 static INIT_ENV: Once = Once::new();
@@ -68,10 +69,12 @@ pub async fn try_app() -> Option<TestApp> {
         config.secrets.ip_salt.clone(),
     );
     let sessions = SessionManager::new(&config.auth.jwt_secret, config.auth.jwt_expiry_hours);
+    let chains = ChainClients::from_config(&config).expect("build chain clients");
     let state = Arc::new(AppState {
         config,
         db,
         sessions,
+        chains,
         web_challenges: Arc::default(),
     });
 
