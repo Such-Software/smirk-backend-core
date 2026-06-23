@@ -2,3 +2,4 @@
 //! light-wallet servers). Chain clients are wired in as they land.
 
 pub mod db;
+pub mod electrum;
