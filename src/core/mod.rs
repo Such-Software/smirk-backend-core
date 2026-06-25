@@ -3,6 +3,7 @@
 //! Functions take their inputs (config, decoded bytes) as parameters, keeping
 //! this layer straightforward to test in isolation.
 
+pub mod admin_session;
 pub mod crypto;
 pub mod pow;
 pub mod secret;

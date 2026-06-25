@@ -7,6 +7,7 @@
 //! reaches a column and the peppering cannot drift between call sites.
 
 mod admin_keys;
+mod admin_sessions;
 mod audit;
 mod challenges;
 mod grin_slatepacks;

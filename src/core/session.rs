@@ -148,7 +148,10 @@ pub struct SessionManager {
     refresh_token_expiry_days: i64,
 }
 
-fn strict_validation(audience: &str) -> Validation {
+/// Centralized strict JWT validation: HS256 pinned (no alg-confusion), zero
+/// leeway, `exp`/`sub`/`aud` required, and the audience fixed. Shared by the user
+/// and admin session managers so neither can drift to `Validation::default()`.
+pub(crate) fn strict_validation(audience: &str) -> Validation {
     let mut v = Validation::new(Algorithm::HS256);
     v.leeway = 0;
     v.validate_exp = true;
