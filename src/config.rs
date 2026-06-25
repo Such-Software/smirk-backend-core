@@ -159,6 +159,14 @@ pub struct SecretConfig {
 /// `infra::prices` and a test there asserts it covers exactly this set.
 pub const SUPPORTED_PRICE_ASSETS: &[&str] = &["btc", "ltc", "xmr", "wow", "grin"];
 
+/// Fiat (and crypto-denominated) currencies the price feed may quote in. A
+/// curated allowlist so a `PRICES_CURRENCY` typo fails closed at startup rather
+/// than booting a feed that advertises `prices:true` but serves nothing (the
+/// provider returns empty quotes for an unknown currency).
+pub const SUPPORTED_PRICE_CURRENCIES: &[&str] = &[
+    "usd", "eur", "gbp", "jpy", "cny", "aud", "cad", "chf", "btc",
+];
+
 #[derive(Clone)]
 pub struct FeatureFlags {
     pub chains: ChainFlags,
@@ -324,19 +332,23 @@ impl Config {
                     grin: env_bool("FEATURE_GRIN", true),
                 },
                 prices: env_bool("FEATURE_PRICES", true),
-                prices_provider: env_or("PRICES_PROVIDER", "coingecko"),
+                prices_provider: env_or("PRICES_PROVIDER", "coingecko").to_lowercase(),
                 prices_interval_secs: env_parse("PRICES_FETCH_INTERVAL_SECS", 300u64)?,
-                // Unset = all supported feeds; an explicit list (even empty)
-                // narrows it, so operators can serve a subset or none.
-                prices_assets: match env_opt("PRICES_ASSETS") {
-                    Some(s) => s
+                // Per-feed control. Distinguish UNSET from PRESENT-BUT-EMPTY:
+                // `env::var` (not `env_opt`, which collapses empty into None) so
+                // `PRICES_ASSETS=` means "none", not "all".
+                //   unset            => all supported feeds
+                //   "btc,xmr"        => that subset
+                //   "" (or blanks)   => none
+                prices_assets: match env::var("PRICES_ASSETS") {
+                    Err(_) => SUPPORTED_PRICE_ASSETS
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
+                    Ok(s) => s
                         .split(',')
                         .map(|x| x.trim().to_lowercase())
                         .filter(|x| !x.is_empty())
-                        .collect(),
-                    None => SUPPORTED_PRICE_ASSETS
-                        .iter()
-                        .map(|s| s.to_string())
                         .collect(),
                 },
                 prices_currency: env_or("PRICES_CURRENCY", "usd").to_lowercase(),
@@ -501,9 +513,17 @@ impl Config {
             );
         }
 
-        // Price feed: every configured asset must be one we can quote. Fail
-        // closed on a typo rather than silently dropping a feed.
+        // Price feed: provider must be one we implement, and every configured
+        // asset must be one we can quote. Fail closed on a typo rather than
+        // booting a feed that can never populate (which would still advertise
+        // prices:true and silently serve nothing).
         if self.features.prices {
+            if !matches!(self.features.prices_provider.as_str(), "coingecko") {
+                return Err(cfg_err(format!(
+                    "PRICES_PROVIDER {:?} is not supported; supported: coingecko",
+                    self.features.prices_provider
+                )));
+            }
             for asset in &self.features.prices_assets {
                 if !SUPPORTED_PRICE_ASSETS.contains(&asset.as_str()) {
                     return Err(cfg_err(format!(
@@ -512,10 +532,31 @@ impl Config {
                     )));
                 }
             }
+            if !SUPPORTED_PRICE_CURRENCIES.contains(&self.features.prices_currency.as_str()) {
+                return Err(cfg_err(format!(
+                    "PRICES_CURRENCY {:?} is not supported; supported: {}",
+                    self.features.prices_currency,
+                    SUPPORTED_PRICE_CURRENCIES.join(", ")
+                )));
+            }
         }
 
-        // Per-enabled-chain infra secrets: hard error in production, warn in dev.
+        // Per-enabled-chain infra config: hard error in production, warn in dev.
+        // This keeps /capabilities honest — an enabled chain that can't be served
+        // (no node/secret) must not boot in prod advertising itself as available.
         let mut chain_warnings: Vec<&str> = Vec::new();
+        if self.features.chains.btc
+            && self.chains.btc.electrum_primary.is_none()
+            && self.chains.btc.electrum_fallbacks.is_empty()
+        {
+            chain_warnings.push("BTC_ELECTRUM_URL");
+        }
+        if self.features.chains.ltc
+            && self.chains.ltc.electrum_primary.is_none()
+            && self.chains.ltc.electrum_fallbacks.is_empty()
+        {
+            chain_warnings.push("LTC_ELECTRUM_URL");
+        }
         if self.features.chains.xmr && self.chains.xmr.lws_admin_key.is_empty() {
             chain_warnings.push("XMR_LWS_ADMIN_KEY");
         }
@@ -528,12 +569,12 @@ impl Config {
         if !chain_warnings.is_empty() {
             if prod {
                 return Err(cfg_err(format!(
-                    "missing required secrets for enabled chains: {}",
+                    "missing required config for enabled chains: {}",
                     chain_warnings.join(", ")
                 )));
             }
             for w in &chain_warnings {
-                tracing::warn!("{w} is empty — set this before enabling that chain in production");
+                tracing::warn!("{w} is unset — set this before enabling that chain in production");
             }
         }
 
@@ -692,6 +733,46 @@ mod tests {
         let mut c = valid();
         c.environment = "production".into();
         c.features.chains.xmr = true; // xmr.lws_admin_key is empty
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn unsupported_price_provider_rejected() {
+        let mut c = valid();
+        c.features.prices = true;
+        c.features.prices_provider = "binance".into();
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn unsupported_price_asset_rejected() {
+        let mut c = valid();
+        c.features.prices = true;
+        c.features.prices_assets = vec!["doge".into()];
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn disabled_prices_skips_provider_validation() {
+        let mut c = valid();
+        c.features.prices = false;
+        c.features.prices_provider = "binance".into();
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn unsupported_price_currency_rejected() {
+        let mut c = valid();
+        c.features.prices = true;
+        c.features.prices_currency = "usdd".into(); // typo
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn enabled_utxo_chain_without_electrum_rejected_in_production() {
+        let mut c = valid();
+        c.environment = "production".into();
+        c.features.chains.btc = true; // btc has no electrum_primary/fallbacks
         assert!(c.validate().is_err());
     }
 }

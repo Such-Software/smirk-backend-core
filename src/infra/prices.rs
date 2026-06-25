@@ -19,6 +19,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const COINGECKO_URL: &str = "https://api.coingecko.com/api/v3/simple/price";
 /// Lower bound on the refresh interval, to stay within free-tier rate limits.
 const MIN_INTERVAL_SECS: u64 = 60;
+/// Upper bound on the price response body. The real payload is a handful of
+/// numbers; this caps memory if the (otherwise trusted) host misbehaves, matching
+/// the bounded-read convention used by the chain clients.
+const MAX_PRICE_BODY_BYTES: usize = 256 * 1024;
 
 /// Our asset symbols mapped to their CoinGecko coin ids.
 const COIN_IDS: &[(&str, &str)] = &[
@@ -61,8 +65,9 @@ pub struct PriceClient {
 impl PriceClient {
     /// Build a client for `provider` (e.g. `"coingecko"`), quoting `assets` in
     /// `currency` (e.g. `"usd"`). Assets not in [`COIN_IDS`] are dropped here
-    /// (config validation rejects them earlier). The provider is validated
-    /// lazily on first fetch.
+    /// (config validation rejects them earlier). The provider is enforced
+    /// fail-closed at startup by `Config::validate`; the `fetch` dispatch arm is
+    /// a belt-and-suspenders fallback.
     pub fn new(provider: &str, currency: &str, assets: &[String]) -> Result<Self, AppError> {
         let http = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
@@ -92,6 +97,11 @@ impl PriceClient {
     /// Whether any feed is enabled (an empty whitelist quotes nothing).
     pub fn is_empty(&self) -> bool {
         self.feeds.is_empty()
+    }
+
+    #[cfg(test)]
+    fn feed_symbols(&self) -> Vec<&str> {
+        self.feeds.iter().map(|(s, _)| s.as_str()).collect()
     }
 
     /// Fetch the current price for every enabled feed. Assets the provider omits
@@ -132,11 +142,10 @@ impl PriceClient {
             )));
         }
         // Shape: { "bitcoin": { "usd": 12345.6 }, ... }. The host is fixed and
-        // the payload is a handful of numbers, so `json()` (timeout-bounded) is
-        // sufficient here without the streaming cap the chain clients need.
-        let raw: HashMap<String, HashMap<String, f64>> = resp
-            .json()
-            .await
+        // trusted, but the body is still read with a streaming size cap (as the
+        // chain clients do) so a misbehaving upstream can't force a large alloc.
+        let body = read_capped(resp, MAX_PRICE_BODY_BYTES).await?;
+        let raw: HashMap<String, HashMap<String, f64>> = serde_json::from_slice(&body)
             .map_err(|_| AppError::NodeError("invalid price response".into()))?;
 
         let mut out = HashMap::new();
@@ -154,6 +163,24 @@ impl PriceClient {
 /// Clamp the configured refresh interval to a provider-friendly minimum.
 pub fn refresh_interval(configured_secs: u64) -> Duration {
     Duration::from_secs(configured_secs.max(MIN_INTERVAL_SECS))
+}
+
+/// Read a response body, failing if it exceeds `cap` bytes (content-length is
+/// attacker-assertable, so the limit is enforced as bytes actually arrive).
+async fn read_capped(resp: reqwest::Response, cap: usize) -> Result<Vec<u8>, AppError> {
+    use futures::StreamExt;
+    let mut stream = resp.bytes_stream();
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| AppError::NodeError("price read failed".into()))?;
+        if buf.len().saturating_add(chunk.len()) > cap {
+            return Err(AppError::NodeError(
+                "price response exceeded size limit".into(),
+            ));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
 }
 
 #[cfg(test)]
@@ -192,6 +219,14 @@ mod tests {
             .copied()
             .collect();
         assert_eq!(mapped, supported);
+    }
+
+    #[test]
+    fn subset_whitelist_selects_exactly_those_feeds() {
+        let client = PriceClient::new("coingecko", "usd", &["btc".into(), "grin".into()]).unwrap();
+        let mut syms = client.feed_symbols();
+        syms.sort();
+        assert_eq!(syms, vec!["btc", "grin"]);
     }
 
     #[test]

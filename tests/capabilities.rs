@@ -19,9 +19,19 @@ async fn capabilities_is_public_and_well_shaped() {
             "chain {chain} reports enabled"
         );
     }
-    // UTXO chains carry a network; CryptoNote/Grin don't.
-    assert!(body["chains"]["btc"]["network"].as_str().is_some());
-    assert!(body["chains"]["xmr"]["network"].is_null());
+    // UTXO chains carry a network; CryptoNote/Grin report null.
+    for chain in ["btc", "ltc"] {
+        assert!(
+            body["chains"][chain]["network"].as_str().is_some(),
+            "{chain} carries a network"
+        );
+    }
+    for chain in ["xmr", "wow", "grin"] {
+        assert!(
+            body["chains"][chain]["network"].is_null(),
+            "{chain} network is null"
+        );
+    }
     // Feature flags are present.
     for feat in ["grin_relay", "prices", "nostr_identity", "tips"] {
         assert!(

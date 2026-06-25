@@ -21,10 +21,9 @@ async fn prices_endpoint_respects_the_feature_flag() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["code"], "NOT_FOUND");
 
-    // Enabled → 200 with the documented shape. No background task in the harness,
-    // so prices are empty and updated_at is null until the first refresh.
+    // Enabled, before any refresh → 200 with the documented empty shape (the
+    // background task lives in `main`, not the harness, so updated_at is null).
     std::env::set_var("FEATURE_PRICES", "true");
-    std::env::set_var("PRICES_ASSETS", "btc,xmr");
     let app = common::try_app()
         .await
         .expect("app builds with prices enabled");
@@ -34,6 +33,24 @@ async fn prices_endpoint_respects_the_feature_flag() {
     assert!(body["prices"].is_object(), "prices is a map");
     assert!(body["updated_at"].is_null(), "not yet refreshed");
 
+    // Enabled, with a populated snapshot → the handler serves the quotes and a
+    // non-null RFC 3339 timestamp. Drives the serving path the inert
+    // PRICES_ASSETS env-var never could; feed *selection* is unit-tested in
+    // infra::prices.
+    {
+        let mut snap = app.state.prices.write().await;
+        snap.prices.insert("btc".into(), 64000.0);
+        snap.prices.insert("xmr".into(), 150.0);
+        snap.updated_at = Some(chrono::Utc::now());
+    }
+    let (status, body) = app.request("GET", "/api/v1/prices", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["prices"]["btc"], 64000.0);
+    assert_eq!(body["prices"]["xmr"], 150.0);
+    assert!(
+        body["updated_at"].as_str().is_some(),
+        "timestamp serialized"
+    );
+
     std::env::remove_var("FEATURE_PRICES");
-    std::env::remove_var("PRICES_ASSETS");
 }
