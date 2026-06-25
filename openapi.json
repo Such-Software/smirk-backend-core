@@ -429,6 +429,30 @@
         }
       }
     },
+    "/prices": {
+      "get": {
+        "tags": [
+          "prices"
+        ],
+        "summary": "Current fiat prices for the enabled feeds.",
+        "operationId": "prices",
+        "responses": {
+          "200": {
+            "description": "Latest cached prices",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PricesResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Price feed disabled on this server"
+          }
+        }
+      }
+    },
     "/users/by-username/{username}": {
       "get": {
         "tags": [
@@ -2449,6 +2473,37 @@
           }
         }
       },
+      "PricesResponse": {
+        "type": "object",
+        "required": [
+          "currency",
+          "prices"
+        ],
+        "properties": {
+          "currency": {
+            "type": "string",
+            "description": "Fiat currency the quotes are in (e.g. `\"usd\"`)."
+          },
+          "prices": {
+            "type": "object",
+            "description": "Asset symbol → price in `currency`. Only enabled feeds appear.",
+            "additionalProperties": {
+              "type": "number",
+              "format": "double"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 3339 timestamp of the last successful refresh; `null` until the first."
+          }
+        }
+      },
       "PublicKeysInfo": {
         "type": "object",
         "description": "A user's per-asset receiving public keys, by asset.",
@@ -3188,6 +3243,10 @@
     {
       "name": "system",
       "description": "Service health and metadata."
+    },
+    {
+      "name": "prices",
+      "description": "Fiat price feed (cached; per-feed configurable; feature-flagged)."
     },
     {
       "name": "auth",

@@ -10,7 +10,7 @@ use sqlx::postgres::PgPoolOptions;
 
 use smirk_backend_core::{
     build_router, config::Config, core::session::SessionManager, infra::chains::ChainClients,
-    infra::db::Database, AppState,
+    infra::db::Database, infra::prices, infra::prices::PriceSnapshot, AppState,
 };
 
 #[tokio::main]
@@ -37,12 +37,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let chains = ChainClients::from_config(&config)?;
 
     let addr = format!("{}:{}", config.server_host, config.server_port);
+    let prices_cache = Arc::new(tokio::sync::RwLock::new(PriceSnapshot::empty(
+        &config.features.prices_currency,
+    )));
     let state = Arc::new(AppState {
         config,
         db,
         sessions,
         chains,
         web_challenges: Arc::default(),
+        prices: prices_cache,
     });
 
     // Periodic GC of expired website-auth challenges. Bounds the single-node
@@ -74,6 +78,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         });
+    }
+
+    // Background price refresh (only when the feed is enabled). On each tick we
+    // fetch the configured feeds and replace the snapshot; a failure logs and
+    // keeps the last good values rather than blanking them. The first interval
+    // tick fires immediately, so prices populate at startup.
+    if state.config.features.prices {
+        let f = &state.config.features;
+        match prices::PriceClient::new(&f.prices_provider, &f.prices_currency, &f.prices_assets) {
+            Ok(client) if !client.is_empty() => {
+                let cache = state.prices.clone();
+                let period = prices::refresh_interval(f.prices_interval_secs);
+                tokio::spawn(async move {
+                    let mut tick = tokio::time::interval(period);
+                    loop {
+                        tick.tick().await;
+                        match client.fetch().await {
+                            Ok(prices) => {
+                                let mut snap = cache.write().await;
+                                snap.prices = prices;
+                                snap.updated_at = Some(chrono::Utc::now());
+                            }
+                            Err(e) => tracing::warn!(error = %e, "price refresh failed"),
+                        }
+                    }
+                });
+            }
+            Ok(_) => tracing::info!("price feed enabled but no assets configured; serving none"),
+            Err(e) => tracing::warn!(error = %e, "price client init failed; feed disabled"),
+        }
     }
 
     let app = build_router(state);

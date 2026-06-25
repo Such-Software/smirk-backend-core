@@ -17,6 +17,7 @@ use utoipa::OpenApi;
     paths(
         crate::api::health::health,
         crate::api::capabilities::capabilities,
+        crate::api::prices::prices,
         crate::api::auth::pow_challenge,
         crate::api::auth::extension_register,
         crate::api::auth::check_restore,
@@ -64,6 +65,7 @@ use utoipa::OpenApi;
         crate::api::capabilities::ChainCapabilities,
         crate::api::capabilities::ChainCapability,
         crate::api::capabilities::FeatureCapabilities,
+        crate::api::prices::PricesResponse,
         crate::api::auth::AuthResponse,
         crate::api::auth::UserInfo,
         crate::api::auth::AssetPublicKey,
@@ -133,6 +135,7 @@ use utoipa::OpenApi;
     )),
     tags(
         (name = "system", description = "Service health and metadata."),
+        (name = "prices", description = "Fiat price feed (cached; per-feed configurable; feature-flagged)."),
         (name = "auth", description = "Wallet authentication: registration, restore, refresh, sessions, Nostr identity."),
         (name = "btc_ltc", description = "Bitcoin/Litecoin chain access via Electrum (balance, UTXOs, history, tip, fee, broadcast)."),
         (name = "xmr_wow", description = "Monero/Wownero chain access via LWS (register, balance, history, unspent/random outs, submit, height, confirmations)."),

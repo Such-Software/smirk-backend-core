@@ -33,6 +33,7 @@ use crate::config::Config;
 use crate::core::session::{SessionManager, WebChallenge};
 use crate::infra::chains::ChainClients;
 use crate::infra::db::Database;
+use crate::infra::prices::PriceSnapshot;
 
 /// Global request-body cap (backstop; handlers validate tighter per field).
 const MAX_BODY_BYTES: usize = 1024 * 1024;
@@ -60,6 +61,9 @@ pub struct AppState {
     /// In-memory website-auth challenges, keyed by nonce. Single-node store;
     /// a shared/stateless variant is the load-balanced-fleet path.
     pub web_challenges: Arc<RwLock<HashMap<String, WebChallenge>>>,
+    /// Latest fetched fiat prices, refreshed by a background task when the price
+    /// feed is enabled. Stays empty (and `/prices` 404s) otherwise.
+    pub prices: Arc<RwLock<PriceSnapshot>>,
 }
 
 /// Assemble the full application router with every route mounted and state
@@ -96,6 +100,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             api::users::routes()
                 .merge(api::wallet::routes())
                 .merge(api::capabilities::routes())
+                .merge(api::prices::routes())
                 .layer(normal),
         );
 

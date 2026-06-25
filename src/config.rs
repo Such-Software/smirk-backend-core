@@ -154,12 +154,25 @@ pub struct SecretConfig {
     pub ip_salt: String,
 }
 
+/// Assets the price feed can quote. Source of truth for which `PRICES_ASSETS`
+/// values are accepted; the provider mapping (symbol→coin id) lives in
+/// `infra::prices` and a test there asserts it covers exactly this set.
+pub const SUPPORTED_PRICE_ASSETS: &[&str] = &["btc", "ltc", "xmr", "wow", "grin"];
+
 #[derive(Clone)]
 pub struct FeatureFlags {
     pub chains: ChainFlags,
+    /// Master switch for the price feed. When off, `/prices` is `404` and no
+    /// upstream is ever contacted.
     pub prices: bool,
     pub prices_provider: String,
     pub prices_interval_secs: u64,
+    /// Per-feed control: exactly which assets this instance quotes. Unset =
+    /// all supported; an explicit (possibly empty) `PRICES_ASSETS` list narrows
+    /// it — so an operator can serve a subset or none at all.
+    pub prices_assets: Vec<String>,
+    /// Fiat currency the feed quotes in (e.g. `"usd"`).
+    pub prices_currency: String,
     /// Parked feature; off by default.
     pub tips: bool,
     /// Nostr-native identity (NIP-98 login/link, NIP-05 directory).
@@ -313,6 +326,20 @@ impl Config {
                 prices: env_bool("FEATURE_PRICES", true),
                 prices_provider: env_or("PRICES_PROVIDER", "coingecko"),
                 prices_interval_secs: env_parse("PRICES_FETCH_INTERVAL_SECS", 300u64)?,
+                // Unset = all supported feeds; an explicit list (even empty)
+                // narrows it, so operators can serve a subset or none.
+                prices_assets: match env_opt("PRICES_ASSETS") {
+                    Some(s) => s
+                        .split(',')
+                        .map(|x| x.trim().to_lowercase())
+                        .filter(|x| !x.is_empty())
+                        .collect(),
+                    None => SUPPORTED_PRICE_ASSETS
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
+                },
+                prices_currency: env_or("PRICES_CURRENCY", "usd").to_lowercase(),
                 tips: env_bool("FEATURE_TIPS", false),
                 nostr_identity: env_bool("FEATURE_NOSTR_IDENTITY", true),
                 grin_relay: env_bool("FEATURE_GRIN_RELAY", true),
@@ -474,6 +501,19 @@ impl Config {
             );
         }
 
+        // Price feed: every configured asset must be one we can quote. Fail
+        // closed on a typo rather than silently dropping a feed.
+        if self.features.prices {
+            for asset in &self.features.prices_assets {
+                if !SUPPORTED_PRICE_ASSETS.contains(&asset.as_str()) {
+                    return Err(cfg_err(format!(
+                        "PRICES_ASSETS contains unsupported asset {asset:?}; supported: {}",
+                        SUPPORTED_PRICE_ASSETS.join(", ")
+                    )));
+                }
+            }
+        }
+
         // Per-enabled-chain infra secrets: hard error in production, warn in dev.
         let mut chain_warnings: Vec<&str> = Vec::new();
         if self.features.chains.xmr && self.chains.xmr.lws_admin_key.is_empty() {
@@ -550,6 +590,8 @@ mod tests {
                 prices: false,
                 prices_provider: "coingecko".into(),
                 prices_interval_secs: 300,
+                prices_assets: vec!["btc".into(), "xmr".into()],
+                prices_currency: "usd".into(),
                 tips: false,
                 nostr_identity: true,
                 grin_relay: true,
