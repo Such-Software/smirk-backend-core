@@ -16,6 +16,7 @@ use utoipa::OpenApi;
     ),
     paths(
         crate::api::health::health,
+        crate::api::capabilities::capabilities,
         crate::api::auth::pow_challenge,
         crate::api::auth::extension_register,
         crate::api::auth::check_restore,
@@ -59,6 +60,10 @@ use utoipa::OpenApi;
     ),
     components(schemas(
         crate::api::health::HealthResponse,
+        crate::api::capabilities::CapabilitiesResponse,
+        crate::api::capabilities::ChainCapabilities,
+        crate::api::capabilities::ChainCapability,
+        crate::api::capabilities::FeatureCapabilities,
         crate::api::auth::AuthResponse,
         crate::api::auth::UserInfo,
         crate::api::auth::AssetPublicKey,

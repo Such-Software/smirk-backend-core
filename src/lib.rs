@@ -95,6 +95,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(
             api::users::routes()
                 .merge(api::wallet::routes())
+                .merge(api::capabilities::routes())
                 .layer(normal),
         );
 

@@ -348,6 +348,27 @@
         }
       }
     },
+    "/capabilities": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Describe this instance's enabled chains and features.",
+        "operationId": "capabilities",
+        "responses": {
+          "200": {
+            "description": "Enabled chains and features",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapabilitiesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/health": {
       "get": {
         "tags": [
@@ -1670,6 +1691,71 @@
           }
         }
       },
+      "CapabilitiesResponse": {
+        "type": "object",
+        "required": [
+          "version",
+          "chains",
+          "features"
+        ],
+        "properties": {
+          "chains": {
+            "$ref": "#/components/schemas/ChainCapabilities"
+          },
+          "features": {
+            "$ref": "#/components/schemas/FeatureCapabilities"
+          },
+          "version": {
+            "type": "string",
+            "description": "Backend version (Cargo package version)."
+          }
+        }
+      },
+      "ChainCapabilities": {
+        "type": "object",
+        "required": [
+          "btc",
+          "ltc",
+          "xmr",
+          "wow",
+          "grin"
+        ],
+        "properties": {
+          "btc": {
+            "$ref": "#/components/schemas/ChainCapability"
+          },
+          "grin": {
+            "$ref": "#/components/schemas/ChainCapability"
+          },
+          "ltc": {
+            "$ref": "#/components/schemas/ChainCapability"
+          },
+          "wow": {
+            "$ref": "#/components/schemas/ChainCapability"
+          },
+          "xmr": {
+            "$ref": "#/components/schemas/ChainCapability"
+          }
+        }
+      },
+      "ChainCapability": {
+        "type": "object",
+        "description": "Per-chain availability. `network` is the configured network for UTXO chains\n(so the wallet derives addresses for the right one); `null` for chains whose\nnetwork isn't a backend setting.",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "network": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "CheckRestoreRequest": {
         "type": "object",
         "description": "Ask whether a wallet (by seed fingerprint) was created on this backend, and\nwhether the submitted keys match.",
@@ -1865,6 +1951,33 @@
               "null"
             ],
             "format": "int64"
+          }
+        }
+      },
+      "FeatureCapabilities": {
+        "type": "object",
+        "required": [
+          "grin_relay",
+          "prices",
+          "nostr_identity",
+          "tips"
+        ],
+        "properties": {
+          "grin_relay": {
+            "type": "boolean",
+            "description": "Grin async slatepack relay mailbox."
+          },
+          "nostr_identity": {
+            "type": "boolean",
+            "description": "Nostr-native identity (NIP-98 login/link, NIP-05 directory)."
+          },
+          "prices": {
+            "type": "boolean",
+            "description": "Fiat price feed."
+          },
+          "tips": {
+            "type": "boolean",
+            "description": "Tipping (parked)."
           }
         }
       },
