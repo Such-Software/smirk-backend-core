@@ -80,6 +80,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Periodic expiry sweep for the unified challenge store. The consume query
+    // already ignores expired rows; this just bounds the table.
+    {
+        let db = state.db.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(600));
+            loop {
+                tick.tick().await;
+                if let Err(e) = db.delete_expired_challenges().await {
+                    tracing::warn!(error = %e, "challenge expiry sweep failed");
+                }
+            }
+        });
+    }
+
     // Background price refresh (only when the feed is enabled). On each tick we
     // fetch the configured feeds and replace the snapshot; a failure logs and
     // keeps the last good values rather than blanking them. The first interval

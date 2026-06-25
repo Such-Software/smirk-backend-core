@@ -7,6 +7,7 @@
 //! reaches a column and the peppering cannot drift between call sites.
 
 mod audit;
+mod challenges;
 mod grin_slatepacks;
 mod login_events;
 mod restore_attempts;
@@ -14,6 +15,7 @@ mod sessions;
 mod user_keys;
 mod users;
 
+pub use challenges::ConsumedChallenge;
 pub use login_events::LoginStats;
 
 use sqlx::PgPool;
