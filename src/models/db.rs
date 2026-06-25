@@ -180,6 +180,41 @@ pub struct AuditLog {
     pub created_at: DateTime<Utc>,
 }
 
+/// An admin allowlist entry. The server holds only the pubkey; `integrity_mac`
+/// binds the authorization-bearing fields so a DB-write attacker cannot silently
+/// un-revoke or revive a key. Never `Serialize` to a public surface.
+#[derive(Debug, Clone, FromRow)]
+pub struct AdminKey {
+    pub id: Uuid,
+    pub pubkey: String,
+    pub label: Option<String>,
+    pub scope: String,
+    pub created_at: DateTime<Utc>,
+    pub created_by_kind: String,
+    /// `NULL` while pending (first login not yet completed).
+    pub activated_at: Option<DateTime<Utc>>,
+    pub activation_deadline: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub integrity_mac: String,
+}
+
+/// An admin session backing a short-lived admin access token. Separate table and
+/// secret from user `sessions` so the two token kinds can never be interchanged.
+#[derive(Debug, Clone, FromRow)]
+pub struct AdminSession {
+    pub id: Uuid,
+    pub admin_key_id: Uuid,
+    pub pubkey: String,
+    pub refresh_token_hash: String,
+    pub access_jti: String,
+    pub device_info: Option<String>,
+    pub ip_address: Option<IpNetwork>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
 // ── Input structs (no auto-generated fields) ────────────────────────────────
 
 /// Input for creating a new user. Peppered values are supplied by the db layer.
@@ -232,6 +267,17 @@ pub struct NewGrinSlatepack {
     pub slatepack_content: String,
     pub amount_nanogrin: i64,
     pub expires_at: DateTime<Utc>,
+}
+
+/// Input for adding an admin allowlist entry. The `id`, timestamps, and
+/// `integrity_mac` are computed by the db layer.
+#[derive(Debug, Clone)]
+pub struct NewAdminKey {
+    pub pubkey: String,
+    pub label: Option<String>,
+    pub scope: String,
+    pub created_by_kind: String,
+    pub activation_deadline: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
