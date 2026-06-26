@@ -8,6 +8,7 @@
 //! signed at write equals the value read back.
 
 use chrono::{SubsecRound, Utc};
+use sqlx::PgConnection;
 use tracing::instrument;
 use uuid::Uuid;
 
@@ -15,7 +16,7 @@ use crate::core::crypto::admin_mac::{
     compute_admin_key_mac, verify_admin_key_mac, AdminKeyMacInput,
 };
 use crate::error::AppError;
-use crate::models::db::{AdminKey, NewAdminKey};
+use crate::models::db::{AdminKey, NewAdminAudit, NewAdminKey};
 
 use super::{unique_violation_as, Database};
 
@@ -43,38 +44,23 @@ impl Database {
         input: NewAdminKey,
         secret: &str,
     ) -> Result<AdminKey, AppError> {
-        let id = Uuid::new_v4();
-        let created_at = Utc::now().trunc_subsecs(6);
-        let mac = compute_admin_key_mac(
-            secret,
-            &AdminKeyMacInput {
-                id,
-                pubkey: &input.pubkey,
-                scope: &input.scope,
-                created_at,
-                activated_at: None,
-                revoked_at: None,
-            },
-        );
-        let sql = format!(
-            "INSERT INTO admin_keys \
-             (id, pubkey, label, scope, created_at, created_by_kind, activation_deadline, integrity_mac) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING {COLS}"
-        );
-        let key = sqlx::query_as::<_, AdminKey>(&sql)
-            .bind(id)
-            .bind(&input.pubkey)
-            .bind(&input.label)
-            .bind(&input.scope)
-            .bind(created_at)
-            .bind(&input.created_by_kind)
-            .bind(input.activation_deadline)
-            .bind(&mac)
-            .fetch_one(self.pool())
-            .await
-            .map_err(unique_violation_as(
-                "an active admin key with this pubkey already exists",
-            ))?;
+        let mut conn = self.pool().acquire().await?;
+        insert_admin_key(&mut conn, &input, secret).await
+    }
+
+    /// Add an allowlist entry AND append its audit row in ONE transaction, so the
+    /// audit write is fail-closed (a failed audit rolls back the key creation).
+    #[instrument(skip(self, audit, secret))]
+    pub async fn create_admin_key_audited(
+        &self,
+        input: NewAdminKey,
+        audit: &NewAdminAudit,
+        secret: &str,
+    ) -> Result<AdminKey, AppError> {
+        let mut tx = self.pool().begin().await?;
+        let key = insert_admin_key(&mut tx, &input, secret).await?;
+        self.append_admin_audit(&mut tx, audit, secret).await?;
+        tx.commit().await?;
         Ok(key)
     }
 
@@ -219,4 +205,150 @@ impl Database {
         tx.commit().await?;
         Ok(Some(updated))
     }
+
+    /// Soft-revoke a key, revoke ALL its sessions, and append the audit row — all
+    /// in ONE transaction (so a revoked admin's still-valid access token is
+    /// rejected on its next call, and the audit is fail-closed). Returns the
+    /// updated key, or `None` if it was already revoked / does not exist.
+    #[instrument(skip(self, audit, secret))]
+    pub async fn revoke_admin_key_full(
+        &self,
+        id: Uuid,
+        audit: &NewAdminAudit,
+        secret: &str,
+    ) -> Result<Option<AdminKey>, AppError> {
+        let mut tx = self.pool().begin().await?;
+        let sel = format!(
+            "SELECT {COLS} FROM admin_keys WHERE id = $1 AND revoked_at IS NULL FOR UPDATE"
+        );
+        let Some(key) = sqlx::query_as::<_, AdminKey>(&sel)
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?
+        else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        let revoked_at = Utc::now().trunc_subsecs(6);
+        let mac = compute_admin_key_mac(
+            secret,
+            &AdminKeyMacInput {
+                revoked_at: Some(revoked_at),
+                ..mac_input(&key)
+            },
+        );
+        let upd = format!(
+            "UPDATE admin_keys SET revoked_at = $2, integrity_mac = $3 WHERE id = $1 RETURNING {COLS}"
+        );
+        let updated = sqlx::query_as::<_, AdminKey>(&upd)
+            .bind(id)
+            .bind(revoked_at)
+            .bind(&mac)
+            .fetch_one(&mut *tx)
+            .await?;
+        sqlx::query(
+            "UPDATE admin_sessions SET revoked_at = NOW() \
+             WHERE admin_key_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        self.append_admin_audit(&mut tx, audit, secret).await?;
+        tx.commit().await?;
+        Ok(Some(updated))
+    }
+
+    /// Atomically rotate a key: revoke `old_id` (+ its sessions), create a fresh
+    /// pending key from `new`, and audit — all in one transaction. This is the
+    /// in-band recovery for a compromised solo key (add+revoke, so it never leaves
+    /// the allowlist empty). Returns the new key, or `None` if `old_id` was
+    /// already revoked / does not exist; 409 if the new pubkey is already active.
+    #[instrument(skip(self, new, audit, secret))]
+    pub async fn rotate_admin_key(
+        &self,
+        old_id: Uuid,
+        new: NewAdminKey,
+        audit: &NewAdminAudit,
+        secret: &str,
+    ) -> Result<Option<AdminKey>, AppError> {
+        let mut tx = self.pool().begin().await?;
+        let sel = format!(
+            "SELECT {COLS} FROM admin_keys WHERE id = $1 AND revoked_at IS NULL FOR UPDATE"
+        );
+        let Some(old) = sqlx::query_as::<_, AdminKey>(&sel)
+            .bind(old_id)
+            .fetch_optional(&mut *tx)
+            .await?
+        else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        let revoked_at = Utc::now().trunc_subsecs(6);
+        let old_mac = compute_admin_key_mac(
+            secret,
+            &AdminKeyMacInput {
+                revoked_at: Some(revoked_at),
+                ..mac_input(&old)
+            },
+        );
+        sqlx::query("UPDATE admin_keys SET revoked_at = $2, integrity_mac = $3 WHERE id = $1")
+            .bind(old_id)
+            .bind(revoked_at)
+            .bind(&old_mac)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "UPDATE admin_sessions SET revoked_at = NOW() \
+             WHERE admin_key_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(old_id)
+        .execute(&mut *tx)
+        .await?;
+        let created = insert_admin_key(&mut tx, &new, secret).await?;
+        self.append_admin_audit(&mut tx, audit, secret).await?;
+        tx.commit().await?;
+        Ok(Some(created))
+    }
+}
+
+/// Insert a pending allowlist entry on `conn` (so it can share a caller's
+/// transaction). Computes the integrity MAC over the exact stored values. 409 if
+/// an active key with this pubkey already exists.
+async fn insert_admin_key(
+    conn: &mut PgConnection,
+    input: &NewAdminKey,
+    secret: &str,
+) -> Result<AdminKey, AppError> {
+    let id = Uuid::new_v4();
+    let created_at = Utc::now().trunc_subsecs(6);
+    let mac = compute_admin_key_mac(
+        secret,
+        &AdminKeyMacInput {
+            id,
+            pubkey: &input.pubkey,
+            scope: &input.scope,
+            created_at,
+            activated_at: None,
+            revoked_at: None,
+        },
+    );
+    let sql = format!(
+        "INSERT INTO admin_keys \
+         (id, pubkey, label, scope, created_at, created_by_kind, activation_deadline, integrity_mac) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING {COLS}"
+    );
+    sqlx::query_as::<_, AdminKey>(&sql)
+        .bind(id)
+        .bind(&input.pubkey)
+        .bind(&input.label)
+        .bind(&input.scope)
+        .bind(created_at)
+        .bind(&input.created_by_kind)
+        .bind(input.activation_deadline)
+        .bind(&mac)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(unique_violation_as(
+            "an active admin key with this pubkey already exists",
+        ))
 }

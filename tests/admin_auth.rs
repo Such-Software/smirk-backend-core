@@ -9,11 +9,33 @@ mod common;
 use axum::http::StatusCode;
 use base64::Engine;
 use k256::schnorr::SigningKey;
+use rand::rngs::OsRng;
+use rand::RngCore;
 use sha2::{Digest, Sha256};
 use smirk_backend_core::core::crypto::nip98::{descriptor_sha256, request_descriptor};
 use smirk_backend_core::models::db::NewAdminKey;
 
 const NIP98_KIND: u32 = 27235;
+
+/// A fresh, valid schnorr signer (random per run, so the shared test DB's unique
+/// active-pubkey constraint never collides across runs).
+fn random_signer() -> SigningKey {
+    loop {
+        let mut b = [0u8; 32];
+        OsRng.fill_bytes(&mut b);
+        if let Ok(sk) = SigningKey::from_bytes(&b) {
+            return sk;
+        }
+    }
+}
+
+/// A random 64-char lowercase hex pubkey (format-valid; no curve point needed for
+/// allowlist entries that are never signed with in this test).
+fn random_pubkey_hex() -> String {
+    let mut b = [0u8; 32];
+    OsRng.fill_bytes(&mut b);
+    hex::encode(b)
+}
 
 /// Build a `Nostr <base64(event)>` admin_login signed-action token.
 #[allow(clippy::too_many_arguments)]
@@ -63,13 +85,17 @@ async fn admin_login_guard_refresh_logout_flow() {
         "admin-integrity-secret-at-least-32-bytes!",
     );
     std::env::set_var("ADMIN_PUBLIC_URL", "http://127.0.0.1:8081");
+    // The live-key cap + last-key revoke guard are count-based on a table the
+    // shared test DB pollutes across runs/sibling suites, so they can't be
+    // boundary-tested here (covered by review); raise the cap for the happy path.
+    std::env::set_var("ADMIN_MAX_KEYS", "1000000");
 
     let app = require_app!();
     let admin = app.admin_router();
     let secret = app.state.config.admin.key_integrity_secret.clone();
 
     // Seed a PENDING admin key for our signer.
-    let sk = SigningKey::from_bytes(&[9u8; 32]).unwrap();
+    let sk = random_signer();
     let pk_hex = hex::encode(sk.verifying_key().to_bytes());
     app.state
         .db
@@ -142,6 +168,68 @@ async fn admin_login_guard_refresh_logout_flow() {
         "user token rejected on admin plane"
     );
 
+    // 4b. Keys CRUD as the activated admin. (The last-key revoke guard is not
+    // asserted here: live-key count is global to the shared test DB and polluted
+    // by sibling test files, so it cannot be forced to 1 deterministically.)
+    let new_pk = random_pubkey_hex();
+    let (st, body) = app
+        .request_on(
+            admin.clone(),
+            "POST",
+            "/admin/keys",
+            Some(&access),
+            Some(serde_json::json!({ "pubkey": new_pk, "label": "second" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "add key: {body:?}");
+    assert_eq!(body["status"].as_str().unwrap(), "pending");
+    let added_id = body["id"].as_str().unwrap().to_string();
+
+    // A malformed pubkey is rejected.
+    let (st, _) = app
+        .request_on(
+            admin.clone(),
+            "POST",
+            "/admin/keys",
+            Some(&access),
+            Some(serde_json::json!({ "pubkey": "nothex" })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "bad pubkey rejected");
+
+    // List shows at least our two keys.
+    let (st, body) = app
+        .request_on(admin.clone(), "GET", "/admin/keys", Some(&access), None)
+        .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(body["keys"].as_array().unwrap().len() >= 2);
+
+    // Rotate the added key -> a fresh pending key.
+    let rot_pk = random_pubkey_hex();
+    let (st, body) = app
+        .request_on(
+            admin.clone(),
+            "POST",
+            &format!("/admin/keys/{added_id}/rotate"),
+            Some(&access),
+            Some(serde_json::json!({ "pubkey": rot_pk })),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "rotate: {body:?}");
+    let rotated_id = body["id"].as_str().unwrap().to_string();
+
+    // Revoke the rotated key (more than one live key exists, so it is permitted).
+    let (st, _) = app
+        .request_on(
+            admin.clone(),
+            "DELETE",
+            &format!("/admin/keys/{rotated_id}"),
+            Some(&access),
+            None,
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "revoke");
+
     // 5. Replay: the consumed challenge cannot be reused.
     let (st, _) = app
         .request_on(
@@ -201,6 +289,7 @@ async fn admin_login_guard_refresh_logout_flow() {
         "ADMIN_JWT_SECRET",
         "ADMIN_KEY_INTEGRITY_SECRET",
         "ADMIN_PUBLIC_URL",
+        "ADMIN_MAX_KEYS",
     ] {
         std::env::remove_var(k);
     }

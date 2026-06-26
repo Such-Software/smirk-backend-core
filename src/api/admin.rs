@@ -16,12 +16,12 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{ConnectInfo, State},
+    extract::{ConnectInfo, Path, State},
     http::HeaderMap,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -35,7 +35,7 @@ use crate::core::admin_session::AdminSessionManager;
 use crate::core::crypto::nip98::{descriptor_sha256, request_descriptor, verify_signed_action};
 use crate::core::session::hash_refresh_token;
 use crate::error::AppError;
-use crate::models::db::{NewAdminAudit, NewAdminSession};
+use crate::models::db::{AdminKey, NewAdminAudit, NewAdminKey, NewAdminSession};
 use crate::AppState;
 
 /// Admin-login nonce lifetime.
@@ -75,6 +75,32 @@ fn admin_instance_id(state: &AppState) -> String {
 
 fn pubkey_prefix(pubkey: &str) -> String {
     pubkey.chars().take(PUBKEY_PREFIX_LEN).collect()
+}
+
+/// Validate an x-only secp256k1 pubkey: exactly 64 lowercase hex chars.
+fn validate_admin_pubkey(pubkey: &str) -> Result<(), AppError> {
+    let ok = pubkey.len() == 64
+        && pubkey
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if ok {
+        Ok(())
+    } else {
+        Err(AppError::ValidationError(
+            "pubkey must be 64 lowercase hex chars".into(),
+        ))
+    }
+}
+
+/// Lifecycle label for an allowlist row.
+fn key_status(k: &AdminKey) -> &'static str {
+    if k.revoked_at.is_some() {
+        "revoked"
+    } else if k.activated_at.is_none() {
+        "pending"
+    } else {
+        "active"
+    }
 }
 
 // ── guard ────────────────────────────────────────────────────────────────────
@@ -382,6 +408,183 @@ pub async fn admin_me(
     }))
 }
 
+// ── keys CRUD ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct AddKeyRequest {
+    pub pubkey: String,
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct KeyResponse {
+    pub id: String,
+    pub pubkey: String,
+    pub status: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminKeyView {
+    pub id: String,
+    pub pubkey: String,
+    pub label: Option<String>,
+    pub scope: String,
+    pub status: String,
+    pub created_at: String,
+    pub activated_at: Option<String>,
+    pub revoked_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct KeysListResponse {
+    pub keys: Vec<AdminKeyView>,
+}
+
+fn key_view(k: &AdminKey) -> AdminKeyView {
+    AdminKeyView {
+        id: k.id.to_string(),
+        pubkey: k.pubkey.clone(),
+        label: k.label.clone(),
+        scope: k.scope.clone(),
+        status: key_status(k).to_string(),
+        created_at: k.created_at.to_rfc3339(),
+        activated_at: k.activated_at.map(|t| t.to_rfc3339()),
+        revoked_at: k.revoked_at.map(|t| t.to_rfc3339()),
+    }
+}
+
+/// Build a pending `NewAdminKey` from a validated request, created over the
+/// network (so `created_by_kind = admin`), with the configured activation TTL.
+fn pending_key(state: &AppState, pubkey: String, label: Option<String>) -> NewAdminKey {
+    NewAdminKey {
+        pubkey,
+        label,
+        scope: "admin".into(),
+        created_by_kind: "admin".into(),
+        activation_deadline: Some(
+            Utc::now() + Duration::days(state.config.admin.pending_key_ttl_days as i64),
+        ),
+    }
+}
+
+/// Add a pending allowlist entry (it activates on its holder's first login).
+#[instrument(skip(state, headers, req))]
+pub async fn admin_keys_add(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<AddKeyRequest>,
+) -> Result<Json<KeyResponse>, AppError> {
+    let ctx = admin_guard(&state, &headers).await?;
+    let pubkey = req.pubkey.to_lowercase();
+    validate_admin_pubkey(&pubkey)?;
+
+    // Cap total live (active + pending) keys to prevent allowlist-stuffing.
+    if state.db.count_live_admin_keys().await? >= state.config.admin.max_keys as i64 {
+        return Err(AppError::Forbidden(
+            "admin key limit reached; revoke an existing key first".into(),
+        ));
+    }
+
+    let secret = &state.config.admin.key_integrity_secret;
+    let audit = NewAdminAudit {
+        action: "admin_key_added".into(),
+        actor_kind: "admin".into(),
+        actor_pubkey_prefix: Some(pubkey_prefix(&ctx.pubkey)),
+        target: Some(pubkey_prefix(&pubkey)),
+        details: None,
+        ip_address: None,
+    };
+    let key = state
+        .db
+        .create_admin_key_audited(pending_key(&state, pubkey, req.label), &audit, secret)
+        .await?;
+    let status = key_status(&key).to_string();
+    Ok(Json(KeyResponse {
+        id: key.id.to_string(),
+        pubkey: key.pubkey,
+        status,
+    }))
+}
+
+/// List all allowlist entries (active, pending, revoked).
+#[instrument(skip(state, headers))]
+pub async fn admin_keys_list(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<KeysListResponse>, AppError> {
+    admin_guard(&state, &headers).await?;
+    let keys = state.db.list_admin_keys().await?;
+    Ok(Json(KeysListResponse {
+        keys: keys.iter().map(key_view).collect(),
+    }))
+}
+
+/// Soft-revoke a key (+ its sessions). Refuses to revoke the LAST live key over
+/// the network — that is CLI-only, so an operator cannot lock everyone out.
+#[instrument(skip(state, headers))]
+pub async fn admin_keys_revoke(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<OkResponse>, AppError> {
+    let ctx = admin_guard(&state, &headers).await?;
+    if state.db.count_live_admin_keys().await? <= 1 {
+        return Err(AppError::Forbidden(
+            "refusing to revoke the last admin key over the network; use the CLI".into(),
+        ));
+    }
+    let secret = &state.config.admin.key_integrity_secret;
+    let audit = NewAdminAudit {
+        action: "admin_key_revoked".into(),
+        actor_kind: "admin".into(),
+        actor_pubkey_prefix: Some(pubkey_prefix(&ctx.pubkey)),
+        target: Some(id.to_string()),
+        details: None,
+        ip_address: None,
+    };
+    state
+        .db
+        .revoke_admin_key_full(id, &audit, secret)
+        .await?
+        .ok_or_else(|| AppError::NotFound("admin key not found or already revoked".into()))?;
+    Ok(Json(OkResponse { ok: true }))
+}
+
+/// Atomically rotate a key: revoke the old one (+ its sessions) and add a fresh
+/// pending one. Permitted on the last live key (it is add+revoke, not a bare
+/// revoke), so it is the in-band recovery for a compromised solo key.
+#[instrument(skip(state, headers, req))]
+pub async fn admin_keys_rotate(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(req): Json<AddKeyRequest>,
+) -> Result<Json<KeyResponse>, AppError> {
+    let ctx = admin_guard(&state, &headers).await?;
+    let pubkey = req.pubkey.to_lowercase();
+    validate_admin_pubkey(&pubkey)?;
+    let secret = &state.config.admin.key_integrity_secret;
+    let audit = NewAdminAudit {
+        action: "admin_key_rotated".into(),
+        actor_kind: "admin".into(),
+        actor_pubkey_prefix: Some(pubkey_prefix(&ctx.pubkey)),
+        target: Some(id.to_string()),
+        details: None,
+        ip_address: None,
+    };
+    let key = state
+        .db
+        .rotate_admin_key(id, pending_key(&state, pubkey, req.label), &audit, secret)
+        .await?
+        .ok_or_else(|| AppError::NotFound("admin key not found or already revoked".into()))?;
+    let status = key_status(&key).to_string();
+    Ok(Json(KeyResponse {
+        id: key.id.to_string(),
+        pubkey: key.pubkey,
+        status,
+    }))
+}
+
 // ── router ───────────────────────────────────────────────────────────────────
 
 /// Admin-plane routes. Mounted by [`crate::admin_router`] on the loopback socket.
@@ -392,4 +595,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/admin/auth/refresh", post(admin_refresh))
         .route("/admin/auth/logout", post(admin_logout))
         .route("/admin/me", get(admin_me))
+        .route("/admin/keys", post(admin_keys_add).get(admin_keys_list))
+        .route("/admin/keys/:id", delete(admin_keys_revoke))
+        .route("/admin/keys/:id/rotate", post(admin_keys_rotate))
 }
