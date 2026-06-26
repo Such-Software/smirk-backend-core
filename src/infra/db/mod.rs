@@ -6,6 +6,7 @@
 //! `seed_fingerprint`) are peppered inside these methods so the plaintext never
 //! reaches a column and the peppering cannot drift between call sites.
 
+mod admin_audit;
 mod admin_keys;
 mod admin_sessions;
 mod audit;
