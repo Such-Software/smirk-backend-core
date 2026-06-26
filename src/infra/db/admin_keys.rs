@@ -24,6 +24,26 @@ use super::{unique_violation_as, Database};
 const COLS: &str = "id, pubkey, label, scope, created_at, created_by_kind, \
      activated_at, activation_deadline, revoked_at, last_used_at, integrity_mac";
 
+/// Advisory-lock key serializing add/revoke/rotate, so the count-based guards
+/// (the `ADMIN_MAX_KEYS` cap and the last-key floor) are evaluated and acted on
+/// atomically rather than as racy check-then-mutate.
+const ADMIN_KEYS_LOCK_KEY: i64 = 0x5311_4D17_4B59_0001;
+
+/// Outcome of an audited key add.
+pub enum AddKeyOutcome {
+    Created(AdminKey),
+    /// The live-key cap (`ADMIN_MAX_KEYS`) is already reached.
+    CapReached,
+}
+
+/// Outcome of a network key revoke.
+pub enum RevokeKeyOutcome {
+    Revoked(AdminKey),
+    NotFound,
+    /// Refused: revoking would leave the allowlist with no live key (a lockout).
+    WouldEmptyAllowlist,
+}
+
 fn mac_input<'a>(k: &'a AdminKey) -> AdminKeyMacInput<'a> {
     AdminKeyMacInput {
         id: k.id,
@@ -31,6 +51,7 @@ fn mac_input<'a>(k: &'a AdminKey) -> AdminKeyMacInput<'a> {
         scope: &k.scope,
         created_at: k.created_at,
         activated_at: k.activated_at,
+        activation_deadline: k.activation_deadline,
         revoked_at: k.revoked_at,
     }
 }
@@ -38,7 +59,7 @@ fn mac_input<'a>(k: &'a AdminKey) -> AdminKeyMacInput<'a> {
 impl Database {
     /// Add an allowlist entry (pending — `activated_at` NULL until first login).
     /// Fails 409 if an active key with this pubkey already exists.
-    #[instrument(skip(self, secret))]
+    #[instrument(skip(self, input, secret))]
     pub async fn create_admin_key(
         &self,
         input: NewAdminKey,
@@ -50,23 +71,33 @@ impl Database {
 
     /// Add an allowlist entry AND append its audit row in ONE transaction, so the
     /// audit write is fail-closed (a failed audit rolls back the key creation).
-    #[instrument(skip(self, audit, secret))]
+    #[instrument(skip(self, input, audit, secret))]
     pub async fn create_admin_key_audited(
         &self,
         input: NewAdminKey,
         audit: &NewAdminAudit,
         secret: &str,
-    ) -> Result<AdminKey, AppError> {
+        max_live: i64,
+    ) -> Result<AddKeyOutcome, AppError> {
         let mut tx = self.pool().begin().await?;
+        admin_keys_mutate_lock(&mut tx).await?;
+        // Count under the lock so the cap can't be raced by concurrent adds.
+        let live = live_key_count(&mut tx).await?;
+        if live >= max_live {
+            tx.rollback().await?;
+            return Ok(AddKeyOutcome::CapReached);
+        }
         let key = insert_admin_key(&mut tx, &input, secret).await?;
         self.append_admin_audit(&mut tx, audit, secret).await?;
         tx.commit().await?;
-        Ok(key)
+        Ok(AddKeyOutcome::Created(key))
     }
 
     /// The active (non-revoked) allowlist entry for `pubkey`, IF its integrity
     /// MAC verifies. A mismatch returns `None` (fail-closed) and logs tampering.
-    #[instrument(skip(self, secret))]
+    /// `pubkey` is skipped from the span — the surface keeps only prefixes, no
+    /// full keys, in logs/audit (no social graph).
+    #[instrument(skip(self, pubkey, secret))]
     pub async fn get_active_admin_key(
         &self,
         pubkey: &str,
@@ -208,16 +239,24 @@ impl Database {
 
     /// Soft-revoke a key, revoke ALL its sessions, and append the audit row — all
     /// in ONE transaction (so a revoked admin's still-valid access token is
-    /// rejected on its next call, and the audit is fail-closed). Returns the
-    /// updated key, or `None` if it was already revoked / does not exist.
+    /// rejected on its next call, and the audit is fail-closed). When
+    /// `keep_min_live` is set, refuses (atomically) to revoke the last live key.
     #[instrument(skip(self, audit, secret))]
     pub async fn revoke_admin_key_full(
         &self,
         id: Uuid,
         audit: &NewAdminAudit,
         secret: &str,
-    ) -> Result<Option<AdminKey>, AppError> {
+        keep_min_live: bool,
+    ) -> Result<RevokeKeyOutcome, AppError> {
         let mut tx = self.pool().begin().await?;
+        admin_keys_mutate_lock(&mut tx).await?;
+        // Floor check INSIDE the locked tx: two concurrent revokes cannot both
+        // pass and empty the allowlist (a network lockout).
+        if keep_min_live && live_key_count(&mut tx).await? <= 1 {
+            tx.rollback().await?;
+            return Ok(RevokeKeyOutcome::WouldEmptyAllowlist);
+        }
         let sel = format!(
             "SELECT {COLS} FROM admin_keys WHERE id = $1 AND revoked_at IS NULL FOR UPDATE"
         );
@@ -227,7 +266,7 @@ impl Database {
             .await?
         else {
             tx.rollback().await?;
-            return Ok(None);
+            return Ok(RevokeKeyOutcome::NotFound);
         };
         let revoked_at = Utc::now().trunc_subsecs(6);
         let mac = compute_admin_key_mac(
@@ -255,7 +294,7 @@ impl Database {
         .await?;
         self.append_admin_audit(&mut tx, audit, secret).await?;
         tx.commit().await?;
-        Ok(Some(updated))
+        Ok(RevokeKeyOutcome::Revoked(updated))
     }
 
     /// Atomically rotate a key: revoke `old_id` (+ its sessions), create a fresh
@@ -272,6 +311,7 @@ impl Database {
         secret: &str,
     ) -> Result<Option<AdminKey>, AppError> {
         let mut tx = self.pool().begin().await?;
+        admin_keys_mutate_lock(&mut tx).await?;
         let sel = format!(
             "SELECT {COLS} FROM admin_keys WHERE id = $1 AND revoked_at IS NULL FOR UPDATE"
         );
@@ -329,6 +369,7 @@ async fn insert_admin_key(
             scope: &input.scope,
             created_at,
             activated_at: None,
+            activation_deadline: input.activation_deadline,
             revoked_at: None,
         },
     );
@@ -351,4 +392,23 @@ async fn insert_admin_key(
         .map_err(unique_violation_as(
             "an active admin key with this pubkey already exists",
         ))
+}
+
+/// Take the admin-keys mutation advisory lock (transaction-scoped). Serializes
+/// add/revoke/rotate so the cap and last-key floor are race-free.
+async fn admin_keys_mutate_lock(conn: &mut PgConnection) -> Result<(), AppError> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(ADMIN_KEYS_LOCK_KEY)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// Count live (non-revoked) keys on `conn` (so it reflects the locked tx).
+async fn live_key_count(conn: &mut PgConnection) -> Result<i64, AppError> {
+    let n =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM admin_keys WHERE revoked_at IS NULL")
+            .fetch_one(&mut *conn)
+            .await?;
+    Ok(n)
 }

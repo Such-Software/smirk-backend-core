@@ -35,6 +35,7 @@ use crate::core::admin_session::AdminSessionManager;
 use crate::core::crypto::nip98::{descriptor_sha256, request_descriptor, verify_signed_action};
 use crate::core::session::hash_refresh_token;
 use crate::error::AppError;
+use crate::infra::db::{AddKeyOutcome, RevokeKeyOutcome};
 use crate::models::db::{AdminKey, NewAdminAudit, NewAdminKey, NewAdminSession};
 use crate::AppState;
 
@@ -478,13 +479,6 @@ pub async fn admin_keys_add(
     let pubkey = req.pubkey.to_lowercase();
     validate_admin_pubkey(&pubkey)?;
 
-    // Cap total live (active + pending) keys to prevent allowlist-stuffing.
-    if state.db.count_live_admin_keys().await? >= state.config.admin.max_keys as i64 {
-        return Err(AppError::Forbidden(
-            "admin key limit reached; revoke an existing key first".into(),
-        ));
-    }
-
     let secret = &state.config.admin.key_integrity_secret;
     let audit = NewAdminAudit {
         action: "admin_key_added".into(),
@@ -494,10 +488,24 @@ pub async fn admin_keys_add(
         details: None,
         ip_address: None,
     };
-    let key = state
+    // The live-key cap is enforced INSIDE the insert transaction (race-free).
+    let key = match state
         .db
-        .create_admin_key_audited(pending_key(&state, pubkey, req.label), &audit, secret)
-        .await?;
+        .create_admin_key_audited(
+            pending_key(&state, pubkey, req.label),
+            &audit,
+            secret,
+            state.config.admin.max_keys as i64,
+        )
+        .await?
+    {
+        AddKeyOutcome::Created(key) => key,
+        AddKeyOutcome::CapReached => {
+            return Err(AppError::Forbidden(
+                "admin key limit reached; revoke an existing key first".into(),
+            ))
+        }
+    };
     let status = key_status(&key).to_string();
     Ok(Json(KeyResponse {
         id: key.id.to_string(),
@@ -528,11 +536,6 @@ pub async fn admin_keys_revoke(
     Path(id): Path<Uuid>,
 ) -> Result<Json<OkResponse>, AppError> {
     let ctx = admin_guard(&state, &headers).await?;
-    if state.db.count_live_admin_keys().await? <= 1 {
-        return Err(AppError::Forbidden(
-            "refusing to revoke the last admin key over the network; use the CLI".into(),
-        ));
-    }
     let secret = &state.config.admin.key_integrity_secret;
     let audit = NewAdminAudit {
         action: "admin_key_revoked".into(),
@@ -542,12 +545,21 @@ pub async fn admin_keys_revoke(
         details: None,
         ip_address: None,
     };
-    state
+    // The last-key floor is enforced INSIDE the revoke transaction (race-free):
+    // concurrent revokes cannot both pass the check and empty the allowlist.
+    match state
         .db
-        .revoke_admin_key_full(id, &audit, secret)
+        .revoke_admin_key_full(id, &audit, secret, true)
         .await?
-        .ok_or_else(|| AppError::NotFound("admin key not found or already revoked".into()))?;
-    Ok(Json(OkResponse { ok: true }))
+    {
+        RevokeKeyOutcome::Revoked(_) => Ok(Json(OkResponse { ok: true })),
+        RevokeKeyOutcome::NotFound => Err(AppError::NotFound(
+            "admin key not found or already revoked".into(),
+        )),
+        RevokeKeyOutcome::WouldEmptyAllowlist => Err(AppError::Forbidden(
+            "refusing to revoke the last admin key over the network; use the CLI".into(),
+        )),
+    }
 }
 
 /// Atomically rotate a key: revoke the old one (+ its sessions) and add a fresh

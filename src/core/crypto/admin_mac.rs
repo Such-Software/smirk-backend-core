@@ -22,6 +22,9 @@ pub struct AdminKeyMacInput<'a> {
     pub scope: &'a str,
     pub created_at: DateTime<Utc>,
     pub activated_at: Option<DateTime<Utc>>,
+    /// Bound so a DB-write attacker cannot revive an expired pending key by
+    /// pushing out / nulling its deadline.
+    pub activation_deadline: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
@@ -35,6 +38,7 @@ pub fn compute_admin_key_mac(secret: &str, input: &AdminKeyMacInput) -> String {
         input.scope,
         input.created_at.timestamp_micros(),
         input.activated_at.map(|t| t.timestamp_micros()),
+        input.activation_deadline.map(|t| t.timestamp_micros()),
         input.revoked_at.map(|t| t.timestamp_micros()),
     ])
     .to_string();
@@ -60,6 +64,7 @@ mod tests {
             scope: "admin",
             created_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
             activated_at: None,
+            activation_deadline: None,
             revoked_at: None,
         }
     }
@@ -91,6 +96,17 @@ mod tests {
 
         let mac_revoked = compute_admin_key_mac("secret", &revoked);
         assert!(!verify_admin_key_mac("secret", &active, &mac_revoked));
+    }
+
+    #[test]
+    fn activation_deadline_is_bound() {
+        // Nulling/extending a pending key's deadline must invalidate the MAC.
+        let mut with_deadline = input();
+        with_deadline.activation_deadline =
+            Some(DateTime::from_timestamp(1_700_000_300, 0).unwrap());
+        let mac = compute_admin_key_mac("secret", &with_deadline);
+        // Deadline cleared (the revive attack) no longer verifies.
+        assert!(!verify_admin_key_mac("secret", &input(), &mac));
     }
 
     #[test]

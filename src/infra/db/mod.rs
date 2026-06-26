@@ -18,6 +18,7 @@ mod sessions;
 mod user_keys;
 mod users;
 
+pub use admin_keys::{AddKeyOutcome, RevokeKeyOutcome};
 pub use challenges::ConsumedChallenge;
 pub use login_events::LoginStats;
 
