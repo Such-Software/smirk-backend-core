@@ -1,5 +1,6 @@
 //! HTTP API layer: handlers and the OpenAPI assembly.
 
+pub mod admin;
 pub mod auth;
 pub mod capabilities;
 pub mod health;

@@ -30,6 +30,7 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::config::Config;
+use crate::core::admin_session::AdminSessionManager;
 use crate::core::session::{SessionManager, WebChallenge};
 use crate::infra::chains::ChainClients;
 use crate::infra::db::Database;
@@ -64,6 +65,9 @@ pub struct AppState {
     /// Latest fetched fiat prices, refreshed by a background task when the price
     /// feed is enabled. Stays empty (and `/prices` 404s) otherwise.
     pub prices: Arc<RwLock<PriceSnapshot>>,
+    /// Admin token minter/verifier. `Some` only when the admin surface is
+    /// enabled; the admin plane and guard refuse all requests otherwise.
+    pub admin_sessions: Option<AdminSessionManager>,
 }
 
 /// Assemble the full application router with every route mounted and state
@@ -117,6 +121,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .layer(TimeoutLayer::new(REQUEST_TIMEOUT))
         .layer(cors)
         .layer(CompressionLayer::new())
+        .layer(TraceLayer::new_for_http())
+}
+
+/// Assemble the admin-plane router. Served on a SEPARATE loopback socket (see
+/// `main`), never merged into the public router: confidentiality is by socket,
+/// not middleware ordering. Deliberately carries NO CORS layer (a browser's
+/// cross-origin call to the loopback port gets no `Access-Control-Allow-Origin`
+/// and is blocked); per-route `admin_guard` is the load-bearing control.
+/// Subsystem 2 adds Host-allowlist + anti-clickjacking hardening on top.
+pub fn admin_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .merge(api::admin::routes())
+        .with_state(state)
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(TimeoutLayer::new(REQUEST_TIMEOUT))
         .layer(TraceLayer::new_for_http())
 }
 

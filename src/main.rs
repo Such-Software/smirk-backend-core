@@ -9,8 +9,9 @@ use std::sync::Arc;
 use sqlx::postgres::PgPoolOptions;
 
 use smirk_backend_core::{
-    build_router, config::Config, core::session::SessionManager, infra::chains::ChainClients,
-    infra::db::Database, infra::prices, infra::prices::PriceSnapshot, AppState,
+    admin_router, build_router, config::Config, core::admin_session::AdminSessionManager,
+    core::session::SessionManager, infra::chains::ChainClients, infra::db::Database, infra::prices,
+    infra::prices::PriceSnapshot, AppState,
 };
 
 #[tokio::main]
@@ -40,6 +41,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prices_cache = Arc::new(tokio::sync::RwLock::new(PriceSnapshot::empty(
         &config.features.prices_currency,
     )));
+    let admin_sessions = config
+        .admin
+        .enabled
+        .then(|| AdminSessionManager::new(&config.admin.jwt_secret));
     let state = Arc::new(AppState {
         config,
         db,
@@ -47,6 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         chains,
         web_challenges: Arc::default(),
         prices: prices_cache,
+        admin_sessions,
     });
 
     // Periodic GC of expired website-auth challenges. Bounds the single-node
@@ -123,6 +129,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(_) => tracing::info!("price feed enabled but no assets configured; serving none"),
             Err(e) => tracing::warn!(error = %e, "price client init failed; feed disabled"),
         }
+    }
+
+    // Admin plane: a SEPARATE loopback listener (confidentiality is by socket,
+    // not middleware ordering). The fail-closed non-loopback bind guard and the
+    // browser/Host hardening land with the admin-posture subsystem; for now bind
+    // to the configured (loopback-default) address and warn if it isn't local.
+    if state.config.admin.enabled {
+        let admin_addr = state.config.admin.bind.clone();
+        if !admin_addr.starts_with("127.") && !admin_addr.starts_with("[::1]") {
+            tracing::warn!(
+                bind = %admin_addr,
+                "admin plane is not bound to loopback — ensure this is intentional"
+            );
+        }
+        let admin_app = admin_router(state.clone());
+        let admin_listener = tokio::net::TcpListener::bind(&admin_addr).await?;
+        tracing::info!("admin plane listening on http://{admin_addr}");
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(
+                admin_listener,
+                admin_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            {
+                tracing::error!(error = %e, "admin plane server exited");
+            }
+        });
     }
 
     let app = build_router(state);

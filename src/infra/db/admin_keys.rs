@@ -127,6 +127,16 @@ impl Database {
         Ok(n)
     }
 
+    /// Bump `last_used_at` (not covered by the integrity MAC, so no recompute).
+    #[instrument(skip(self))]
+    pub async fn touch_admin_key_last_used(&self, id: Uuid) -> Result<(), AppError> {
+        sqlx::query("UPDATE admin_keys SET last_used_at = NOW() WHERE id = $1")
+            .bind(id)
+            .execute(self.pool())
+            .await?;
+        Ok(())
+    }
+
     /// Mark a pending key activated (first successful login). Recomputes the MAC.
     /// Returns the updated row, or `None` if not pending (already active/revoked).
     #[instrument(skip(self, secret))]

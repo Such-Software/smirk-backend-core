@@ -21,8 +21,8 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use smirk_backend_core::{
-    build_router, config::Config, core::session::SessionManager, infra::chains::ChainClients,
-    infra::db::Database, AppState,
+    build_router, config::Config, core::admin_session::AdminSessionManager,
+    core::session::SessionManager, infra::chains::ChainClients, infra::db::Database, AppState,
 };
 
 static INIT_ENV: Once = Once::new();
@@ -73,6 +73,10 @@ pub async fn try_app() -> Option<TestApp> {
     let prices = Arc::new(tokio::sync::RwLock::new(
         smirk_backend_core::infra::prices::PriceSnapshot::empty(&config.features.prices_currency),
     ));
+    let admin_sessions = config
+        .admin
+        .enabled
+        .then(|| AdminSessionManager::new(&config.admin.jwt_secret));
     let state = Arc::new(AppState {
         config,
         db,
@@ -80,6 +84,7 @@ pub async fn try_app() -> Option<TestApp> {
         chains,
         web_challenges: Arc::default(),
         prices,
+        admin_sessions,
     });
 
     Some(TestApp {
@@ -108,9 +113,27 @@ pub struct TestApp {
 }
 
 impl TestApp {
-    /// Issue a JSON request and return `(status, parsed-body-or-Null)`.
+    /// The loopback admin-plane router (served separately from the public one).
+    pub fn admin_router(&self) -> Router {
+        smirk_backend_core::admin_router(self.state.clone())
+    }
+
+    /// Issue a JSON request against the public router.
     pub async fn request(
         &self,
+        method: &str,
+        uri: &str,
+        token: Option<&str>,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        self.request_on(self.router.clone(), method, uri, token, body)
+            .await
+    }
+
+    /// Issue a JSON request against an arbitrary router (e.g. the admin plane).
+    pub async fn request_on(
+        &self,
+        router: Router,
         method: &str,
         uri: &str,
         token: Option<&str>,
@@ -138,7 +161,7 @@ impl TestApp {
                 .unwrap(),
             None => builder.body(Body::empty()).unwrap(),
         };
-        let resp = self.router.clone().oneshot(req).await.unwrap();
+        let resp = router.oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
         let json = if bytes.is_empty() {

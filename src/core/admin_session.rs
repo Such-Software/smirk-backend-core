@@ -139,6 +139,25 @@ impl AdminSessionManager {
         })
     }
 
+    /// Mint a fresh access token (new `jti`) for an existing session, e.g. on
+    /// refresh. Returns `(token, jti, expires_in_secs)`; the caller rotates the
+    /// session's `access_jti` so the previous access token stops matching.
+    pub fn mint_access_token(&self, admin_pubkey: &str) -> Result<(String, String, i64), AppError> {
+        let now = Utc::now();
+        let jti = Uuid::new_v4().to_string();
+        let claims = AdminAccessClaims {
+            sub: admin_pubkey.to_string(),
+            aud: ADMIN_ACCESS_AUD.to_string(),
+            scope: ADMIN_SCOPE.to_string(),
+            jti: jti.clone(),
+            iat: now.timestamp(),
+            exp: (now + Duration::minutes(ACCESS_TTL_MINUTES)).timestamp(),
+        };
+        let token = encode(&Header::new(Algorithm::HS256), &claims, &self.encoding_key)
+            .map_err(|e| AppError::Internal(format!("admin access token: {e}")))?;
+        Ok((token, jti, ACCESS_TTL_MINUTES * 60))
+    }
+
     /// Verify an admin refresh token, returning `(admin_pubkey, session_id)`.
     pub fn verify_refresh(&self, token: &str) -> Result<(String, Uuid), AppError> {
         let data =

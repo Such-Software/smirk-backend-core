@@ -9,7 +9,7 @@ use tracing::instrument;
 use uuid::Uuid;
 
 use crate::error::AppError;
-use crate::models::db::{AdminSession, NewAdminSession};
+use crate::models::db::{AdminSession, NewAdminAudit, NewAdminSession};
 
 use super::Database;
 
@@ -40,6 +40,37 @@ impl Database {
             .fetch_one(self.pool())
             .await?;
         Ok(s)
+    }
+
+    /// Create a session AND append its login audit row in ONE transaction, so
+    /// the audit write is fail-closed: if it fails, the session is not created.
+    #[instrument(skip(self, session, audit, secret), fields(admin_key_id = %session.admin_key_id))]
+    pub async fn create_admin_session_audited(
+        &self,
+        session: NewAdminSession,
+        audit: &NewAdminAudit,
+        secret: &str,
+    ) -> Result<AdminSession, AppError> {
+        let mut tx = self.pool().begin().await?;
+        let sql = format!(
+            "INSERT INTO admin_sessions \
+             (id, admin_key_id, pubkey, refresh_token_hash, access_jti, device_info, ip_address, expires_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING {COLS}"
+        );
+        let row = sqlx::query_as::<_, AdminSession>(&sql)
+            .bind(session.id)
+            .bind(session.admin_key_id)
+            .bind(&session.pubkey)
+            .bind(&session.refresh_token_hash)
+            .bind(&session.access_jti)
+            .bind(&session.device_info)
+            .bind(session.ip_address)
+            .bind(session.expires_at)
+            .fetch_one(&mut *tx)
+            .await?;
+        self.append_admin_audit(&mut tx, audit, secret).await?;
+        tx.commit().await?;
+        Ok(row)
     }
 
     /// The live session whose access token carries `jti` (not revoked/expired).

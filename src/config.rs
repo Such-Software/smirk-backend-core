@@ -261,6 +261,10 @@ pub struct PowConfig {
 pub struct AdminConfig {
     pub enabled: bool,
     pub bind: String,
+    /// Absolute base URL the operator's wallet reaches the admin plane at (the
+    /// value the signed-action `u` tag is verified against — never the Host
+    /// header). Loopback by default; a Tor onion / SSH-tunnel URL in production.
+    pub public_url: String,
     pub jwt_secret: String,
     /// MAC secret protecting admin/setup trust anchors against DB tampering.
     pub key_integrity_secret: String,
@@ -410,6 +414,7 @@ impl Config {
             admin: AdminConfig {
                 enabled: env_bool("ADMIN_ENABLED", false),
                 bind: env_or("ADMIN_BIND", "127.0.0.1:8081"),
+                public_url: env_or("ADMIN_PUBLIC_URL", "http://127.0.0.1:8081"),
                 jwt_secret: env_or("ADMIN_JWT_SECRET", ""),
                 key_integrity_secret: env_or("ADMIN_KEY_INTEGRITY_SECRET", ""),
                 pubkeys: env_list("ADMIN_PUBKEYS"),
@@ -496,7 +501,7 @@ impl Config {
             require_secret("ALTCHA_HMAC_KEY", &self.pow.hmac_key, 32)?;
         }
 
-        // Admin surface: dedicated secrets when enabled.
+        // Admin surface: dedicated secrets + a real public URL when enabled.
         if self.admin.enabled {
             require_secret("ADMIN_JWT_SECRET", &self.admin.jwt_secret, 32)?;
             require_secret(
@@ -504,6 +509,8 @@ impl Config {
                 &self.admin.key_integrity_secret,
                 32,
             )?;
+            url::Url::parse(&self.admin.public_url)
+                .map_err(|_| cfg_err("ADMIN_PUBLIC_URL must be an absolute URL"))?;
         }
 
         // Fleet mode cannot rely on in-process challenge state.
@@ -664,6 +671,7 @@ mod tests {
             admin: AdminConfig {
                 enabled: false,
                 bind: "127.0.0.1:8081".into(),
+                public_url: "http://127.0.0.1:8081".into(),
                 jwt_secret: String::new(),
                 key_integrity_secret: String::new(),
                 pubkeys: vec![],
