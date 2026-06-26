@@ -2731,6 +2731,7 @@ dependencies = [
  "uuid",
  "validator",
  "webpki-roots 0.26.11",
+ "zeroize",
  "zeromq",
 ]
 

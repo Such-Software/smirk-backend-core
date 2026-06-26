@@ -89,6 +89,9 @@ url = "2.5"
 # Configuration
 dotenvy = "0.15"
 
+# Secret hygiene (admin CLI: zeroize generated key material)
+zeroize = "1"
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
