@@ -291,7 +291,6 @@ pub struct LandingConfig {
     pub expose_chains: bool,
     /// Emit `price_feed.enabled`. Default off.
     pub expose_price_feed: bool,
-    pub expose_features: bool,
     pub expose_uptime: bool,
     pub stats_enabled: bool,
     pub stats_cache_hours: u64,
@@ -443,7 +442,6 @@ impl Config {
                 expose_version: env_bool("PUBLIC_EXPOSE_VERSION", false),
                 expose_chains: env_bool("PUBLIC_EXPOSE_CHAINS", false),
                 expose_price_feed: env_bool("PUBLIC_EXPOSE_PRICE_FEED", false),
-                expose_features: env_bool("PUBLIC_EXPOSE_FEATURES", false),
                 expose_uptime: env_bool("PUBLIC_EXPOSE_UPTIME", false),
                 stats_enabled: env_bool("PUBLIC_STATS_ENABLED", false),
                 stats_cache_hours: env_parse("PUBLIC_STATS_CACHE_HOURS", 24u64)?,
@@ -706,7 +704,6 @@ mod tests {
                 expose_version: false,
                 expose_chains: false,
                 expose_price_feed: false,
-                expose_features: false,
                 expose_uptime: false,
                 stats_enabled: false,
                 stats_cache_hours: 24,

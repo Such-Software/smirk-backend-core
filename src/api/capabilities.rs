@@ -63,7 +63,7 @@ pub struct CapabilitiesResponse {
 /// present). A chain whose flag is on but whose source is unconfigured reports
 /// `enabled:false` — so `/capabilities` never advertises a chain that 404s, and
 /// a missing-secret downgrade is indistinguishable from a deliberately-off chain.
-fn chain_serviceable(config: &Config, asset: &str) -> bool {
+pub(crate) fn chain_serviceable(config: &Config, asset: &str) -> bool {
     let f = &config.features.chains;
     let c = &config.chains;
     match asset {
@@ -106,8 +106,9 @@ pub fn effective_capabilities(config: &Config) -> CapabilitiesResponse {
             },
         },
         features: FeatureCapabilities {
-            // The relay needs Grin chain access to be serviceable.
-            grin_relay: config.features.grin_relay && chain_serviceable(config, "grin"),
+            // The relay is a non-custodial mailbox (the wallet broadcasts
+            // locally), so it is NOT coupled to this backend's Grin chain access.
+            grin_relay: config.features.grin_relay,
             prices: config.features.prices,
             // Nostr identity needs the canonical PUBLIC_API_URL.
             nostr_identity: config.features.nostr_identity

@@ -89,8 +89,8 @@ fn host_allowed(host: &str, onion: Option<&str>) -> bool {
         return true;
     }
     let h = host.to_ascii_lowercase();
-    // IPv6 loopback (with or without :port), e.g. "[::1]" / "[::1]:8081".
-    if h.starts_with("[::1]") || h == "::1" {
+    // IPv6 loopback, anchored: exactly "[::1]" or "[::1]:port" (not "[::1].evil").
+    if h == "[::1]" || h.starts_with("[::1]:") || h == "::1" {
         return true;
     }
     let bare = h.split(':').next().unwrap_or(&h);
@@ -119,10 +119,13 @@ pub async fn admin_plane_guard(
         .get(axum::http::header::HOST)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    if !host_allowed(host, state.config.admin.onion.as_deref()) {
-        return (StatusCode::FORBIDDEN, "forbidden").into_response();
-    }
-    let mut resp = next.run(req).await;
+    // Compute the response on both paths, then apply the security headers once so
+    // the 403 Host-reject carries them too.
+    let mut resp = if host_allowed(host, state.config.admin.onion.as_deref()) {
+        next.run(req).await
+    } else {
+        (StatusCode::FORBIDDEN, "forbidden").into_response()
+    };
     let h = resp.headers_mut();
     h.insert("x-frame-options", HeaderValue::from_static("DENY"));
     h.insert(
@@ -720,12 +723,6 @@ pub async fn admin_features(
         "GRIN_OWNER_API_SECRET unset",
     );
     note(
-        cfg.features.grin_relay,
-        effective.features.grin_relay,
-        "grin_relay",
-        "Grin chain not serviceable",
-    );
-    note(
         cfg.features.nostr_identity,
         effective.features.nostr_identity,
         "nostr_identity",
@@ -771,6 +768,10 @@ mod tests {
         // A foreign host (DNS-rebinding) is rejected.
         assert!(!host_allowed("evil.example", None));
         assert!(!host_allowed("attacker.test:8081", None));
+        // Anchored: a host merely STARTING with a loopback form is rejected.
+        assert!(!host_allowed("[::1].evil.com", None));
+        assert!(!host_allowed("localhost.evil.com", None));
+        assert!(!host_allowed("127.0.0.1.evil.com", None));
         // The configured onion is allowed; others still rejected.
         assert!(host_allowed("abc.onion", Some("abc.onion")));
         assert!(host_allowed("abc.onion:80", Some("abc.onion")));

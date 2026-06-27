@@ -46,8 +46,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             SetupState::Fresh => {
                 // Adopt an existing deployment as already-bootstrapped (so a live
                 // upgrade never exposes a setup window); a truly empty DB begins
-                // uninitialized, awaiting `smirk-admin setup`.
-                let adopt = db.has_any_users().await?;
+                // uninitialized, awaiting `smirk-admin setup`. Adopt on EITHER
+                // wallet users OR admin keys, so deleting the latch row on a
+                // CLI-bootstrapped-but-no-users instance re-latches Locked rather
+                // than silently downgrading to uninitialized.
+                let adopt = db.has_any_users().await? || db.has_any_admin_keys().await?;
                 db.init_server_config(secret, adopt).await?;
                 if adopt {
                     tracing::info!("existing deployment adopted: bootstrap latched (locked)");
@@ -172,10 +175,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if state.config.admin.enabled {
         let admin_addr = state.config.admin.bind.clone();
         // Fail-closed bind guard: refuse a non-loopback admin bind unless the
-        // operator explicitly opts in (confidentiality is by socket).
-        let is_loopback = admin_addr.starts_with("127.")
-            || admin_addr.starts_with("[::1]")
-            || admin_addr.starts_with("localhost");
+        // operator explicitly opts in (confidentiality is by socket). Resolve the
+        // address (so "localhost" works) and require EVERY resolved addr to be
+        // loopback — a prefix check would accept "localhost.evil.com".
+        use std::net::ToSocketAddrs;
+        let is_loopback = match admin_addr.to_socket_addrs() {
+            Ok(addrs) => {
+                let addrs: Vec<_> = addrs.collect();
+                !addrs.is_empty() && addrs.iter().all(|a| a.ip().is_loopback())
+            }
+            Err(_) => false,
+        };
         if !is_loopback && !state.config.admin.allow_public_bind {
             return Err(format!(
                 "ADMIN_BIND {admin_addr} is not loopback; set ADMIN_ALLOW_PUBLIC_BIND=true to override \

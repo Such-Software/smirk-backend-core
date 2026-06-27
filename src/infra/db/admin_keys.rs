@@ -24,10 +24,11 @@ use super::{unique_violation_as, Database};
 const COLS: &str = "id, pubkey, label, scope, created_at, created_by_kind, \
      activated_at, activation_deadline, revoked_at, last_used_at, integrity_mac";
 
-/// Advisory-lock key serializing add/revoke/rotate, so the count-based guards
-/// (the `ADMIN_MAX_KEYS` cap and the last-key floor) are evaluated and acted on
-/// atomically rather than as racy check-then-mutate.
-const ADMIN_KEYS_LOCK_KEY: i64 = 0x5311_4D17_4B59_0001;
+/// Advisory-lock key serializing all admin-key mutations (add/revoke/rotate, and
+/// bootstrap), so the count-based guards (the `ADMIN_MAX_KEYS` cap, the last-key
+/// floor, the single-bootstrap guard) are evaluated and acted on atomically
+/// rather than as racy check-then-mutate.
+pub(crate) const ADMIN_KEYS_LOCK_KEY: i64 = 0x5311_4D17_4B59_0001;
 
 /// Outcome of an audited key add.
 pub enum AddKeyOutcome {
@@ -396,7 +397,7 @@ async fn insert_admin_key(
 
 /// Take the admin-keys mutation advisory lock (transaction-scoped). Serializes
 /// add/revoke/rotate so the cap and last-key floor are race-free.
-async fn admin_keys_mutate_lock(conn: &mut PgConnection) -> Result<(), AppError> {
+pub(crate) async fn admin_keys_mutate_lock(conn: &mut PgConnection) -> Result<(), AppError> {
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(ADMIN_KEYS_LOCK_KEY)
         .execute(&mut *conn)

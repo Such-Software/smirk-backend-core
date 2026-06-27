@@ -80,6 +80,17 @@ impl Database {
         Ok(exists)
     }
 
+    /// Whether the DB has any admin key (live or revoked) — i.e. it was once
+    /// bootstrapped. Used so a deleted latch row on a CLI-bootstrapped instance
+    /// re-adopts `locked` instead of silently dropping to `uninitialized`.
+    #[instrument(skip(self))]
+    pub async fn has_any_admin_keys(&self) -> Result<bool, AppError> {
+        let exists = sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM admin_keys)")
+            .fetch_one(self.pool())
+            .await?;
+        Ok(exists)
+    }
+
     /// Create the latch row if absent. `locked` adopts an existing deployment
     /// (state=locked, completed/locked now); otherwise a fresh install begins
     /// `uninitialized`. No-op if the row already exists.
@@ -116,6 +127,9 @@ impl Database {
     pub async fn bootstrap_admin(&self, pubkey: &str, secret: &str) -> Result<(), AppError> {
         use crate::core::crypto::admin_mac::{compute_admin_key_mac, AdminKeyMacInput};
         let mut tx = self.pool().begin().await?;
+        // Serialize with all admin-key mutations so two concurrent `setup` runs
+        // cannot both pass the single-bootstrap guard and seed two admins.
+        super::admin_keys::admin_keys_mutate_lock(&mut tx).await?;
 
         let has_admin = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (SELECT 1 FROM admin_keys WHERE revoked_at IS NULL AND activated_at IS NOT NULL)",

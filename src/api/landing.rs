@@ -19,7 +19,6 @@ use axum::{
 use serde::Serialize;
 
 use crate::config::Config;
-use crate::error::AppError;
 use crate::AppState;
 
 #[derive(Debug, Serialize)]
@@ -62,18 +61,13 @@ fn coarse_version() -> String {
 }
 
 fn enabled_chain_symbols(config: &Config) -> Vec<String> {
-    let c = &config.features.chains;
-    [
-        ("btc", c.btc),
-        ("ltc", c.ltc),
-        ("xmr", c.xmr),
-        ("wow", c.wow),
-        ("grin", c.grin),
-    ]
-    .iter()
-    .filter(|(_, on)| *on)
-    .map(|(sym, _)| sym.to_string())
-    .collect()
+    // Use the SAME serviceability predicate as /capabilities, so the public
+    // landing never advertises a chain that capabilities reports as off.
+    ["btc", "ltc", "xmr", "wow", "grin"]
+        .iter()
+        .filter(|sym| crate::api::capabilities::chain_serviceable(config, sym))
+        .map(|sym| sym.to_string())
+        .collect()
 }
 
 /// Build the public projection from config, honoring each per-field toggle.
@@ -94,14 +88,14 @@ pub fn build_server_info(config: &Config) -> ServerInfo {
     }
 }
 
-/// `GET /api/v1/server-info` — the landing read model. `404` when landing is off
-/// (so it does not hint that an admin plane exists).
-#[allow(clippy::result_large_err)]
-pub async fn server_info(State(state): State<Arc<AppState>>) -> Result<Json<ServerInfo>, AppError> {
+/// `GET /api/v1/server-info` — the landing read model. A BARE `404` when landing
+/// is off (matching an unmatched route — the `{error,code}` envelope would itself
+/// hint the route exists, so it is deliberately not used here).
+pub async fn server_info(State(state): State<Arc<AppState>>) -> Response {
     if !state.config.landing.enabled {
-        return Err(AppError::NotFound("not found".into()));
+        return StatusCode::NOT_FOUND.into_response();
     }
-    Ok(Json(build_server_info(&state.config)))
+    Json(build_server_info(&state.config)).into_response()
 }
 
 /// `GET /` — minimal HTML rendered from the read model; bare `404` when off.
