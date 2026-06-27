@@ -105,11 +105,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 .merge(api::wallet::routes())
                 .merge(api::capabilities::routes())
                 .merge(api::prices::routes())
+                .merge(api::landing::routes())
                 .layer(normal),
         );
 
     Router::new()
         .route("/health", get(api::health::health))
+        .route("/", get(api::landing::root))
         .merge(api::nip05::routes())
         .nest("/api/v1", api_v1)
         .with_state(state)
@@ -133,6 +135,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 pub fn admin_router(state: Arc<AppState>) -> Router {
     Router::new()
         .merge(api::admin::routes())
+        // Host allowlist (anti DNS-rebinding) + anti-clickjacking headers.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            api::admin::admin_plane_guard,
+        ))
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(TimeoutLayer::new(REQUEST_TIMEOUT))

@@ -4,6 +4,7 @@ pub mod admin;
 pub mod auth;
 pub mod capabilities;
 pub mod health;
+pub mod landing;
 pub mod middleware;
 pub mod nip05;
 pub mod openapi;

@@ -271,12 +271,26 @@ pub struct AdminConfig {
     pub pubkeys: Vec<String>,
     pub max_keys: u32,
     pub pending_key_ttl_days: u32,
+    /// Allow the admin plane to bind a non-loopback address (default false →
+    /// startup refuses a public bind; confidentiality is by socket).
+    pub allow_public_bind: bool,
+    /// Tor onion host the admin plane is reached at (added to the Host allowlist;
+    /// never logged or surfaced publicly).
+    pub onion: Option<String>,
 }
 
 /// Public landing page. Off by default; full + per-field tunable when enabled.
 #[derive(Clone)]
 pub struct LandingConfig {
     pub enabled: bool,
+    /// Operator free text (HTML-escaped on render). `None` = omitted.
+    pub title: Option<String>,
+    /// Emit a coarse (major.minor) version. Default off (version is recon).
+    pub expose_version: bool,
+    /// Emit the enabled chain symbols. Default off.
+    pub expose_chains: bool,
+    /// Emit `price_feed.enabled`. Default off.
+    pub expose_price_feed: bool,
     pub expose_features: bool,
     pub expose_uptime: bool,
     pub stats_enabled: bool,
@@ -420,9 +434,15 @@ impl Config {
                 pubkeys: env_list("ADMIN_PUBKEYS"),
                 max_keys: env_parse("ADMIN_MAX_KEYS", 8u32)?,
                 pending_key_ttl_days: env_parse("ADMIN_PENDING_KEY_TTL_DAYS", 7u32)?,
+                allow_public_bind: env_bool("ADMIN_ALLOW_PUBLIC_BIND", false),
+                onion: env_opt("TOR_ADMIN_ONION"),
             },
             landing: LandingConfig {
                 enabled: env_bool("PUBLIC_LANDING_ENABLED", false),
+                title: env_opt("PUBLIC_LANDING_TITLE"),
+                expose_version: env_bool("PUBLIC_EXPOSE_VERSION", false),
+                expose_chains: env_bool("PUBLIC_EXPOSE_CHAINS", false),
+                expose_price_feed: env_bool("PUBLIC_EXPOSE_PRICE_FEED", false),
                 expose_features: env_bool("PUBLIC_EXPOSE_FEATURES", false),
                 expose_uptime: env_bool("PUBLIC_EXPOSE_UPTIME", false),
                 stats_enabled: env_bool("PUBLIC_STATS_ENABLED", false),
@@ -677,9 +697,15 @@ mod tests {
                 pubkeys: vec![],
                 max_keys: 8,
                 pending_key_ttl_days: 7,
+                allow_public_bind: false,
+                onion: None,
             },
             landing: LandingConfig {
                 enabled: false,
+                title: None,
+                expose_version: false,
+                expose_chains: false,
+                expose_price_feed: false,
                 expose_features: false,
                 expose_uptime: false,
                 stats_enabled: false,

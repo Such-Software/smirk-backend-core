@@ -16,8 +16,10 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{ConnectInfo, Path, State},
-    http::HeaderMap,
+    extract::{ConnectInfo, Path, Request, State},
+    http::{HeaderMap, HeaderValue, StatusCode},
+    middleware::Next,
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
 };
@@ -76,6 +78,58 @@ fn admin_instance_id(state: &AppState) -> String {
 
 fn pubkey_prefix(pubkey: &str) -> String {
     pubkey.chars().take(PUBKEY_PREFIX_LEN).collect()
+}
+
+/// Whether a request `Host` is allowed on the admin plane. A missing Host is
+/// permitted (a DNS-rebinding attack must supply the attacker's Host, and the
+/// loopback bind is the primary control); a PRESENT host must be loopback or the
+/// configured onion. Defeats DNS-rebinding against the loopback socket.
+fn host_allowed(host: &str, onion: Option<&str>) -> bool {
+    if host.is_empty() {
+        return true;
+    }
+    let h = host.to_ascii_lowercase();
+    // IPv6 loopback (with or without :port), e.g. "[::1]" / "[::1]:8081".
+    if h.starts_with("[::1]") || h == "::1" {
+        return true;
+    }
+    let bare = h.split(':').next().unwrap_or(&h);
+    if matches!(bare, "localhost" | "127.0.0.1") {
+        return true;
+    }
+    if let Some(o) = onion {
+        let o = o.to_ascii_lowercase();
+        if !o.is_empty() && (bare == o || h == o) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Admin-plane middleware: Host allowlist (anti DNS-rebinding) + anti-clickjacking
+/// response headers. The loopback bind is the primary control; these are
+/// defense-in-depth for the Tor/tunnel paths and any browser-reachable case.
+pub async fn admin_plane_guard(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let host = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    if !host_allowed(host, state.config.admin.onion.as_deref()) {
+        return (StatusCode::FORBIDDEN, "forbidden").into_response();
+    }
+    let mut resp = next.run(req).await;
+    let h = resp.headers_mut();
+    h.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    h.insert(
+        "content-security-policy",
+        HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    resp
 }
 
 /// Validate an x-only secp256k1 pubkey: exactly 64 lowercase hex chars.
@@ -610,4 +664,28 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/admin/keys", post(admin_keys_add).get(admin_keys_list))
         .route("/admin/keys/:id", delete(admin_keys_revoke))
         .route("/admin/keys/:id/rotate", post(admin_keys_rotate))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::host_allowed;
+
+    #[test]
+    fn host_allowlist() {
+        // Missing host is allowed (rebinding must supply a host; bind is primary).
+        assert!(host_allowed("", None));
+        // Loopback forms.
+        assert!(host_allowed("localhost", None));
+        assert!(host_allowed("localhost:8081", None));
+        assert!(host_allowed("127.0.0.1", None));
+        assert!(host_allowed("127.0.0.1:8081", None));
+        assert!(host_allowed("[::1]:8081", None));
+        // A foreign host (DNS-rebinding) is rejected.
+        assert!(!host_allowed("evil.example", None));
+        assert!(!host_allowed("attacker.test:8081", None));
+        // The configured onion is allowed; others still rejected.
+        assert!(host_allowed("abc.onion", Some("abc.onion")));
+        assert!(host_allowed("abc.onion:80", Some("abc.onion")));
+        assert!(!host_allowed("evil.onion", Some("abc.onion")));
+    }
 }

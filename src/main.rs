@@ -171,11 +171,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // to the configured (loopback-default) address and warn if it isn't local.
     if state.config.admin.enabled {
         let admin_addr = state.config.admin.bind.clone();
-        if !admin_addr.starts_with("127.") && !admin_addr.starts_with("[::1]") {
-            tracing::warn!(
-                bind = %admin_addr,
-                "admin plane is not bound to loopback — ensure this is intentional"
-            );
+        // Fail-closed bind guard: refuse a non-loopback admin bind unless the
+        // operator explicitly opts in (confidentiality is by socket).
+        let is_loopback = admin_addr.starts_with("127.")
+            || admin_addr.starts_with("[::1]")
+            || admin_addr.starts_with("localhost");
+        if !is_loopback && !state.config.admin.allow_public_bind {
+            return Err(format!(
+                "ADMIN_BIND {admin_addr} is not loopback; set ADMIN_ALLOW_PUBLIC_BIND=true to override \
+                 (and front it with Tor client-auth / a trusted proxy)"
+            )
+            .into());
         }
         let admin_app = admin_router(state.clone());
         let admin_listener = tokio::net::TcpListener::bind(&admin_addr).await?;
