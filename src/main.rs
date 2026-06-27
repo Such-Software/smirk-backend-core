@@ -37,6 +37,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sessions = SessionManager::new(&config.auth.jwt_secret, config.auth.jwt_expiry_hours);
     let chains = ChainClients::from_config(&config)?;
 
+    // First-run bootstrap latch (operator §3.2). Only meaningful with the admin
+    // surface enabled. Fail closed on a tampered latch (restore-to-pre-bootstrap).
+    if config.admin.enabled {
+        use smirk_backend_core::infra::db::SetupState;
+        let secret = &config.admin.key_integrity_secret;
+        match db.read_setup_state(secret).await? {
+            SetupState::Fresh => {
+                // Adopt an existing deployment as already-bootstrapped (so a live
+                // upgrade never exposes a setup window); a truly empty DB begins
+                // uninitialized, awaiting `smirk-admin setup`.
+                let adopt = db.has_any_users().await?;
+                db.init_server_config(secret, adopt).await?;
+                if adopt {
+                    tracing::info!("existing deployment adopted: bootstrap latched (locked)");
+                } else {
+                    tracing::warn!(
+                        "fresh install: no admin yet — run `smirk-admin setup --pubkey <hex>`"
+                    );
+                }
+            }
+            SetupState::Uninitialized => {
+                tracing::warn!("not yet bootstrapped — run `smirk-admin setup --pubkey <hex>`")
+            }
+            SetupState::Locked => tracing::info!("bootstrap latch: locked"),
+            SetupState::Tampered => {
+                return Err(
+                    "server_config bootstrap latch MAC invalid (tamper or restore-to-pre-bootstrap); \
+                     run `smirk-admin reset-setup --i-understand` if this is intentional"
+                        .into(),
+                );
+            }
+        }
+    }
+
     let addr = format!("{}:{}", config.server_host, config.server_port);
     let prices_cache = Arc::new(tokio::sync::RwLock::new(PriceSnapshot::empty(
         &config.features.prices_currency,

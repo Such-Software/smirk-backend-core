@@ -14,6 +14,7 @@ mod challenges;
 mod grin_slatepacks;
 mod login_events;
 mod restore_attempts;
+mod server_config;
 mod sessions;
 mod user_keys;
 mod users;
@@ -21,6 +22,7 @@ mod users;
 pub use admin_keys::{AddKeyOutcome, RevokeKeyOutcome};
 pub use challenges::ConsumedChallenge;
 pub use login_events::LoginStats;
+pub use server_config::SetupState;
 
 use sqlx::PgPool;
 

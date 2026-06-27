@@ -280,6 +280,18 @@ pub struct NewAdminKey {
     pub activation_deadline: Option<DateTime<Utc>>,
 }
 
+/// The singleton bootstrap-latch row (operator §3.2). MAC-protected against
+/// restore-to-pre-bootstrap tampering.
+#[derive(Debug, Clone, FromRow)]
+pub struct ServerConfig {
+    pub id: i32,
+    pub setup_state: String,
+    pub bootstrap_completed_at: Option<DateTime<Utc>>,
+    pub locked_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+    pub integrity_mac: String,
+}
+
 /// A row in the tamper-evident privileged-action audit chain.
 #[derive(Debug, Clone, FromRow)]
 pub struct AdminAuditLog {

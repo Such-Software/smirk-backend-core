@@ -36,6 +36,8 @@ USAGE:
     smirk-admin <COMMAND> [FLAGS]
 
 COMMANDS:
+    setup               --pubkey <64hex>          (first-run: seed the admin + latch)
+    reset-setup         --i-understand
     list-keys
     add-key             --pubkey <64hex> [--label <s>]
     revoke-key          --id <uuid>
@@ -84,6 +86,8 @@ async fn run(args: &[String]) -> Result<(), String> {
     let db = Database::new(pool, String::new(), String::new());
 
     match cmd.as_str() {
+        "setup" => setup_cmd(&db, &secret, rest).await,
+        "reset-setup" => reset_setup_cmd(&db, &secret, rest).await,
         "list-keys" => list_keys(&db).await,
         "add-key" => add_key(&db, &secret, rest).await,
         "revoke-key" => revoke_key(&db, &secret, rest).await,
@@ -154,6 +158,29 @@ fn preflight_env_perms() -> Result<(), String> {
 }
 
 // ── commands ─────────────────────────────────────────────────────────────────
+
+async fn setup_cmd(db: &Database, secret: &str, args: &[String]) -> Result<(), String> {
+    let pubkey = validate_pubkey(&require_flag(args, "--pubkey")?)?;
+    db.bootstrap_admin(&pubkey, secret)
+        .await
+        .map_err(|e| e.to_string())?;
+    println!("bootstrapped: active admin {pubkey}");
+    println!("setup latched (locked); the network admin plane is now usable");
+    Ok(())
+}
+
+async fn reset_setup_cmd(db: &Database, secret: &str, args: &[String]) -> Result<(), String> {
+    if !has_flag(args, "--i-understand") {
+        return Err(
+            "reset-setup re-opens first-run setup; existing admin keys are preserved. \
+             Re-run with --i-understand to confirm"
+                .into(),
+        );
+    }
+    db.reset_setup(secret).await.map_err(|e| e.to_string())?;
+    println!("setup reset to uninitialized (existing admin keys preserved)");
+    Ok(())
+}
 
 async fn list_keys(db: &Database) -> Result<(), String> {
     let keys = db.list_admin_keys().await.map_err(|e| e.to_string())?;
