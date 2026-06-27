@@ -651,6 +651,93 @@ pub async fn admin_keys_rotate(
     }))
 }
 
+// ── features (read-only view) ────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct Downgrade {
+    pub feature: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminFeaturesResponse {
+    pub effective: crate::api::capabilities::CapabilitiesResponse,
+    /// Flags that are ON in config but serve as disabled (missing secret/URL).
+    /// Exposed only to the admin — the public capabilities hides the reason.
+    pub downgrades: Vec<Downgrade>,
+}
+
+/// Admin-only view of the resolved feature state + why anything is downgraded.
+/// (Runtime mutation — PUT /admin/features + DB override — is deferred; flags are
+/// env/config-driven for now.)
+#[instrument(skip(state, headers))]
+pub async fn admin_features(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<AdminFeaturesResponse>, AppError> {
+    admin_guard(&state, &headers).await?;
+    let cfg = &state.config;
+    let effective = crate::api::capabilities::effective_capabilities(cfg);
+
+    let mut downgrades = Vec::new();
+    let mut note = |on: bool, eff: bool, feature: &str, reason: &str| {
+        if on && !eff {
+            downgrades.push(Downgrade {
+                feature: feature.into(),
+                reason: reason.into(),
+            });
+        }
+    };
+    let c = &cfg.features.chains;
+    note(
+        c.btc,
+        effective.chains.btc.enabled,
+        "btc",
+        "BTC_ELECTRUM_URL/fallbacks unset",
+    );
+    note(
+        c.ltc,
+        effective.chains.ltc.enabled,
+        "ltc",
+        "LTC_ELECTRUM_URL/fallbacks unset",
+    );
+    note(
+        c.xmr,
+        effective.chains.xmr.enabled,
+        "xmr",
+        "XMR_LWS_ADMIN_KEY unset",
+    );
+    note(
+        c.wow,
+        effective.chains.wow.enabled,
+        "wow",
+        "WOW_LWS_ADMIN_KEY unset",
+    );
+    note(
+        c.grin,
+        effective.chains.grin.enabled,
+        "grin",
+        "GRIN_OWNER_API_SECRET unset",
+    );
+    note(
+        cfg.features.grin_relay,
+        effective.features.grin_relay,
+        "grin_relay",
+        "Grin chain not serviceable",
+    );
+    note(
+        cfg.features.nostr_identity,
+        effective.features.nostr_identity,
+        "nostr_identity",
+        "PUBLIC_API_URL unset",
+    );
+
+    Ok(Json(AdminFeaturesResponse {
+        effective,
+        downgrades,
+    }))
+}
+
 // ── router ───────────────────────────────────────────────────────────────────
 
 /// Admin-plane routes. Mounted by [`crate::admin_router`] on the loopback socket.
@@ -661,6 +748,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/admin/auth/refresh", post(admin_refresh))
         .route("/admin/auth/logout", post(admin_logout))
         .route("/admin/me", get(admin_me))
+        .route("/admin/features", get(admin_features))
         .route("/admin/keys", post(admin_keys_add).get(admin_keys_list))
         .route("/admin/keys/:id", delete(admin_keys_revoke))
         .route("/admin/keys/:id/rotate", post(admin_keys_rotate))

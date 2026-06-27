@@ -12,6 +12,19 @@ async fn capabilities_is_public_and_well_shaped() {
     assert_eq!(status, StatusCode::OK);
 
     assert!(body["version"].as_str().is_some(), "version present");
+    assert!(
+        body["contract_version"].as_u64().is_some(),
+        "contract_version present"
+    );
+
+    // Golden: no server secret may appear in the public capabilities JSON. The
+    // harness seeds every secret with the "integration-test-" prefix.
+    let raw = serde_json::to_string(&body).unwrap();
+    assert!(
+        !raw.contains("integration-test"),
+        "no secret leaks into public capabilities: {raw}"
+    );
+
     // Every chain reports an `enabled` boolean.
     for chain in ["btc", "ltc", "xmr", "wow", "grin"] {
         assert!(

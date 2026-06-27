@@ -1719,12 +1719,19 @@
         "type": "object",
         "required": [
           "version",
+          "contract_version",
           "chains",
           "features"
         ],
         "properties": {
           "chains": {
             "$ref": "#/components/schemas/ChainCapabilities"
+          },
+          "contract_version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Capabilities contract version (additive changes do not bump it).",
+            "minimum": 0
           },
           "features": {
             "$ref": "#/components/schemas/FeatureCapabilities"
