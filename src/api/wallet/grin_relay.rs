@@ -11,9 +11,8 @@
 //!
 //! Non-custodial by construction: the relay stores only opaque slatepack text
 //! (slatepacks are encrypted to the recipient's address) and lifecycle status. It
-//! never holds keys, never finalizes, never broadcasts — unlike the legacy
-//! backend, which finalized + broadcast server-side. See
-//! `docs/private/OWN_BACKEND_CONVERGENCE.md`.
+//! never holds keys, never finalizes, never broadcasts. The wallet finalizes and
+//! broadcasts locally; the relay is only a store-and-forward mailbox.
 //!
 //! Controls: JWT-gated; every action authorizes the caller as the slate's sender
 //! or recipient (a non-party gets 404, never an existence oracle); the recipient

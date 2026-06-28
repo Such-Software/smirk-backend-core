@@ -7,7 +7,7 @@
 //! `scan_rewind_hash(rewind_hash, start_height)` does the chain scan (rangeproof
 //! rewind) and returns a [`ViewWallet`]; this client drives that, plus node
 //! status and broadcast. Spending (input selection, kernel signing) happens in
-//! the wallet, locally — never here. See `docs/private/GRIN_LWS_DESIGN.md`.
+//! the wallet, locally — never here.
 //!
 //! The Owner API v3 transport is an ECDH (secp256k1) handshake + AES-256-GCM
 //! channel; the secure session is initialized once (TOCTOU-free), the nonce

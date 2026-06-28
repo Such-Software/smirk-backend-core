@@ -6,8 +6,7 @@
 //! wallet's outputs and read amounts, but cannot spend) and sends it per scan;
 //! the backend forwards it to grin-wallet's `scan_rewind_hash` and stores no
 //! secret. Spending (input selection, kernel signing) happens in the wallet; the
-//! backend only broadcasts the finalized transaction. See
-//! `docs/private/GRIN_LWS_DESIGN.md`.
+//! backend only broadcasts the finalized transaction.
 //!
 //! Conventions (matching [`super::btc_ltc`] / [`super::xmr_wow`]):
 //! * JWT-gated; the `rewind_hash` is a view credential — its request struct omits
