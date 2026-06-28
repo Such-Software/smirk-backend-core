@@ -137,15 +137,36 @@ impl Database {
     /// Execute a confirmed erasure in ONE fail-closed transaction: per-table
     /// policy + cascade delete + tombstone + hash-chained audit. `purge_login`
     /// chooses purge (default) vs anonymize for `login_events`.
+    ///
+    /// The FIRST statement atomically CLAIMS the row (`status='confirmed' ->
+    /// 'completed'`), re-asserting the precondition the sweeper's now-released
+    /// `SKIP LOCKED` lock can no longer guarantee. So a request cancelled after
+    /// the sweep, or a row another node already claimed, is skipped (returns
+    /// `false`) — no double-execute, no duplicate audit row, no executing a
+    /// cancelled request. On any later failure the whole tx rolls back (the claim
+    /// included), so it is retried next sweep. Returns whether it executed.
     #[instrument(skip(self, secret))]
     pub async fn execute_erasure(
         &self,
         id: Uuid,
-        user_id: Uuid,
         purge_login: bool,
         secret: &str,
-    ) -> Result<(), AppError> {
+    ) -> Result<bool, AppError> {
         let mut tx = self.pool().begin().await?;
+
+        // Atomic claim + tombstone: only the first executor of a still-confirmed
+        // request proceeds. `user_id` is still set here (delete happens below).
+        let claimed: Option<(Option<Uuid>,)> = sqlx::query_as(
+            "UPDATE erasure_requests SET status = 'completed', completed_at = NOW() \
+             WHERE id = $1 AND status = 'confirmed' RETURNING user_id",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((Some(user_id),)) = claimed else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
 
         // login_events: the (origin, asset, time) quasi-identifier — the cascade
         // only nulls user_id, so purge (default) or anonymize all three here.
@@ -174,19 +195,12 @@ impl Database {
         .await?;
 
         // Structural delete: cascades wallets/sessions/user_keys/owned slatepacks;
-        // SET NULL on counterparty/audit/login links (incl. this tombstone row).
+        // SET NULL on counterparty/audit/login links (incl. this row's user_id,
+        // leaving it a completed tombstone with the link scrubbed).
         sqlx::query("DELETE FROM users WHERE id = $1")
             .bind(user_id)
             .execute(&mut *tx)
             .await?;
-
-        // Tombstone (user_id was just nulled by the cascade).
-        sqlx::query(
-            "UPDATE erasure_requests SET status = 'completed', completed_at = NOW() WHERE id = $1",
-        )
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
 
         self.append_admin_audit(
             &mut tx,
@@ -203,6 +217,6 @@ impl Database {
         .await?;
 
         tx.commit().await?;
-        Ok(())
+        Ok(true)
     }
 }

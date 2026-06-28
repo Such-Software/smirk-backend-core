@@ -26,6 +26,21 @@ fn random_signer() -> SigningKey {
     }
 }
 
+async fn mk_user(db: &smirk_backend_core::infra::db::Database, nostr_pubkey: &str) -> uuid::Uuid {
+    db.create_user(NewUser {
+        username: None,
+        pubkey_hash: Some(format!("pk-{}", uuid::Uuid::new_v4())),
+        nostr_pubkey: Some(nostr_pubkey.to_string()),
+        wallet_birthday: None,
+        seed_fingerprint: None,
+        xmr_start_height: None,
+        wow_start_height: None,
+    })
+    .await
+    .unwrap()
+    .id
+}
+
 /// Build a `Nostr <base64(event)>` signed-action token for an erasure purpose.
 fn sign(
     sk: &SigningKey,
@@ -83,19 +98,7 @@ async fn erasure_request_confirm_execute_flow() {
     // A user with a linked nostr identity that we control the key for.
     let sk = random_signer();
     let pk = hex::encode(sk.verifying_key().to_bytes());
-    app.state
-        .db
-        .create_user(NewUser {
-            username: None,
-            pubkey_hash: Some(format!("pk-{}", uuid::Uuid::new_v4())),
-            nostr_pubkey: Some(pk.clone()),
-            wallet_birthday: None,
-            seed_fingerprint: None,
-            xmr_start_height: None,
-            wow_start_height: None,
-        })
-        .await
-        .unwrap();
+    mk_user(&app.state.db, &pk).await;
 
     let challenge = |purpose: &'static str| {
         let app = &app;
@@ -217,6 +220,65 @@ async fn erasure_request_confirm_execute_flow() {
     assert_eq!(st, StatusCode::OK, "absent-user request is constant-shape");
     assert!(body["erasure_id"].as_str().is_some());
     assert_eq!(body["status"], "pending");
+
+    let secret = app.state.config.admin.key_integrity_secret.clone();
+
+    // [HIGH regression] a request CANCELLED after confirmation is NOT executed:
+    // execute claims `WHERE status='confirmed'`, so a cancelled row is skipped.
+    let pk_c = hex::encode(random_signer().verifying_key().to_bytes());
+    let uc = mk_user(&app.state.db, &pk_c).await;
+    let rc = app.state.db.request_erasure(uc, "h", 0).await.unwrap();
+    app.state
+        .db
+        .confirm_erasure_request(rc.id, uc, 0)
+        .await
+        .unwrap();
+    app.state
+        .db
+        .cancel_erasure_request(rc.id, uc)
+        .await
+        .unwrap();
+    assert!(
+        !app.state
+            .db
+            .execute_erasure(rc.id, true, &secret)
+            .await
+            .unwrap(),
+        "cancelled request is not executed"
+    );
+    assert!(
+        app.state
+            .db
+            .find_user_by_nostr_pubkey(&pk_c)
+            .await
+            .unwrap()
+            .is_some(),
+        "cancelled user survives"
+    );
+
+    // Double-execution is a no-op (idempotent claim): the second call returns false.
+    let pk_d = hex::encode(random_signer().verifying_key().to_bytes());
+    let ud = mk_user(&app.state.db, &pk_d).await;
+    let rd = app.state.db.request_erasure(ud, "h", 0).await.unwrap();
+    app.state
+        .db
+        .confirm_erasure_request(rd.id, ud, 0)
+        .await
+        .unwrap();
+    assert!(app
+        .state
+        .db
+        .execute_erasure(rd.id, true, &secret)
+        .await
+        .unwrap());
+    assert!(
+        !app.state
+            .db
+            .execute_erasure(rd.id, true, &secret)
+            .await
+            .unwrap(),
+        "second execute is a no-op"
+    );
 
     for k in [
         "ERASURE_ENABLED",

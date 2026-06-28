@@ -582,6 +582,13 @@ impl Config {
                     "PUBLIC_API_URL is required when ERASURE_ENABLED is on (it binds the signed-action proof)",
                 ));
             }
+            // Bound the grace window: a huge value panics Duration::hours and an
+            // overflow on the i64 cast could wrap negative (defeating grace).
+            if self.retention.grace_period_hours > 24 * 365 * 10 {
+                return Err(cfg_err(
+                    "ERASURE_GRACE_PERIOD_HOURS must be <= 87600 (10 years)",
+                ));
+            }
         }
 
         // Per-enabled-chain infra config: hard error in production, warn in dev.

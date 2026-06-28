@@ -91,12 +91,31 @@ pub struct ProofRequest {
 pub struct ErasureRequestResponse {
     pub erasure_id: String,
     pub status: String,
-    pub scheduled_for: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct StatusResponse {
     pub status: String,
+    /// When execution is scheduled (set on confirm, when grace starts).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled_for: Option<String>,
+}
+
+/// Deterministic, unguessable erasure id for the absent-user path — STABLE across
+/// repeated calls (keyed by the integrity secret), so it is indistinguishable
+/// from a real get-or-create-stable id and cannot be probed as an existence
+/// oracle.
+fn synthetic_erasure_id(pubkey: &str, secret: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(secret.as_bytes());
+    h.update([0x1f]);
+    h.update(b"erasure-synthetic");
+    h.update([0x1f]);
+    h.update(pubkey.as_bytes());
+    let digest = h.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Uuid::from_bytes(bytes).to_string()
 }
 
 /// Verify a proof for `purpose` over `action_path`, consume the nonce, and
@@ -175,7 +194,12 @@ pub async fn request_erasure(
     let grace = state.config.retention.grace_period_hours as i64;
     let (pubkey, user) = prove(&state, &body, PURPOSE_REQUEST, "/account/erasure", None).await?;
 
-    match user {
+    // Constant-shape across present/absent AND across repeated calls: a STABLE
+    // erasure_id (real for a user, deterministic-synthetic otherwise) and a fixed
+    // "pending" status. No scheduled_for here (it is meaningful only at confirm,
+    // when grace starts) — echoing a stable-vs-advancing timestamp would leak
+    // account existence. The real scheduled_for is returned by confirm.
+    let erasure_id = match user {
         Some(u) => {
             let req = state
                 .db
@@ -189,21 +213,14 @@ pub async fn request_erasure(
                 )
                 .await;
             info!(erasure_id = %req.id, "erasure requested");
-            Ok(Json(ErasureRequestResponse {
-                erasure_id: req.id.to_string(),
-                status: req.status,
-                scheduled_for: req.scheduled_for.to_rfc3339(),
-            }))
+            req.id.to_string()
         }
-        None => {
-            // Constant-shape: a synthetic id, no row, no audit.
-            Ok(Json(ErasureRequestResponse {
-                erasure_id: Uuid::new_v4().to_string(),
-                status: "pending".into(),
-                scheduled_for: (Utc::now() + chrono::Duration::hours(grace)).to_rfc3339(),
-            }))
-        }
-    }
+        None => synthetic_erasure_id(&pubkey, integrity_secret(&state)),
+    };
+    Ok(Json(ErasureRequestResponse {
+        erasure_id,
+        status: "pending".into(),
+    }))
 }
 
 /// Phase 2: confirm (a second fresh proof bound to this `erasure_id`). Revokes
@@ -243,7 +260,10 @@ pub async fn confirm_erasure(
         )
         .await;
     info!(erasure_id = %req.id, "erasure confirmed");
-    Ok(Json(StatusResponse { status: req.status }))
+    Ok(Json(StatusResponse {
+        status: req.status,
+        scheduled_for: Some(req.scheduled_for.to_rfc3339()),
+    }))
 }
 
 /// Cancel a live erasure during grace (a fresh `erasure_cancel` proof).
@@ -278,7 +298,10 @@ pub async fn cancel_erasure(
             integrity_secret(&state),
         )
         .await;
-    Ok(Json(StatusResponse { status: req.status }))
+    Ok(Json(StatusResponse {
+        status: req.status,
+        scheduled_for: None,
+    }))
 }
 
 #[derive(Debug, Serialize)]
@@ -369,13 +392,10 @@ pub async fn run_erasure_sweep(state: &Arc<AppState>, batch: i64) -> Result<u64,
     let secret = integrity_secret(state);
     let mut done = 0;
     for req in due {
-        let Some(user_id) = req.user_id else { continue };
-        match state
-            .db
-            .execute_erasure(req.id, user_id, purge, secret)
-            .await
-        {
-            Ok(()) => done += 1,
+        match state.db.execute_erasure(req.id, purge, secret).await {
+            Ok(true) => done += 1,
+            // false = another node/sweep already claimed it, or it was cancelled.
+            Ok(false) => {}
             Err(e) => warn!(erasure_id = %req.id, error = %e, "erasure execution failed"),
         }
     }
