@@ -138,6 +138,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Background erasure execution: confirmed requests past their grace window
+    // are deleted (per-table policy + cascade + hash-chained audit, one tx each).
+    if state.config.retention.erasure_enabled {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                match smirk_backend_core::api::erasure::run_erasure_sweep(&state, 50).await {
+                    Ok(n) if n > 0 => tracing::info!(executed = n, "erasure sweep"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "erasure sweep failed"),
+                }
+            }
+        });
+    }
+
     // Background price refresh (only when the feed is enabled). On each tick we
     // fetch the configured feeds and replace the snapshot; a failure logs and
     // keeps the last good values rather than blanking them. The first interval

@@ -3,6 +3,7 @@
 pub mod admin;
 pub mod auth;
 pub mod capabilities;
+pub mod erasure;
 pub mod health;
 pub mod landing;
 pub mod middleware;

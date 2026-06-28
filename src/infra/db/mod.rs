@@ -11,6 +11,7 @@ mod admin_keys;
 mod admin_sessions;
 mod audit;
 mod challenges;
+mod erasure;
 mod grin_slatepacks;
 mod login_events;
 mod restore_attempts;

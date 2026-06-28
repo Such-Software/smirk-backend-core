@@ -303,6 +303,8 @@ pub struct RetentionConfig {
     pub erasure_enabled: bool,
     pub purge_login_events: bool,
     pub export_per_day: u32,
+    /// Grace window between a confirmed erasure and its execution.
+    pub grace_period_hours: u64,
 }
 
 impl Config {
@@ -452,6 +454,7 @@ impl Config {
                 erasure_enabled: env_bool("ERASURE_ENABLED", false),
                 purge_login_events: env_bool("ERASURE_PURGE_LOGIN_EVENTS", true),
                 export_per_day: env_parse("ERASURE_EXPORT_PER_DAY", 3u32)?,
+                grace_period_hours: env_parse("ERASURE_GRACE_PERIOD_HOURS", 72u64)?,
             },
         };
 
@@ -563,6 +566,21 @@ impl Config {
                     self.features.prices_currency,
                     SUPPORTED_PRICE_CURRENCIES.join(", ")
                 )));
+            }
+        }
+
+        // Self-service erasure: its audit trail is the integrity-MAC'd hash chain,
+        // and its proofs bind PUBLIC_API_URL — both are required when it's on.
+        if self.retention.erasure_enabled {
+            require_secret(
+                "ADMIN_KEY_INTEGRITY_SECRET",
+                &self.admin.key_integrity_secret,
+                32,
+            )?;
+            if self.identity.public_api_url.is_none() {
+                return Err(cfg_err(
+                    "PUBLIC_API_URL is required when ERASURE_ENABLED is on (it binds the signed-action proof)",
+                ));
             }
         }
 
@@ -714,6 +732,7 @@ mod tests {
                 erasure_enabled: false,
                 purge_login_events: true,
                 export_per_day: 3,
+                grace_period_hours: 72,
             },
         }
     }

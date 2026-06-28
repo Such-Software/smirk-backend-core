@@ -280,6 +280,21 @@ pub struct NewAdminKey {
     pub activation_deadline: Option<DateTime<Utc>>,
 }
 
+/// A self-service erasure request (operator §5.3). `user_id` is `NULL` once the
+/// request is a completed tombstone (the user it referenced is deleted).
+#[derive(Debug, Clone, FromRow)]
+pub struct ErasureRequest {
+    pub id: Uuid,
+    pub user_id: Option<Uuid>,
+    pub subject_hash: String,
+    pub status: String,
+    pub requested_at: DateTime<Utc>,
+    pub scheduled_for: DateTime<Utc>,
+    pub confirmed_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub cancelled_at: Option<DateTime<Utc>>,
+}
+
 /// The singleton bootstrap-latch row (operator §3.2). MAC-protected against
 /// restore-to-pre-bootstrap tampering.
 #[derive(Debug, Clone, FromRow)]
