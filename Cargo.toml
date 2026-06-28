@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["John Winter Murphy <jw@such.software>"]
 description = "Open, self-hostable backend for the Smirk non-custodial multi-chain wallet"
 repository = "https://github.com/smirk-cash/smirk-backend-core"
-# license: TBD — deciding MIT vs AGPL-3.0-or-later (see README). Left unset until chosen.
+license = "MIT"
 # Not a library for crates.io; this is a deployable server. Guard against accidental publish.
 publish = false
 
