@@ -1891,7 +1891,8 @@
           "version",
           "contract_version",
           "chains",
-          "features"
+          "features",
+          "restore"
         ],
         "properties": {
           "chains": {
@@ -1905,6 +1906,10 @@
           },
           "features": {
             "$ref": "#/components/schemas/FeatureCapabilities"
+          },
+          "restore": {
+            "$ref": "#/components/schemas/RestoreCapability",
+            "description": "Wallet restore (import) policy for this instance."
           },
           "version": {
             "type": "string",
@@ -2969,6 +2974,27 @@
           },
           "slate_id": {
             "type": "string"
+          }
+        }
+      },
+      "RestoreCapability": {
+        "type": "object",
+        "description": "This instance's wallet-restore (import) policy. The wallet uses it to adapt\nits import UX — hide/grey the restore-height field under `create-only`, warn\nwhen a chosen date exceeds the bound. `max_depth_days` is present only for\nthe `bounded` policy.",
+        "required": [
+          "policy"
+        ],
+        "properties": {
+          "max_depth_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "policy": {
+            "type": "string",
+            "description": "`create-only` | `bounded` | `unlimited`."
           }
         }
       },

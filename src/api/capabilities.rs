@@ -49,6 +49,17 @@ pub struct FeatureCapabilities {
     pub tips: bool,
 }
 
+/// This instance's wallet-restore (import) policy. The wallet uses it to adapt
+/// its import UX — hide/grey the restore-height field under `create-only`, warn
+/// when a chosen date exceeds the bound. `max_depth_days` is present only for
+/// the `bounded` policy.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RestoreCapability {
+    /// `create-only` | `bounded` | `unlimited`.
+    pub policy: String,
+    pub max_depth_days: Option<u32>,
+}
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct CapabilitiesResponse {
     /// Backend version (Cargo package version).
@@ -57,6 +68,8 @@ pub struct CapabilitiesResponse {
     pub contract_version: u32,
     pub chains: ChainCapabilities,
     pub features: FeatureCapabilities,
+    /// Wallet restore (import) policy for this instance.
+    pub restore: RestoreCapability,
 }
 
 /// Whether an enabled chain can actually be served (its infra secret/URL is
@@ -114,6 +127,13 @@ pub fn effective_capabilities(config: &Config) -> CapabilitiesResponse {
             nostr_identity: config.features.nostr_identity
                 && config.identity.public_api_url.is_some(),
             tips: config.features.tips,
+        },
+        restore: RestoreCapability {
+            policy: config.restore.policy.as_str().to_string(),
+            max_depth_days: match config.restore.policy {
+                crate::config::RestorePolicy::Bounded => Some(config.restore.max_depth_days),
+                _ => None,
+            },
         },
     }
 }

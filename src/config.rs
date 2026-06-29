@@ -128,6 +128,7 @@ pub struct Config {
     pub admin: AdminConfig,
     pub landing: LandingConfig,
     pub retention: RetentionConfig,
+    pub restore: RestoreConfig,
 }
 
 #[derive(Clone)]
@@ -307,6 +308,90 @@ pub struct RetentionConfig {
     pub grace_period_hours: u64,
 }
 
+/// Wallet restore (import) policy — an OPERATOR decision, because the scan cost
+/// of a deep restore lands on *this* instance's LWS/node. Advertised via
+/// `/capabilities` (so the wallet adapts its import UX) and enforced at the scan
+/// path. Self-sovereignty is preserved at the ecosystem level: a user needing a
+/// deeper restore runs their own instance or picks a looser operator.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RestorePolicy {
+    /// New-wallet registration only — the scan start must sit at (near) the tip.
+    CreateOnly,
+    /// Restore permitted up to `max_depth_days` behind the tip.
+    Bounded,
+    /// Any restore height accepted (the natural choice for self-hosting).
+    Unlimited,
+}
+
+impl RestorePolicy {
+    /// The wire token used in `/capabilities`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RestorePolicy::CreateOnly => "create-only",
+            RestorePolicy::Bounded => "bounded",
+            RestorePolicy::Unlimited => "unlimited",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct RestoreConfig {
+    pub policy: RestorePolicy,
+    /// For `Bounded`: how many days behind the tip a restore may start.
+    pub max_depth_days: u32,
+}
+
+/// Approximate blocks per day per chain (from target block time). Used only to
+/// turn the `max_depth_days` policy into a height floor — a soft operator bound,
+/// never a consensus value, so an approximation is fine.
+fn blocks_per_day(chain: &str) -> u64 {
+    match chain {
+        "xmr" | "wow" => 720, // ~120s target
+        "grin" => 1440,       // ~60s target
+        "btc" => 144,         // ~600s
+        "ltc" => 576,         // ~150s
+        _ => 720,
+    }
+}
+
+impl RestoreConfig {
+    /// The earliest height this instance will scan from for `chain`, given the
+    /// current `tip`. `0` means "no floor" (Unlimited).
+    pub fn min_start_height(&self, chain: &str, tip: u64) -> u64 {
+        let depth_days = match self.policy {
+            RestorePolicy::Unlimited => return 0,
+            // 1-day grace so a wallet "created today" still registers under
+            // create-only without a tight tip race.
+            RestorePolicy::CreateOnly => 1,
+            RestorePolicy::Bounded => self.max_depth_days as u64,
+        };
+        tip.saturating_sub(depth_days.saturating_mul(blocks_per_day(chain)))
+    }
+
+    /// Enforce the policy for a requested `start_height` against the live `tip`.
+    /// A too-deep restore is a `ValidationError` naming the bound — never the
+    /// caller's value. Unlimited always passes.
+    pub fn enforce(&self, chain: &str, start_height: u64, tip: u64) -> Result<(), AppError> {
+        if self.policy == RestorePolicy::Unlimited
+            || start_height >= self.min_start_height(chain, tip)
+        {
+            return Ok(());
+        }
+        Err(match self.policy {
+            RestorePolicy::CreateOnly => AppError::ValidationError(
+                "this instance accepts new-wallet registration only (create-only); a restore \
+                 scan from an earlier height is not permitted here"
+                    .into(),
+            ),
+            RestorePolicy::Bounded => AppError::ValidationError(format!(
+                "restore depth exceeds this instance's limit of {} days",
+                self.max_depth_days
+            )),
+            RestorePolicy::Unlimited => unreachable!(),
+        })
+    }
+}
+
 impl Config {
     /// Load configuration from the environment and validate it (fail-closed).
     pub fn from_env() -> Result<Self, AppError> {
@@ -456,6 +541,25 @@ impl Config {
                 export_per_day: env_parse("ERASURE_EXPORT_PER_DAY", 3u32)?,
                 grace_period_hours: env_parse("ERASURE_GRACE_PERIOD_HOURS", 72u64)?,
             },
+            restore: {
+                let policy = match env_or("WALLET_RESTORE_POLICY", "bounded")
+                    .to_lowercase()
+                    .as_str()
+                {
+                    "create-only" | "create_only" | "createonly" => RestorePolicy::CreateOnly,
+                    "bounded" => RestorePolicy::Bounded,
+                    "unlimited" => RestorePolicy::Unlimited,
+                    other => {
+                        return Err(cfg_err(format!(
+                        "WALLET_RESTORE_POLICY must be create-only|bounded|unlimited, got {other}"
+                    )))
+                    }
+                };
+                RestoreConfig {
+                    policy,
+                    max_depth_days: env_parse("WALLET_MAX_RESTORE_DEPTH_DAYS", 365u32)?,
+                }
+            },
         };
 
         cfg.validate()?;
@@ -499,6 +603,14 @@ impl Config {
             32,
         )?;
         require_secret("IP_SALT", &self.secrets.ip_salt, 16)?;
+
+        // Restore policy: a Bounded policy needs a positive depth (0 would
+        // silently behave as create-only and muddy the capabilities contract).
+        if self.restore.policy == RestorePolicy::Bounded && self.restore.max_depth_days == 0 {
+            return Err(cfg_err(
+                "WALLET_MAX_RESTORE_DEPTH_DAYS must be > 0 when WALLET_RESTORE_POLICY=bounded",
+            ));
+        }
 
         // Nostr identity: PUBLIC_API_URL must be a real absolute URL.
         if self.features.nostr_identity {
@@ -741,6 +853,10 @@ mod tests {
                 export_per_day: 3,
                 grace_period_hours: 72,
             },
+            restore: RestoreConfig {
+                policy: RestorePolicy::Bounded,
+                max_depth_days: 365,
+            },
         }
     }
 
@@ -831,5 +947,48 @@ mod tests {
         c.environment = "production".into();
         c.features.chains.btc = true; // btc has no electrum_primary/fallbacks
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn restore_bounded_zero_depth_rejected() {
+        let mut c = valid();
+        c.restore = RestoreConfig {
+            policy: RestorePolicy::Bounded,
+            max_depth_days: 0,
+        };
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn restore_unlimited_accepts_any_height() {
+        let rc = RestoreConfig {
+            policy: RestorePolicy::Unlimited,
+            max_depth_days: 0,
+        };
+        assert!(rc.enforce("xmr", 1, 3_000_000).is_ok());
+    }
+
+    #[test]
+    fn restore_bounded_rejects_too_deep_accepts_within() {
+        let rc = RestoreConfig {
+            policy: RestorePolicy::Bounded,
+            max_depth_days: 30,
+        };
+        let tip = 3_000_000u64; // 30 days * 720 blocks/day => floor = tip - 21_600.
+        assert!(rc.enforce("xmr", tip - 21_600, tip).is_ok()); // exactly at the floor
+        assert!(rc.enforce("xmr", tip - 21_601, tip).is_err()); // one below the floor
+        assert!(rc.enforce("xmr", tip, tip).is_ok()); // create (at the tip)
+    }
+
+    #[test]
+    fn restore_create_only_rejects_old_allows_near_tip() {
+        let rc = RestoreConfig {
+            policy: RestorePolicy::CreateOnly,
+            max_depth_days: 365, // ignored under create-only
+        };
+        let tip = 3_000_000u64;
+        assert!(rc.enforce("xmr", tip, tip).is_ok()); // create
+        assert!(rc.enforce("xmr", tip - 720, tip).is_ok()); // within the 1-day grace
+        assert!(rc.enforce("xmr", tip - 100_000, tip).is_err()); // a real restore
     }
 }

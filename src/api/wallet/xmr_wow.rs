@@ -300,6 +300,10 @@ pub async fn register(
 
     match req.start_height {
         Some(h) => {
+            // Restore: gate the scan depth against this instance's policy (the
+            // backfill cost lands on our LWS). `None` (create) needs no check.
+            let tip = client.get_blockchain_height().await?;
+            state.config.restore.enforce(&asset, h, tip)?;
             client
                 .import_account(&req.address, &req.view_key, h)
                 .await?

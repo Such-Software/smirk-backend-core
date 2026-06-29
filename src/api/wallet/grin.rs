@@ -124,7 +124,13 @@ pub async fn scan(
     extract_user_id_from_token(&state, &headers).await?;
     validate_hex64(&req.rewind_hash, "rewind_hash")?;
 
-    let view = grin_client(&state)?
+    let client = grin_client(&state)?;
+    if let Some(h) = req.start_height {
+        // Restore: gate the scan depth against this instance's policy.
+        let tip = client.get_height().await?;
+        state.config.restore.enforce("grin", h, tip)?;
+    }
+    let view = client
         .scan_rewind_hash(&req.rewind_hash, req.start_height)
         .await?;
     Ok(Json(GrinScanResponse {
