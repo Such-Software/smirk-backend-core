@@ -2566,15 +2566,17 @@
       },
       "LwsBalanceResponse": {
         "type": "object",
-        "description": "Balance + scan state. `total_received` is the balance (an LWS cannot confirm\nspends without the spend key; the wallet subtracts its own known spends).",
+        "description": "Balance + scan state, as a **verification passthrough**. The backend holds no\nspend key, so it cannot net out spends; the wallet computes the true spendable\nbalance client-side: `total_received − sum(spent_outputs it verifies with the\nspend key) − locked_balance`. `spent_outputs` are therefore CANDIDATES (some\nare ring decoys of the user's own outputs); `pending_balance` is the 0-conf\n(mempool) received.",
         "required": [
           "asset",
           "total_received",
-          "unlocked",
-          "locked",
+          "locked_balance",
+          "pending_balance",
+          "start_height",
           "scanned_height",
           "blockchain_height",
-          "transaction_count"
+          "transaction_count",
+          "spent_outputs"
         ],
         "properties": {
           "asset": {
@@ -2585,12 +2587,30 @@
             "format": "int64",
             "minimum": 0
           },
-          "locked": {
+          "locked_balance": {
             "type": "integer",
             "format": "int64",
             "minimum": 0
           },
+          "pending_balance": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unconfirmed (mempool) received — 0-conf. `0` until the LWS reports mempool\nrows (the monero-lws mempool feature); never negative.",
+            "minimum": 0
+          },
           "scanned_height": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "spent_outputs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SpentOutputDto"
+            },
+            "description": "Candidate spent outputs (confirmed + mempool) for client-side key-image\nverification with the spend key. Never authoritative server-side."
+          },
+          "start_height": {
             "type": "integer",
             "format": "int64",
             "minimum": 0
@@ -2601,11 +2621,6 @@
             "minimum": 0
           },
           "transaction_count": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          },
-          "unlocked": {
             "type": "integer",
             "format": "int64",
             "minimum": 0

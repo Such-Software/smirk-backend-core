@@ -460,7 +460,7 @@ impl LwsClient {
 
 /// Sum the mempool (unconfirmed) net-received amounts, saturating at each step
 /// so a hostile per-tx value cannot overflow-panic the total.
-fn sum_mempool_received(txs: &[AddressTx]) -> u64 {
+pub(crate) fn sum_mempool_received(txs: &[AddressTx]) -> u64 {
     txs.iter()
         .filter(|t| t.mempool)
         .map(|t| t.total_received.saturating_sub(t.total_sent))

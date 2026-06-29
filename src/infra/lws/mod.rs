@@ -9,6 +9,7 @@
 mod client;
 mod types;
 
+pub(crate) use client::sum_mempool_received;
 pub use client::LwsClient;
 pub use types::{
     AccountEntry, AccountStatus, AddressInfo, AddressTx, AddressTxsResponse, AmountOuts,

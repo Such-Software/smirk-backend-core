@@ -28,7 +28,9 @@ use tracing::instrument;
 use super::{validate_cn_address, validate_hex, validate_view_key};
 use crate::api::middleware::extract_user_id_from_token;
 use crate::error::AppError;
-use crate::infra::lws::{AddressTx, LwsClient, RandomOutput, SpentOutput, UnspentOutput};
+use crate::infra::lws::{
+    sum_mempool_received, AddressTx, LwsClient, RandomOutput, SpentOutput, UnspentOutput,
+};
 use crate::AppState;
 
 /// Cap on a submitted Monero/Wownero tx hex. CryptoNote txs (rings, bulletproofs)
@@ -113,17 +115,27 @@ pub struct ConfirmationsRequest {
 
 // ── response DTOs ─────────────────────────────────────────────────────────────
 
-/// Balance + scan state. `total_received` is the balance (an LWS cannot confirm
-/// spends without the spend key; the wallet subtracts its own known spends).
+/// Balance + scan state, as a **verification passthrough**. The backend holds no
+/// spend key, so it cannot net out spends; the wallet computes the true spendable
+/// balance client-side: `total_received − sum(spent_outputs it verifies with the
+/// spend key) − locked_balance`. `spent_outputs` are therefore CANDIDATES (some
+/// are ring decoys of the user's own outputs); `pending_balance` is the 0-conf
+/// (mempool) received.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct LwsBalanceResponse {
     pub asset: String,
     pub total_received: u64,
-    pub unlocked: u64,
-    pub locked: u64,
+    pub locked_balance: u64,
+    /// Unconfirmed (mempool) received — 0-conf. `0` until the LWS reports mempool
+    /// rows (the monero-lws mempool feature); never negative.
+    pub pending_balance: u64,
+    pub start_height: u64,
     pub scanned_height: u64,
     pub blockchain_height: u64,
     pub transaction_count: u64,
+    /// Candidate spent outputs (confirmed + mempool) for client-side key-image
+    /// verification with the spend key. Never authoritative server-side.
+    pub spent_outputs: Vec<SpentOutputDto>,
 }
 
 /// A candidate spent output (verify with the spend key before trusting).
@@ -339,15 +351,35 @@ pub async fn balance(
     validate_cn_address(&req.address)?;
     validate_view_key(&req.view_key)?;
 
-    let info = client.get_address_info(&req.address, &req.view_key).await?;
+    // Verification passthrough: address-info gives received/locked/heights;
+    // address-txs gives the candidate spent_outputs (the wallet verifies them
+    // with its spend key) and the mempool rows (0-conf pending). Fetched
+    // together so a balance read is one round-trip of latency, not two.
+    let (info, txs) = tokio::join!(
+        client.get_address_info(&req.address, &req.view_key),
+        client.get_address_txs(&req.address, &req.view_key),
+    );
+    let info = info?;
+    let txs = txs?;
+
+    let pending_balance = sum_mempool_received(&txs.transactions);
+    let spent_outputs: Vec<SpentOutputDto> = txs
+        .transactions
+        .into_iter()
+        .flat_map(|t| t.spent_outputs)
+        .map(spent_dto)
+        .collect();
+
     Ok(Json(LwsBalanceResponse {
         asset,
-        total_received: info.balance(),
-        unlocked: info.unlocked_balance(),
-        locked: info.locked_funds,
+        total_received: info.total_received,
+        locked_balance: info.locked_funds,
+        pending_balance,
+        start_height: info.start_height,
         scanned_height: info.scanned_height,
         blockchain_height: info.blockchain_height,
         transaction_count: info.transaction_count,
+        spent_outputs,
     }))
 }
 
