@@ -103,6 +103,7 @@ fn output_dto(o: ViewWalletOutputResult) -> GrinOutput {
 
 /// View-only scan for the outputs a `rewind_hash` recognizes.
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/wallet/grin/scan",
     request_body = GrinScanRequest,
@@ -135,6 +136,7 @@ pub async fn scan(
 
 /// Current Grin chain tip height (for confirmation counting).
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     get,
     path = "/wallet/grin/height",
     responses(
@@ -157,6 +159,7 @@ pub async fn height(
 
 /// Broadcast a finalized, signed Grin transaction.
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/wallet/grin/broadcast",
     request_body = GrinBroadcastRequest,

@@ -857,6 +857,7 @@ pub async fn logout(
 
 /// The authenticated user's own info.
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     get,
     path = "/auth/me",
     responses(
@@ -1009,6 +1010,7 @@ pub struct NostrLinkResponse {
 /// shape but refuses every link, because it cannot yet prove the nonce was issued
 /// by this server and is unused.
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/auth/nostr/link",
     request_body = NostrLinkRequest,

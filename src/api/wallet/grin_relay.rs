@@ -201,6 +201,7 @@ fn validate_slatepack(value: &str, field: &str) -> Result<(), AppError> {
 
 /// Post a slatepack addressed to a registered recipient (sender = caller).
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/wallet/grin/relay/create",
     request_body = CreateRelayRequest,
@@ -252,6 +253,7 @@ pub async fn create(
 
 /// The caller's inbox: relays awaiting their response.
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     get,
     path = "/wallet/grin/relay/pending",
     responses(
@@ -277,6 +279,7 @@ pub async fn pending(
 /// Poll a relay's current state (sender or recipient). The sender uses this to
 /// fetch the recipient's response once status is `pending_sender`.
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/wallet/grin/relay/get",
     request_body = SlateIdRequest,
@@ -301,6 +304,7 @@ pub async fn get_relay(
 
 /// Attach the recipient's response, advancing to `pending_sender`.
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/wallet/grin/relay/respond",
     request_body = RespondRelayRequest,
@@ -339,6 +343,7 @@ pub async fn respond(
 /// The backend does NOT finalize or broadcast — the wallet does that locally and
 /// reports the resulting tx hash here.
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/wallet/grin/relay/finalize",
     request_body = FinalizeRelayRequest,
@@ -377,6 +382,7 @@ pub async fn finalize(
 
 /// Cancel a relay (sender or recipient), unless already finalized.
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/wallet/grin/relay/cancel",
     request_body = SlateIdRequest,

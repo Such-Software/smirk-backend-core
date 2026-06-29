@@ -166,6 +166,7 @@ pub struct BroadcastResponse {
 
 /// Confirmed/unconfirmed balance for a BTC/LTC address.
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/wallet/utxo/balance",
     request_body = AddressRequest,
@@ -198,6 +199,7 @@ pub async fn balance(
 
 /// Unspent outputs for a BTC/LTC address.
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/wallet/utxo/utxos",
     request_body = AddressRequest,
@@ -237,6 +239,7 @@ pub async fn utxos(
 
 /// Confirmed + mempool transaction history for a BTC/LTC address.
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/wallet/utxo/history",
     request_body = AddressRequest,
@@ -275,6 +278,7 @@ pub async fn history(
 
 /// Best-chain tip height (for client-side confirmation counting).
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/wallet/utxo/tip",
     request_body = AssetRequest,
@@ -300,6 +304,7 @@ pub async fn tip(
 
 /// Fee-rate estimate (sat/vB) for confirmation within `blocks` blocks.
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/wallet/utxo/fee",
     request_body = FeeRequest,
@@ -327,6 +332,7 @@ pub async fn fee(
 
 /// Broadcast a finalized, signed BTC/LTC transaction.
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/wallet/utxo/broadcast",
     request_body = BroadcastRequest,

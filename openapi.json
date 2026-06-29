@@ -8,7 +8,8 @@
       "email": "jw@such.software"
     },
     "license": {
-      "name": ""
+      "name": "MIT",
+      "identifier": "MIT"
     },
     "version": "0.3.0"
   },
@@ -162,7 +163,12 @@
           "401": {
             "description": "Missing or invalid token"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/auth/nostr": {
@@ -225,7 +231,12 @@
           "409": {
             "description": "npub already linked to another account"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/auth/pow-challenge": {
@@ -426,7 +437,12 @@
           "401": {
             "description": "Missing or invalid token"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/prices": {
@@ -507,7 +523,12 @@
           "401": {
             "description": "Missing or invalid token"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "post": {
         "tags": [
@@ -543,7 +564,12 @@
           "409": {
             "description": "Username is taken or reserved"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/users/{user_id}/keys": {
@@ -666,7 +692,12 @@
           "503": {
             "description": "Upstream node unavailable"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/wallet/grin/height": {
@@ -696,7 +727,12 @@
           "503": {
             "description": "Upstream node unavailable"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/wallet/grin/relay/cancel": {
@@ -736,7 +772,12 @@
           "409": {
             "description": "Relay is already finalized"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/wallet/grin/relay/create": {
@@ -776,7 +817,12 @@
           "404": {
             "description": "Relay feature disabled"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/wallet/grin/relay/finalize": {
@@ -819,7 +865,12 @@
           "409": {
             "description": "Relay is not awaiting finalization"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/wallet/grin/relay/get": {
@@ -856,7 +907,12 @@
           "404": {
             "description": "Relay not found, not yours, or feature disabled"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/wallet/grin/relay/pending": {
@@ -883,7 +939,12 @@
           "404": {
             "description": "Relay feature disabled"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/wallet/grin/relay/respond": {
@@ -926,7 +987,12 @@
           "409": {
             "description": "Relay is not awaiting a recipient response"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/wallet/grin/scan": {
@@ -966,7 +1032,12 @@
           "503": {
             "description": "Upstream node unavailable"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/wallet/lws/balance": {
@@ -1006,7 +1077,12 @@
           "503": {
             "description": "Upstream node unavailable"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/wallet/lws/confirmations": {
@@ -1046,7 +1122,12 @@
           "503": {
             "description": "Upstream node unavailable"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/wallet/lws/height": {
@@ -1086,7 +1167,12 @@
           "503": {
             "description": "Upstream node unavailable"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/wallet/lws/history": {
@@ -1126,7 +1212,12 @@
           "503": {
             "description": "Upstream node unavailable"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/wallet/lws/random_outs": {
@@ -1166,7 +1257,12 @@
           "503": {
             "description": "Upstream node unavailable"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/wallet/lws/register": {
@@ -1206,7 +1302,12 @@
           "503": {
             "description": "Upstream node unavailable"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/wallet/lws/submit_tx": {
@@ -1246,7 +1347,12 @@
           "503": {
             "description": "Upstream node unavailable"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/wallet/lws/unspent_outs": {
@@ -1286,7 +1392,12 @@
           "503": {
             "description": "Upstream node unavailable"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/wallet/utxo/balance": {
@@ -1326,7 +1437,12 @@
           "503": {
             "description": "Upstream node unavailable"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/wallet/utxo/broadcast": {
@@ -1366,7 +1482,12 @@
           "503": {
             "description": "Upstream node unavailable"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/wallet/utxo/fee": {
@@ -1406,7 +1527,12 @@
           "503": {
             "description": "Upstream node unavailable"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/wallet/utxo/history": {
@@ -1446,7 +1572,12 @@
           "503": {
             "description": "Upstream node unavailable"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/wallet/utxo/tip": {
@@ -1486,7 +1617,12 @@
           "503": {
             "description": "Upstream node unavailable"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/wallet/utxo/utxos": {
@@ -1526,7 +1662,12 @@
           "503": {
             "description": "Upstream node unavailable"
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     }
   },
@@ -3243,6 +3384,14 @@
             }
           }
         }
+      }
+    },
+    "securitySchemes": {
+      "bearer_auth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Session access token issued by the /auth/* endpoints."
       }
     }
   },

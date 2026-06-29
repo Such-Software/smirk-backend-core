@@ -209,6 +209,7 @@ pub struct UserKeysResponse {
 /// reserved list before the DB write. The UNIQUE constraint is the atomic claim:
 /// a collision (taken or reserved) is a 409, never a 500.
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/users/me/username",
     request_body = SetUsernameRequest,
@@ -244,6 +245,7 @@ pub async fn set_username(
 
 /// The authenticated user's own username (or `null`).
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     get,
     path = "/users/me/username",
     responses(
@@ -327,6 +329,7 @@ pub async fn lookup_username(
 /// Idempotent: the DB upsert keys on `(user_id, asset, key_type)`, so re-posting
 /// the same asset replaces the stored key material in place.
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/keys",
     request_body = RegisterKeyRequest,

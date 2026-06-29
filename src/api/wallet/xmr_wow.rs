@@ -274,6 +274,7 @@ fn random_dto(r: RandomOutput) -> RandomOutputDto {
 /// Register an account (its view key) with the LWS so it begins scanning.
 /// Idempotent at the LWS; pass `start_height` to scan from a wallet birthday.
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/wallet/lws/register",
     request_body = RegisterRequest,
@@ -310,6 +311,7 @@ pub async fn register(
 
 /// Balance + scan state for an account.
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/wallet/lws/balance",
     request_body = ViewRequest,
@@ -347,6 +349,7 @@ pub async fn balance(
 
 /// Transaction history (confirmed + mempool) for an account.
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/wallet/lws/history",
     request_body = ViewRequest,
@@ -379,6 +382,7 @@ pub async fn history(
 
 /// Unspent outputs for an account (for client-side spend construction).
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/wallet/lws/unspent_outs",
     request_body = ViewRequest,
@@ -414,6 +418,7 @@ pub async fn unspent_outs(
 
 /// Random decoy outputs for ring construction.
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/wallet/lws/random_outs",
     request_body = RandomOutsRequest,
@@ -452,6 +457,7 @@ pub async fn random_outs(
 
 /// Broadcast a finalized, signed Monero/Wownero transaction.
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/wallet/lws/submit_tx",
     request_body = SubmitRequest,
@@ -480,6 +486,7 @@ pub async fn submit_tx(
 
 /// Current chain height (daemon) for confirmation counting.
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/wallet/lws/height",
     request_body = LwsAssetRequest,
@@ -505,6 +512,7 @@ pub async fn height(
 
 /// Confirmation count for a transaction (daemon).
 #[utoipa::path(
+    security(("bearer_auth" = [])),
     post,
     path = "/wallet/lws/confirmations",
     request_body = ConfirmationsRequest,

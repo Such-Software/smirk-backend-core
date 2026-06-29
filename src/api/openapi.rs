@@ -14,6 +14,7 @@ use utoipa::OpenApi;
         version = "0.3.0",
         description = "Open, self-hostable backend for the Smirk non-custodial multi-chain wallet."
     ),
+    modifiers(&SecurityAddon),
     paths(
         crate::api::health::health,
         crate::api::capabilities::capabilities,
@@ -144,3 +145,32 @@ use utoipa::OpenApi;
     )
 )]
 pub struct ApiDoc;
+
+/// Registers the `bearer_auth` security scheme (HTTP Bearer / JWT). Routes that
+/// resolve a session via `extract_user_id_from_token` annotate themselves with
+/// `security(("bearer_auth" = []))`; public routes (auth bootstrap, lookups,
+/// system) carry no `security` and are documented as open. Without this the
+/// generated spec/client could not tell which endpoints require a token.
+struct SecurityAddon;
+
+impl utoipa::Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+        let components = openapi
+            .components
+            .as_mut()
+            .expect("components are registered by the derive");
+        components.add_security_scheme(
+            "bearer_auth",
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
+                    .bearer_format("JWT")
+                    .description(Some(
+                        "Session access token issued by the /auth/* endpoints.",
+                    ))
+                    .build(),
+            ),
+        );
+    }
+}
