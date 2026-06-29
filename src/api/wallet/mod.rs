@@ -14,6 +14,7 @@ use crate::AppState;
 pub mod btc_ltc;
 pub mod grin;
 pub mod grin_relay;
+pub mod heights;
 pub mod xmr_wow;
 
 /// All wallet routes, RELATIVE to the `/api/v1` mount point.
@@ -22,6 +23,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .merge(xmr_wow::routes())
         .merge(grin::routes())
         .merge(grin_relay::routes())
+        .merge(heights::routes())
 }
 
 // ── shared input validators ───────────────────────────────────────────────────

@@ -1040,6 +1040,35 @@
         ]
       }
     },
+    "/wallet/heights": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Current tip height for every enabled chain (one round-trip).",
+        "operationId": "heights",
+        "responses": {
+          "200": {
+            "description": "Tip height per chain (null if disabled/unreachable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HeightsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/wallet/lws/balance": {
       "post": {
         "tags": [
@@ -2363,6 +2392,48 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "HeightsResponse": {
+        "type": "object",
+        "description": "Current tip height per chain. `null` = the chain is disabled on this instance\nor its source was unreachable for this request.",
+        "properties": {
+          "btc": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "example": 955860
+          },
+          "grin": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "ltc": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "wow": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "xmr": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
           }
         }
       },

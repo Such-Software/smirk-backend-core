@@ -58,6 +58,7 @@ use utoipa::OpenApi;
         crate::api::wallet::grin_relay::respond,
         crate::api::wallet::grin_relay::finalize,
         crate::api::wallet::grin_relay::cancel,
+        crate::api::wallet::heights::heights,
         crate::api::nip05::well_known_nostr,
     ),
     components(schemas(
@@ -132,6 +133,7 @@ use utoipa::OpenApi;
         crate::api::wallet::grin_relay::SlateIdRequest,
         crate::api::wallet::grin_relay::RelayEntry,
         crate::api::wallet::grin_relay::PendingRelaysResponse,
+        crate::api::wallet::heights::HeightsResponse,
         crate::api::nip05::WellKnownResponse,
     )),
     tags(
