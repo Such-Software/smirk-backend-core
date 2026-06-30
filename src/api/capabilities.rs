@@ -58,6 +58,13 @@ pub struct RestoreCapability {
     /// `create-only` | `bounded` | `unlimited`.
     pub policy: String,
     pub max_depth_days: Option<u32>,
+    /// Restore PoW pricing curve: a restore depth (days) free of PoW, then `+1`
+    /// hashcash difficulty bit per `pow_days_per_bit` days beyond it
+    /// (`0` = pricing off), capped at `pow_max_bits`. The wallet computes its
+    /// required difficulty from this + the restore date and solves the hashcash.
+    pub pow_free_days: u32,
+    pub pow_days_per_bit: u32,
+    pub pow_max_bits: u32,
 }
 
 /// Registration gates this instance enforces for a NEW wallet (returning wallets
@@ -147,6 +154,9 @@ pub fn effective_capabilities(config: &Config) -> CapabilitiesResponse {
                 crate::config::RestorePolicy::Bounded => Some(config.restore.max_depth_days),
                 _ => None,
             },
+            pow_free_days: config.restore.pow_free_days,
+            pow_days_per_bit: config.restore.pow_days_per_bit,
+            pow_max_bits: config.restore.pow_max_bits,
         },
         registration: RegistrationCapability {
             invite_required: config.registration.require_invite,

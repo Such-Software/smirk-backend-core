@@ -7,6 +7,7 @@ pub mod admin_session;
 pub mod crypto;
 pub mod invite;
 pub mod pow;
+pub mod restore_pow;
 pub mod secret;
 pub mod session;
 

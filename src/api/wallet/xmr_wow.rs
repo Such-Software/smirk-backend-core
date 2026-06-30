@@ -78,6 +78,11 @@ pub struct RegisterRequest {
     pub view_key: String,
     /// Scan from this block height (wallet birthday). Omit to scan from now.
     pub start_height: Option<u64>,
+    /// Restore proof-of-work nonce. Required when the instance prices the
+    /// requested restore depth (see `/capabilities` → `restore.pow_*`); ignored
+    /// otherwise. Bound to `(asset, address, start_height)` (see `restore_pow`).
+    #[serde(default)]
+    pub restore_pow_nonce: Option<u64>,
 }
 
 /// Request decoy outputs for ring construction.
@@ -316,6 +321,13 @@ pub async fn register(
             // backfill cost lands on our LWS). `None` (create) needs no check.
             let tip = client.get_blockchain_height().await?;
             state.config.restore.enforce(&asset, h, tip)?;
+            state.config.restore.enforce_restore_pow(
+                &asset,
+                &req.address,
+                h,
+                tip,
+                req.restore_pow_nonce,
+            )?;
             client
                 .import_account(&req.address, &req.view_key, h)
                 .await?

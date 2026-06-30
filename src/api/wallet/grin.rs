@@ -48,6 +48,11 @@ pub struct GrinScanRequest {
     pub rewind_hash: String,
     /// Scan from this block height (wallet birthday / last scanned). Omit for full.
     pub start_height: Option<u64>,
+    /// Restore proof-of-work nonce. Required when the instance prices the
+    /// requested restore depth (see `/capabilities` → `restore.pow_*`); bound to
+    /// `(grin, rewind_hash, start_height)` (see `restore_pow`).
+    #[serde(default)]
+    pub restore_pow_nonce: Option<u64>,
 }
 
 /// A single output recovered by a view-only scan. Amounts are nanogrin.
@@ -129,6 +134,13 @@ pub async fn scan(
         // Restore: gate the scan depth against this instance's policy.
         let tip = client.get_height().await?;
         state.config.restore.enforce("grin", h, tip)?;
+        state.config.restore.enforce_restore_pow(
+            "grin",
+            &req.rewind_hash,
+            h,
+            tip,
+            req.restore_pow_nonce,
+        )?;
     }
     let view = client
         .scan_rewind_hash(&req.rewind_hash, req.start_height)

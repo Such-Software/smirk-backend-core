@@ -340,6 +340,15 @@ pub struct RestoreConfig {
     pub policy: RestorePolicy,
     /// For `Bounded`: how many days behind the tip a restore may start.
     pub max_depth_days: u32,
+    /// Restore depth (days behind tip) that is FREE of PoW pricing.
+    pub pow_free_days: u32,
+    /// `+1` hashcash difficulty bit per this many days of restore depth beyond
+    /// the free window. `0` disables restore pricing (the depth gate above still
+    /// applies). Each bit ~doubles the wallet's solve time, so the requester pays
+    /// compute proportional to the scan cost they impose on the operator.
+    pub pow_days_per_bit: u32,
+    /// Hard cap on the priced difficulty (bounds wallet solve time on a phone).
+    pub pow_max_bits: u32,
 }
 
 /// Approximate blocks per day per chain (from target block time). Used only to
@@ -390,6 +399,49 @@ impl RestoreConfig {
             )),
             RestorePolicy::Unlimited => unreachable!(),
         })
+    }
+
+    /// Hashcash difficulty (leading zero BITS) required to restore `chain` from
+    /// `start_height` against `tip` — `0` within the free window or when pricing
+    /// is off. The depth→bits curve is the operator's "pay for the scan you cost
+    /// me" knob; it sits ON TOP of the [`enforce`](Self::enforce) depth gate.
+    pub fn required_restore_pow_bits(&self, chain: &str, start_height: u64, tip: u64) -> u32 {
+        if self.pow_days_per_bit == 0 {
+            return 0;
+        }
+        let depth_days = tip.saturating_sub(start_height) / blocks_per_day(chain).max(1);
+        let over = depth_days.saturating_sub(self.pow_free_days as u64);
+        ((over / self.pow_days_per_bit as u64) as u32).min(self.pow_max_bits)
+    }
+
+    /// Enforce restore PoW pricing: when the requested depth is priced, a valid
+    /// hashcash `nonce` (bound to `chain`/`address`/`start_height`) of the
+    /// required difficulty must accompany the restore. A literal error names the
+    /// requirement, never the caller's value.
+    pub fn enforce_restore_pow(
+        &self,
+        chain: &str,
+        address: &str,
+        start_height: u64,
+        tip: u64,
+        nonce: Option<u64>,
+    ) -> Result<(), AppError> {
+        let bits = self.required_restore_pow_bits(chain, start_height, tip);
+        if bits == 0 {
+            return Ok(());
+        }
+        let nonce = nonce.ok_or_else(|| {
+            AppError::ValidationError(format!(
+                "this restore depth requires a {bits}-bit proof-of-work nonce; \
+                 upgrade to a newer Smirk client"
+            ))
+        })?;
+        if !crate::core::restore_pow::verify(chain, address, start_height, nonce, bits) {
+            return Err(AppError::ValidationError(
+                "restore proof-of-work is insufficient for the requested depth".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -553,7 +605,7 @@ impl Config {
                 grace_period_hours: env_parse("ERASURE_GRACE_PERIOD_HOURS", 72u64)?,
             },
             restore: {
-                let policy = match env_or("WALLET_RESTORE_POLICY", "bounded")
+                let policy = match env_or("WALLET_RESTORE_POLICY", "create-only")
                     .to_lowercase()
                     .as_str()
                 {
@@ -569,6 +621,9 @@ impl Config {
                 RestoreConfig {
                     policy,
                     max_depth_days: env_parse("WALLET_MAX_RESTORE_DEPTH_DAYS", 365u32)?,
+                    pow_free_days: env_parse("WALLET_RESTORE_POW_FREE_DAYS", 90u32)?,
+                    pow_days_per_bit: env_parse("WALLET_RESTORE_POW_DAYS_PER_BIT", 0u32)?,
+                    pow_max_bits: env_parse("WALLET_RESTORE_POW_MAX_BITS", 24u32)?,
                 }
             },
             registration: RegistrationConfig {
@@ -870,6 +925,9 @@ mod tests {
             restore: RestoreConfig {
                 policy: RestorePolicy::Bounded,
                 max_depth_days: 365,
+                pow_free_days: 90,
+                pow_days_per_bit: 0,
+                pow_max_bits: 24,
             },
             registration: RegistrationConfig {
                 require_invite: false,
@@ -972,6 +1030,9 @@ mod tests {
         c.restore = RestoreConfig {
             policy: RestorePolicy::Bounded,
             max_depth_days: 0,
+            pow_free_days: 90,
+            pow_days_per_bit: 0,
+            pow_max_bits: 24,
         };
         assert!(c.validate().is_err());
     }
@@ -981,6 +1042,9 @@ mod tests {
         let rc = RestoreConfig {
             policy: RestorePolicy::Unlimited,
             max_depth_days: 0,
+            pow_free_days: 0,
+            pow_days_per_bit: 0,
+            pow_max_bits: 0,
         };
         assert!(rc.enforce("xmr", 1, 3_000_000).is_ok());
     }
@@ -990,6 +1054,9 @@ mod tests {
         let rc = RestoreConfig {
             policy: RestorePolicy::Bounded,
             max_depth_days: 30,
+            pow_free_days: 0,
+            pow_days_per_bit: 0,
+            pow_max_bits: 0,
         };
         let tip = 3_000_000u64; // 30 days * 720 blocks/day => floor = tip - 21_600.
         assert!(rc.enforce("xmr", tip - 21_600, tip).is_ok()); // exactly at the floor
@@ -1002,10 +1069,79 @@ mod tests {
         let rc = RestoreConfig {
             policy: RestorePolicy::CreateOnly,
             max_depth_days: 365, // ignored under create-only
+            pow_free_days: 0,
+            pow_days_per_bit: 0,
+            pow_max_bits: 0,
         };
         let tip = 3_000_000u64;
         assert!(rc.enforce("xmr", tip, tip).is_ok()); // create
         assert!(rc.enforce("xmr", tip - 720, tip).is_ok()); // within the 1-day grace
         assert!(rc.enforce("xmr", tip - 100_000, tip).is_err()); // a real restore
+    }
+
+    fn priced(free: u32, per_bit: u32, max: u32) -> RestoreConfig {
+        RestoreConfig {
+            policy: RestorePolicy::Unlimited,
+            max_depth_days: 0,
+            pow_free_days: free,
+            pow_days_per_bit: per_bit,
+            pow_max_bits: max,
+        }
+    }
+
+    #[test]
+    fn restore_pow_bits_scale_with_depth_and_cap() {
+        let rc = priced(30, 30, 10); // free 30d, +1 bit / 30d, cap 10
+        let tip = 3_000_000u64;
+        let d = |days: u64| tip.saturating_sub(days * 720); // xmr = 720 blocks/day
+        assert_eq!(
+            rc.required_restore_pow_bits("xmr", d(20), tip),
+            0,
+            "within free window"
+        );
+        assert_eq!(
+            rc.required_restore_pow_bits("xmr", d(90), tip),
+            2,
+            "30 free + 60 over => 2 bits"
+        );
+        assert_eq!(
+            rc.required_restore_pow_bits("xmr", d(100_000), tip),
+            10,
+            "capped"
+        );
+    }
+
+    #[test]
+    fn restore_pow_off_when_days_per_bit_zero() {
+        let rc = priced(0, 0, 24);
+        assert_eq!(rc.required_restore_pow_bits("xmr", 1, 3_000_000), 0);
+        assert!(rc
+            .enforce_restore_pow("xmr", "addr", 1, 3_000_000, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn restore_pow_requires_a_valid_nonce_when_priced() {
+        let rc = priced(0, 1, 8);
+        let tip = 3_000_000u64;
+        let start = tip - 8 * 720; // 8 days depth => 8 bits
+        assert_eq!(rc.required_restore_pow_bits("xmr", start, tip), 8);
+        // Missing nonce is rejected.
+        assert!(rc
+            .enforce_restore_pow("xmr", "addr", start, tip, None)
+            .is_err());
+        // A correctly-solved nonce is accepted.
+        let nonce = (0u64..)
+            .find(|&n| crate::core::restore_pow::verify("xmr", "addr", start, n, 8))
+            .unwrap();
+        assert!(rc
+            .enforce_restore_pow("xmr", "addr", start, tip, Some(nonce))
+            .is_ok());
+        // A nonce that doesn't clear the bar is rejected.
+        assert!(
+            rc.enforce_restore_pow("xmr", "addr", start, tip, Some(nonce.wrapping_add(1)))
+                .is_err()
+                || crate::core::restore_pow::verify("xmr", "addr", start, nonce.wrapping_add(1), 8)
+        );
     }
 }

@@ -2339,6 +2339,15 @@
           "rewind_hash"
         ],
         "properties": {
+          "restore_pow_nonce": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Restore proof-of-work nonce. Required when the instance prices the\nrequested restore depth (see `/capabilities` → `restore.pow_*`); bound to\n`(grin, rewind_hash, start_height)` (see `restore_pow`).",
+            "minimum": 0
+          },
           "rewind_hash": {
             "type": "string",
             "description": "The wallet's `rewind_hash` (64 hex). Forwarded to grin-wallet; not stored."
@@ -2909,6 +2918,15 @@
           "asset": {
             "type": "string"
           },
+          "restore_pow_nonce": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Restore proof-of-work nonce. Required when the instance prices the\nrequested restore depth (see `/capabilities` → `restore.pow_*`); ignored\notherwise. Bound to `(asset, address, start_height)` (see `restore_pow`).",
+            "minimum": 0
+          },
           "start_height": {
             "type": [
               "integer",
@@ -3026,7 +3044,10 @@
         "type": "object",
         "description": "This instance's wallet-restore (import) policy. The wallet uses it to adapt\nits import UX — hide/grey the restore-height field under `create-only`, warn\nwhen a chosen date exceeds the bound. `max_depth_days` is present only for\nthe `bounded` policy.",
         "required": [
-          "policy"
+          "policy",
+          "pow_free_days",
+          "pow_days_per_bit",
+          "pow_max_bits"
         ],
         "properties": {
           "max_depth_days": {
@@ -3040,6 +3061,22 @@
           "policy": {
             "type": "string",
             "description": "`create-only` | `bounded` | `unlimited`."
+          },
+          "pow_days_per_bit": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "pow_free_days": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Restore PoW pricing curve: a restore depth (days) free of PoW, then `+1`\nhashcash difficulty bit per `pow_days_per_bit` days beyond it\n(`0` = pricing off), capped at `pow_max_bits`. The wallet computes its\nrequired difficulty from this + the restore date and solves the hashcash.",
+            "minimum": 0
+          },
+          "pow_max_bits": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
           }
         }
       },
