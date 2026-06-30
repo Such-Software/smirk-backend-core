@@ -26,6 +26,7 @@ use rand::RngCore;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
+use smirk_backend_core::core::invite::{generate_invite_code, hash_invite_code};
 use smirk_backend_core::infra::db::{AddKeyOutcome, Database, RevokeKeyOutcome};
 use smirk_backend_core::models::db::{NewAdminAudit, NewAdminKey};
 
@@ -43,6 +44,7 @@ COMMANDS:
     revoke-key          --id <uuid>
     replace-key         --old <uuid> --pubkey <64hex> [--revoke-all]
     create-admin-wallet --out <path>
+    mint-invite         [--count <n>] [--label <s>]  (registration invite codes)
     doctor
 ";
 
@@ -93,6 +95,7 @@ async fn run(args: &[String]) -> Result<(), String> {
         "revoke-key" => revoke_key(&db, &secret, rest).await,
         "replace-key" => replace_key(&db, &secret, rest).await,
         "create-admin-wallet" => create_admin_wallet(&db, &secret, rest).await,
+        "mint-invite" => mint_invite(&db, rest).await,
         "doctor" => doctor(&db, &secret).await,
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
@@ -364,6 +367,36 @@ async fn create_admin_wallet(db: &Database, secret: &str, args: &[String]) -> Re
     println!("generated admin key; secret written to {out} (mode 0600)");
     println!("pubkey: {pubkey}");
     println!("import the secret into your NIP-98 signer; it activates on first login");
+    Ok(())
+}
+
+/// Mint single-use registration invite codes. Generates random 128-bit codes,
+/// stores only their sha256 hashes, and prints the RAW codes to stdout once for
+/// distribution — they are not recoverable afterward (only the hash is kept).
+async fn mint_invite(db: &Database, args: &[String]) -> Result<(), String> {
+    let count: u32 = match flag(args, "--count") {
+        Some(s) => s
+            .parse()
+            .map_err(|_| "--count must be a number".to_string())?,
+        None => 1,
+    }
+    .clamp(1, 1000);
+    let label = flag(args, "--label");
+    eprintln!(
+        "Minting {count} single-use invite code(s){}:",
+        label
+            .as_deref()
+            .map(|l| format!(" [{l}]"))
+            .unwrap_or_default()
+    );
+    for _ in 0..count {
+        let code = generate_invite_code();
+        db.insert_invite_code(&hash_invite_code(&code), label.as_deref())
+            .await
+            .map_err(|e| format!("insert invite: {e}"))?;
+        println!("{code}");
+    }
+    eprintln!("\nDistribute now — only the hash is stored; raw codes are not recoverable.");
     Ok(())
 }
 

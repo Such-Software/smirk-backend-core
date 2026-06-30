@@ -129,6 +129,7 @@ pub struct Config {
     pub landing: LandingConfig,
     pub retention: RetentionConfig,
     pub restore: RestoreConfig,
+    pub registration: RegistrationConfig,
 }
 
 #[derive(Clone)]
@@ -392,6 +393,16 @@ impl RestoreConfig {
     }
 }
 
+/// Registration gates beyond PoW — composable, operator-configured, advertised
+/// via `/capabilities`. Each is a gate the wallet must satisfy to create a NEW
+/// identity; returning wallets bypass them, and self-hosting bypasses all of
+/// them (run your own backend). PoW lives in [`PowConfig`]; this holds the rest.
+#[derive(Clone, Copy)]
+pub struct RegistrationConfig {
+    /// Require a valid operator-minted invite code to register a new wallet.
+    pub require_invite: bool,
+}
+
 impl Config {
     /// Load configuration from the environment and validate it (fail-closed).
     pub fn from_env() -> Result<Self, AppError> {
@@ -559,6 +570,9 @@ impl Config {
                     policy,
                     max_depth_days: env_parse("WALLET_MAX_RESTORE_DEPTH_DAYS", 365u32)?,
                 }
+            },
+            registration: RegistrationConfig {
+                require_invite: env_bool("REGISTRATION_REQUIRE_INVITE", false),
             },
         };
 
@@ -856,6 +870,9 @@ mod tests {
             restore: RestoreConfig {
                 policy: RestorePolicy::Bounded,
                 max_depth_days: 365,
+            },
+            registration: RegistrationConfig {
+                require_invite: false,
             },
         }
     }

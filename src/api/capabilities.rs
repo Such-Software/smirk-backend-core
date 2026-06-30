@@ -60,6 +60,17 @@ pub struct RestoreCapability {
     pub max_depth_days: Option<u32>,
 }
 
+/// Registration gates this instance enforces for a NEW wallet (returning wallets
+/// and self-hosting bypass them). The wallet uses these to shape onboarding —
+/// prompt for an invite code, solve PoW, etc.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RegistrationCapability {
+    /// A valid operator-minted invite code is required to register.
+    pub invite_required: bool,
+    /// A proof-of-work solution is required to register.
+    pub pow_required: bool,
+}
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct CapabilitiesResponse {
     /// Backend version (Cargo package version).
@@ -70,6 +81,8 @@ pub struct CapabilitiesResponse {
     pub features: FeatureCapabilities,
     /// Wallet restore (import) policy for this instance.
     pub restore: RestoreCapability,
+    /// Registration gates for a new wallet on this instance.
+    pub registration: RegistrationCapability,
 }
 
 /// Whether an enabled chain can actually be served (its infra secret/URL is
@@ -134,6 +147,10 @@ pub fn effective_capabilities(config: &Config) -> CapabilitiesResponse {
                 crate::config::RestorePolicy::Bounded => Some(config.restore.max_depth_days),
                 _ => None,
             },
+        },
+        registration: RegistrationCapability {
+            invite_required: config.registration.require_invite,
+            pow_required: config.pow.enabled && config.pow.required,
         },
     }
 }

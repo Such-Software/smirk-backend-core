@@ -303,6 +303,11 @@ pub struct ExtensionRegisterRequest {
     #[serde(default)]
     #[schema(value_type = Object)]
     pub altcha_solution: Option<altcha::Payload>,
+    /// Operator-minted invite code. Required when the instance enables the invite
+    /// registration gate (see `/capabilities` → `registration.invite_required`);
+    /// ignored otherwise and for returning wallets.
+    #[serde(default)]
+    pub invite_code: Option<String>,
 }
 
 /// Register a new extension wallet or authenticate an existing one.
@@ -460,6 +465,7 @@ pub async fn extension_register(
         returning_by_pubkey,
         req.altcha_solution.as_ref(),
     )?;
+    enforce_invite(&state, returning_by_pubkey, req.invite_code.as_deref()).await?;
 
     // If we reached here after an unproven fingerprint match, do NOT attach that
     // fingerprint to the new row — it belongs to another user, and the UNIQUE
@@ -576,6 +582,48 @@ fn enforce_pow(
             crate::core::pow::verify_payload(&state.config.pow, solution)?;
         }
     }
+    Ok(())
+}
+
+/// Invite-code registration gate. A genuinely new wallet must present a valid,
+/// unused operator-minted invite code when the instance requires one; a
+/// returning wallet (known pubkey) bypasses it, exactly like PoW, and an
+/// instance with the gate off accepts everyone. The claim is atomic and
+/// single-use (db layer), so a code is redeemable by at most one registration
+/// even under concurrent submission. Self-hosting bypasses this entirely
+/// (operators simply leave the gate off).
+async fn enforce_invite(
+    state: &AppState,
+    returning: bool,
+    invite_code: Option<&str>,
+) -> Result<(), AppError> {
+    if returning || !state.config.registration.require_invite {
+        return Ok(());
+    }
+    let code = invite_code
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .ok_or_else(|| {
+            warn!(
+                gate = "invite",
+                "invite required for new wallet but none supplied"
+            );
+            AppError::ValidationError(
+                "An invite code is required to register on this instance.".into(),
+            )
+        })?;
+    if !state
+        .db
+        .claim_invite_code(&crate::core::invite::hash_invite_code(code))
+        .await?
+    {
+        // One literal for "no such code", "already used", and "expired" — never
+        // an oracle that distinguishes them.
+        return Err(AppError::ValidationError(
+            "Invalid or already-used invite code.".into(),
+        ));
+    }
+    info!(gate = "invite", "invite code accepted (new user)");
     Ok(())
 }
 

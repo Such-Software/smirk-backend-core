@@ -68,6 +68,7 @@ use utoipa::OpenApi;
         crate::api::capabilities::ChainCapability,
         crate::api::capabilities::FeatureCapabilities,
         crate::api::capabilities::RestoreCapability,
+        crate::api::capabilities::RegistrationCapability,
         crate::api::prices::PricesResponse,
         crate::api::auth::AuthResponse,
         crate::api::auth::UserInfo,

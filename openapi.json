@@ -1892,7 +1892,8 @@
           "contract_version",
           "chains",
           "features",
-          "restore"
+          "restore",
+          "registration"
         ],
         "properties": {
           "chains": {
@@ -1906,6 +1907,10 @@
           },
           "features": {
             "$ref": "#/components/schemas/FeatureCapabilities"
+          },
+          "registration": {
+            "$ref": "#/components/schemas/RegistrationCapability",
+            "description": "Registration gates for a new wallet on this instance."
           },
           "restore": {
             "$ref": "#/components/schemas/RestoreCapability",
@@ -2098,6 +2103,13 @@
           "altcha_solution": {
             "type": "object",
             "description": "Optional proof-of-work solution. Required when the PoW gate applies to\nthis pubkey (see [`pow_applies`]); otherwise ignored."
+          },
+          "invite_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Operator-minted invite code. Required when the instance enables the invite\nregistration gate (see `/capabilities` → `registration.invite_required`);\nignored otherwise and for returning wallets."
           },
           "keys": {
             "type": "array",
@@ -2909,6 +2921,24 @@
           "view_key": {
             "type": "string",
             "description": "Private view key (64 hex). Forwarded to the LWS; never stored or logged."
+          }
+        }
+      },
+      "RegistrationCapability": {
+        "type": "object",
+        "description": "Registration gates this instance enforces for a NEW wallet (returning wallets\nand self-hosting bypass them). The wallet uses these to shape onboarding —\nprompt for an invite code, solve PoW, etc.",
+        "required": [
+          "invite_required",
+          "pow_required"
+        ],
+        "properties": {
+          "invite_required": {
+            "type": "boolean",
+            "description": "A valid operator-minted invite code is required to register."
+          },
+          "pow_required": {
+            "type": "boolean",
+            "description": "A proof-of-work solution is required to register."
           }
         }
       },

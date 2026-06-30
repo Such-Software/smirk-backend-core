@@ -13,6 +13,7 @@ mod audit;
 mod challenges;
 mod erasure;
 mod grin_slatepacks;
+mod invite_codes;
 mod login_events;
 mod restore_attempts;
 mod server_config;
