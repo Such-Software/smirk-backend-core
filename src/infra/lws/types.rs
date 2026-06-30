@@ -143,8 +143,6 @@ pub(crate) struct AdminAddAccountParams {
     pub address: String,
     /// The private view key.
     pub key: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub start_height: Option<u64>,
 }
 
 #[derive(Serialize)]

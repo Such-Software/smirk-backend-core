@@ -209,35 +209,46 @@ impl LwsClient {
     /// current height.
     #[instrument(skip(self, view_key), fields(net = %self.network))]
     pub async fn register_account(&self, address: &str, view_key: &str) -> Result<(), AppError> {
-        self.admin_add_account(address, view_key, None).await
+        self.admin_add_account(address, view_key).await
     }
 
-    /// Register + activate an account scanning from a specific `start_height`
-    /// (avoids re-scanning from genesis for an older wallet).
-    #[instrument(skip(self, view_key), fields(net = %self.network))]
+    /// Register an account and scan it from `start_height` (a wallet birthday).
+    ///
+    /// The LWS `add_account` starts every account at the chain TIP and ignores
+    /// any supplied start height, so a restore needs an explicit backwards
+    /// rescan. Read the post-add scan height and only rescan when strictly
+    /// lowering it — honoring the `rescan` backwards-only invariant (a rescan to
+    /// `height >= current` is undefined behavior in monero-lws).
+    #[instrument(skip(self, view_key), fields(net = %self.network, start_height))]
     pub async fn import_account(
         &self,
         address: &str,
         view_key: &str,
         start_height: u64,
     ) -> Result<(), AppError> {
-        self.admin_add_account(address, view_key, Some(start_height))
-            .await
+        // `add_account` errors on a duplicate, so only register a NEW account;
+        // an existing one keeps its view key. Either way, lower its scan height
+        // to the birthday with a backwards rescan when that strictly lowers it.
+        let current = match self.account_scan_height(address).await? {
+            Some(h) => h,
+            None => {
+                self.admin_add_account(address, view_key).await?;
+                self.account_scan_height(address).await?.unwrap_or(u64::MAX)
+            }
+        };
+        if start_height < current {
+            self.rescan(vec![address.to_string()], start_height).await?;
+        }
+        Ok(())
     }
 
-    async fn admin_add_account(
-        &self,
-        address: &str,
-        view_key: &str,
-        start_height: Option<u64>,
-    ) -> Result<(), AppError> {
+    async fn admin_add_account(&self, address: &str, view_key: &str) -> Result<(), AppError> {
         let url = format!("{}/add_account", self.admin_url);
         let body = AdminAddAccountRequest {
             auth: self.admin_key.expose().to_string(),
             params: AdminAddAccountParams {
                 address: address.to_string(),
                 key: view_key.to_string(),
-                start_height,
             },
         };
         self.post_ok(url, "add_account", &body).await
