@@ -83,12 +83,15 @@ inconsistent feature configuration rather than booting with a control silently
 defeated. Generate secrets with `openssl rand -hex 32`. See
 [`.env.example`](.env.example) for the full, documented configuration surface.
 
-First admin (headless — the supported bootstrap):
+First admin (headless bootstrap):
 
 ```sh
-smirk-admin create-admin-wallet --out admin.secret  # generates a key, registers the pubkey
-# import admin.secret into your NIP-98 signer; it activates on first admin login
+smirk-admin setup --pubkey <x-only-hex>   # seed the first admin + latch the bootstrap
 ```
+
+`<x-only-hex>` is the admin's Sign-in-with-Smirk (Nostr) public key; the admin
+then authenticates with the matching key over NIP-98. Full deployment guide:
+[docs/operations/OPERATOR_SETUP.md](docs/operations/OPERATOR_SETUP.md).
 
 ## Security posture
 
