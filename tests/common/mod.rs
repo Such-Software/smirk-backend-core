@@ -70,6 +70,8 @@ pub async fn try_app() -> Option<TestApp> {
     );
     let sessions = SessionManager::new(&config.auth.jwt_secret, config.auth.jwt_expiry_hours);
     let chains = ChainClients::from_config(&config).expect("build chain clients");
+    let payment =
+        smirk_backend_core::infra::payment::from_config(&config).expect("build payment provider");
     let prices = Arc::new(tokio::sync::RwLock::new(
         smirk_backend_core::infra::prices::PriceSnapshot::empty(&config.features.prices_currency),
     ));
@@ -82,6 +84,7 @@ pub async fn try_app() -> Option<TestApp> {
         db,
         sessions,
         chains,
+        payment,
         web_challenges: Arc::default(),
         prices,
         admin_sessions,

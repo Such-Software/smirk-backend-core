@@ -38,6 +38,26 @@ fn looks_placeholder(s: &str) -> bool {
     PLACEHOLDERS.iter().any(|p| l.contains(p))
 }
 
+/// Whether `s` is a positive decimal literal — digits with at most one dot and
+/// at least one non-zero digit (`"0.01"`, `"1"`, `"10.5"` yes; `"0"`, `"0.00"`,
+/// `"-1"`, `"1e5"`, `""` no). Validates a price without pulling in float math.
+fn is_positive_decimal(s: &str) -> bool {
+    let mut seen_dot = false;
+    let mut seen_digit = false;
+    let mut seen_nonzero = false;
+    for c in s.chars() {
+        match c {
+            '0'..='9' => {
+                seen_digit = true;
+                seen_nonzero |= c != '0';
+            }
+            '.' if !seen_dot => seen_dot = true,
+            _ => return false,
+        }
+    }
+    seen_digit && seen_nonzero
+}
+
 // ── env helpers ─────────────────────────────────────────────────────────────
 
 /// Non-empty env value, or `None`.
@@ -449,10 +469,41 @@ impl RestoreConfig {
 /// via `/capabilities`. Each is a gate the wallet must satisfy to create a NEW
 /// identity; returning wallets bypass them, and self-hosting bypasses all of
 /// them (run your own backend). PoW lives in [`PowConfig`]; this holds the rest.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct RegistrationConfig {
     /// Require a valid operator-minted invite code to register a new wallet.
     pub require_invite: bool,
+    /// Pay-to-register gate (settle an invoice on an external, non-custodial
+    /// processor before a new wallet is granted).
+    pub payment: PaymentConfig,
+}
+
+/// Pay-to-register gate. When `require_payment` is on, a NEW wallet must present
+/// a SETTLED payment invoice — minted at `/auth/payment-invoice` and paid to the
+/// operator's OWN wallet via an external processor (the `btcpay` adapter also
+/// serves this project's xmrcheckout/wowcheckout apps + the BTCPay Monero
+/// plugin). Returning wallets bypass it; self-hosting bypasses all gates. Does
+/// not derive `Debug` (holds the processor API key).
+#[derive(Clone)]
+pub struct PaymentConfig {
+    pub require_payment: bool,
+    /// Processor adapter kind (currently only `btcpay`).
+    pub provider: String,
+    /// Processor base URL (e.g. `https://pay.example.org`).
+    pub provider_url: String,
+    /// Processor store/merchant id.
+    pub store_id: String,
+    /// Processor API key (create/read invoices). Never logged.
+    pub api_key: String,
+    /// Registration price, as a decimal string (no float math end-to-end).
+    pub amount: String,
+    /// Price currency (e.g. `XMR`, or a fiat code the processor converts).
+    pub currency: String,
+    /// Operator's confirmations-to-finalize; the adapter maps it to the
+    /// processor's own finality control.
+    pub confirmations: u32,
+    /// Invoice lifetime (minutes) before it expires unpaid.
+    pub expires_minutes: u32,
 }
 
 impl Config {
@@ -628,6 +679,17 @@ impl Config {
             },
             registration: RegistrationConfig {
                 require_invite: env_bool("REGISTRATION_REQUIRE_INVITE", false),
+                payment: PaymentConfig {
+                    require_payment: env_bool("REGISTRATION_REQUIRE_PAYMENT", false),
+                    provider: env_or("PAYMENT_PROVIDER", "btcpay").to_lowercase(),
+                    provider_url: env_or("PAYMENT_PROVIDER_URL", ""),
+                    store_id: env_or("PAYMENT_STORE_ID", ""),
+                    api_key: env_or("PAYMENT_API_KEY", ""),
+                    amount: env_or("PAYMENT_AMOUNT", ""),
+                    currency: env_or("PAYMENT_CURRENCY", "").to_uppercase(),
+                    confirmations: env_parse("PAYMENT_CONFIRMATIONS", 1u32)?,
+                    expires_minutes: env_parse("PAYMENT_EXPIRES_MINUTES", 60u32)?,
+                },
             },
         };
 
@@ -809,6 +871,65 @@ impl Config {
             }
         }
 
+        // Pay-to-register gate: when on, the processor wiring must be complete
+        // and sane, or /capabilities would advertise payment_required while every
+        // registration then fails. Fail closed at startup instead.
+        if self.registration.payment.require_payment {
+            let p = &self.registration.payment;
+            if !matches!(p.provider.as_str(), "btcpay") {
+                return Err(cfg_err(format!(
+                    "PAYMENT_PROVIDER {:?} is not supported; supported: btcpay",
+                    p.provider
+                )));
+            }
+            if p.provider_url.is_empty() {
+                return Err(cfg_err(
+                    "PAYMENT_PROVIDER_URL is required when REGISTRATION_REQUIRE_PAYMENT is on",
+                ));
+            }
+            let url = url::Url::parse(&p.provider_url)
+                .map_err(|_| cfg_err("PAYMENT_PROVIDER_URL must be an absolute URL"))?;
+            if prod && url.scheme() != "https" {
+                return Err(cfg_err("PAYMENT_PROVIDER_URL must be https in production"));
+            }
+            if p.store_id.is_empty() {
+                return Err(cfg_err(
+                    "PAYMENT_STORE_ID is required when REGISTRATION_REQUIRE_PAYMENT is on",
+                ));
+            }
+            // Processor API keys are long; 8 is a floor against an empty/typo'd value.
+            require_secret("PAYMENT_API_KEY", &p.api_key, 8)?;
+            if !is_positive_decimal(&p.amount) {
+                return Err(cfg_err(
+                    "PAYMENT_AMOUNT must be a positive decimal (e.g. 0.01) when REGISTRATION_REQUIRE_PAYMENT is on",
+                ));
+            }
+            if p.currency.is_empty() {
+                return Err(cfg_err(
+                    "PAYMENT_CURRENCY is required when REGISTRATION_REQUIRE_PAYMENT is on",
+                ));
+            }
+            // 0-conf ("HighSpeed") marks an invoice settled on first mempool
+            // sighting, which a payer can then double-spend away AFTER registering
+            // — a settled-then-reversed free registration. An on-chain gate must
+            // require at least one confirmation. (A genuinely-final 0-conf rail
+            // like Lightning would be a different provider, not this one.)
+            if p.confirmations == 0 {
+                return Err(cfg_err(
+                    "PAYMENT_CONFIRMATIONS must be >= 1 (0-conf lets a settled payment be \
+                     double-spent after registration)",
+                ));
+            }
+            // Bound the unpaid-invoice window: 0 never expires, and > BTCPay's own
+            // max (10080 min = 7 days) both accumulates stale rows and would be
+            // rejected by the processor at create time.
+            if p.expires_minutes == 0 || p.expires_minutes > 10080 {
+                return Err(cfg_err(
+                    "PAYMENT_EXPIRES_MINUTES must be between 1 and 10080 (7 days)",
+                ));
+            }
+        }
+
         Ok(())
     }
 }
@@ -931,7 +1052,33 @@ mod tests {
             },
             registration: RegistrationConfig {
                 require_invite: false,
+                payment: PaymentConfig {
+                    require_payment: false,
+                    provider: "btcpay".into(),
+                    provider_url: String::new(),
+                    store_id: String::new(),
+                    api_key: String::new(),
+                    amount: String::new(),
+                    currency: String::new(),
+                    confirmations: 1,
+                    expires_minutes: 60,
+                },
             },
+        }
+    }
+
+    /// A fully-wired pay-to-register config (for the require_payment tests).
+    fn valid_payment() -> PaymentConfig {
+        PaymentConfig {
+            require_payment: true,
+            provider: "btcpay".into(),
+            provider_url: "https://pay.example.org".into(),
+            store_id: "store-1".into(),
+            api_key: "xmrcheckout_abcdefgh".into(),
+            amount: "0.01".into(),
+            currency: "XMR".into(),
+            confirmations: 1,
+            expires_minutes: 60,
         }
     }
 
@@ -1143,5 +1290,85 @@ mod tests {
                 .is_err()
                 || crate::core::restore_pow::verify("xmr", "addr", start, nonce.wrapping_add(1), 8)
         );
+    }
+
+    #[test]
+    fn positive_decimal_rules() {
+        assert!(is_positive_decimal("0.01"));
+        assert!(is_positive_decimal("1"));
+        assert!(is_positive_decimal("10.5"));
+        assert!(!is_positive_decimal("0")); // zero is not positive
+        assert!(!is_positive_decimal("0.00")); // still zero
+        assert!(!is_positive_decimal("")); // empty
+        assert!(!is_positive_decimal("-1")); // sign not allowed
+        assert!(!is_positive_decimal("1.2.3")); // two dots
+        assert!(!is_positive_decimal("abc")); // non-numeric
+        assert!(!is_positive_decimal("1e5")); // no scientific notation
+    }
+
+    #[test]
+    fn payment_off_skips_provider_validation() {
+        let mut c = valid();
+        c.registration.payment.require_payment = false;
+        c.registration.payment.provider = "nonsense".into(); // ignored when off
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn payment_required_with_full_config_passes() {
+        let mut c = valid();
+        c.registration.payment = valid_payment();
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn payment_required_missing_wiring_rejected() {
+        let mut c = valid();
+        c.registration.payment.require_payment = true; // url/store/key/amount empty
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn payment_rejects_unsupported_provider() {
+        let mut c = valid();
+        c.registration.payment = valid_payment();
+        c.registration.payment.provider = "stripe".into();
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn payment_rejects_nonpositive_amount() {
+        let mut c = valid();
+        c.registration.payment = valid_payment();
+        c.registration.payment.amount = "0".into();
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn payment_requires_https_provider_url_in_production() {
+        let mut c = valid();
+        c.environment = "production".into();
+        c.registration.payment = valid_payment();
+        c.registration.payment.provider_url = "http://pay.example.org".into();
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn payment_rejects_zero_confirmations() {
+        // 0-conf would let a settled payment be double-spent after registration.
+        let mut c = valid();
+        c.registration.payment = valid_payment();
+        c.registration.payment.confirmations = 0;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn payment_rejects_out_of_range_expiry() {
+        let mut c = valid();
+        c.registration.payment = valid_payment();
+        c.registration.payment.expires_minutes = 0;
+        assert!(c.validate().is_err(), "0 (never expires) rejected");
+        c.registration.payment.expires_minutes = 100_000; // > 10080
+        assert!(c.validate().is_err(), "beyond BTCPay's 7-day max rejected");
     }
 }

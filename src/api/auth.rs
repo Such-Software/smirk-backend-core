@@ -308,6 +308,13 @@ pub struct ExtensionRegisterRequest {
     /// ignored otherwise and for returning wallets.
     #[serde(default)]
     pub invite_code: Option<String>,
+    /// Settled payment-invoice id from `/auth/payment-invoice`. Required when the
+    /// instance enables the pay-to-register gate (see `/capabilities` →
+    /// `registration.payment_required`); ignored otherwise and for returning
+    /// wallets. Its settlement is verified against the processor and the invoice
+    /// atomically consumed (single-use) before the wallet is granted.
+    #[serde(default)]
+    pub payment_invoice_id: Option<String>,
 }
 
 /// Register a new extension wallet or authenticate an existing one.
@@ -408,7 +415,13 @@ pub async fn extension_register(
 
                 if rotation_proven {
                     // PoW still applies to the new pubkey, exactly like any other
-                    // new-pubkey registration.
+                    // new-pubkey registration. The invite and pay-to-register gates
+                    // are INTENTIONALLY skipped: this branch only re-points an
+                    // already-registered (already-gated) user's row to a new key —
+                    // a move, not a mint (`is_new=false`, no new identity) — and is
+                    // reachable only by proving control of that user's on-file key.
+                    // Do NOT add a create / get-or-create here without also running
+                    // enforce_invite + enforce_payment, or it becomes a gate bypass.
                     enforce_pow(&state, &pubkey_hash_lc, false, req.altcha_solution.as_ref())?;
 
                     info!(user_id = %target.id, "auto key-rotation: fingerprint match + rotation proof verified");
@@ -466,6 +479,13 @@ pub async fn extension_register(
         req.altcha_solution.as_ref(),
     )?;
     enforce_invite(&state, returning_by_pubkey, req.invite_code.as_deref()).await?;
+    enforce_payment(
+        &state,
+        returning_by_pubkey,
+        &pubkey_hash,
+        req.payment_invoice_id.as_deref(),
+    )
+    .await?;
 
     // If we reached here after an unproven fingerprint match, do NOT attach that
     // fingerprint to the new row — it belongs to another user, and the UNIQUE
@@ -627,10 +647,224 @@ async fn enforce_invite(
     Ok(())
 }
 
+/// Pay-to-register gate (PULL model). A genuinely new wallet must present the id
+/// of a payment invoice — minted at [`payment_invoice`] and paid to the
+/// operator's own wallet via the configured processor — that THIS backend reads
+/// back as `Settled`. Returning wallets bypass it, an instance with the gate off
+/// accepts everyone, and self-hosting bypasses it (leave the gate off).
+///
+/// The grant decision reads the processor's authenticated API as the source of
+/// truth — never a client claim, never an inbound webhook. The invoice must
+/// exist HERE bound to THIS `pubkey_hash`, be unspent, and read `Settled`; it is
+/// then atomically consumed (single-use), so one invoice grants at most one
+/// registration even under concurrent completion (the race loser is rejected).
+async fn enforce_payment(
+    state: &AppState,
+    returning: bool,
+    pubkey_hash: &str,
+    payment_invoice_id: Option<&str>,
+) -> Result<(), AppError> {
+    if returning || !state.config.registration.payment.require_payment {
+        return Ok(());
+    }
+    // Gate on but no provider built — config validation prevents this, so it is
+    // an internal misconfiguration (generic 500), not a client-facing error.
+    let provider = state.payment.as_ref().ok_or_else(|| {
+        warn!(
+            gate = "payment",
+            "payment gate on but no provider configured"
+        );
+        AppError::Internal("payment provider not configured".into())
+    })?;
+
+    let id = payment_invoice_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            warn!(
+                gate = "payment",
+                "payment required for new wallet but no invoice id"
+            );
+            AppError::ValidationError(
+                "Registration on this instance requires payment. Request an invoice from \
+                 /auth/payment-invoice, pay it, then retry."
+                    .into(),
+            )
+        })?;
+
+    // Binding precheck against our OWN record. A missing row and a row bound to a
+    // DIFFERENT identity collapse to ONE literal — never an oracle distinguishing
+    // "unknown" from "someone else's".
+    let row = match state.db.get_payment_invoice(id).await? {
+        Some(r) if r.pubkey_hash == pubkey_hash => r,
+        _ => {
+            warn!(
+                gate = "payment",
+                "unknown or mis-bound payment invoice presented"
+            );
+            return Err(AppError::ValidationError(
+                "Unknown or invalid payment invoice.".into(),
+            ));
+        }
+    };
+    if row.consumed_at.is_some() {
+        return Err(AppError::ValidationError(
+            "This payment invoice has already been used.".into(),
+        ));
+    }
+
+    // Source of truth: read the processor. Only `Settled` grants — and by the
+    // `InvoiceStatus::Settled` adapter contract that means paid IN FULL, so the
+    // amount is not re-checked here (it is server-set at mint and the row is the
+    // binding anchor; a foreign or underpaid invoice never reaches this point).
+    let invoice = provider.get_invoice(id).await?;
+    if invoice.status != crate::infra::payment::InvoiceStatus::Settled {
+        return Err(AppError::ValidationError(
+            "Payment not yet confirmed. Complete the payment and retry.".into(),
+        ));
+    }
+    // Defense-in-depth: the processor-side metadata bind, when present, must
+    // agree with the row (the row is the authority; this catches a swapped id).
+    if let Some(ref bound) = invoice.bind {
+        if bound.as_str() != pubkey_hash {
+            warn!(gate = "payment", "settled invoice metadata bind mismatch");
+            return Err(AppError::ValidationError(
+                "Unknown or invalid payment invoice.".into(),
+            ));
+        }
+    }
+
+    // Atomic single-use consume: exactly one registration per invoice, even under
+    // a concurrent race (the loser gets the already-used literal).
+    if !state.db.consume_payment_invoice(id, pubkey_hash).await? {
+        return Err(AppError::ValidationError(
+            "This payment invoice has already been used.".into(),
+        ));
+    }
+    info!(
+        gate = "payment",
+        "payment invoice settled + consumed (new user)"
+    );
+    Ok(())
+}
+
 /// SHA-256 hex of a public key string — the wallet's stable identity handle.
 fn hash_public_key(public_key: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(public_key.as_bytes()))
+}
+
+// ── POST /auth/payment-invoice ───────────────────────────────────────────────
+
+/// Request a registration-payment invoice for a wallet about to register.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct PaymentInvoiceRequest {
+    /// The wallet's BTC public key. Its hash is the identity the invoice binds
+    /// to; only a later `/auth/extension` proving control of this key can redeem
+    /// the settled invoice, so this endpoint needs no separate proof.
+    pub btc_public_key: String,
+}
+
+/// A created payment invoice: what to pay, and the id to present at registration.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct PaymentInvoiceResponse {
+    /// Opaque invoice id — send it back as `/auth/extension`'s `payment_invoice_id`.
+    pub invoice_id: String,
+    /// Where to pay (a hosted checkout URL, or an address).
+    pub pay_to: String,
+    /// Price to pay.
+    pub amount: String,
+    /// Price currency.
+    pub currency: String,
+}
+
+/// Create a registration-payment invoice on the operator's processor.
+///
+/// Public (pre-registration) and deliberately cheap: it only binds an invoice to
+/// the wallet's `pubkey_hash`, which is worthless to anyone who cannot later
+/// prove control of that BTC key at `/auth/extension`. The unauthenticated-surface
+/// rate limiter bounds invoice spam and unpaid invoices expire on the processor,
+/// so no signature proof is required here. Returns 400 when the pay gate is off
+/// or the wallet is already registered (it would bypass payment anyway).
+#[utoipa::path(
+    post,
+    path = "/auth/payment-invoice",
+    request_body = PaymentInvoiceRequest,
+    responses(
+        (status = 200, description = "Payment invoice created", body = PaymentInvoiceResponse),
+        (status = 400, description = "Pay gate off, already registered, or invalid key"),
+        (status = 503, description = "Payment processor unavailable")
+    ),
+    tag = "auth"
+)]
+#[instrument(skip(state, req))]
+pub async fn payment_invoice(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PaymentInvoiceRequest>,
+) -> Result<Json<PaymentInvoiceResponse>, AppError> {
+    let cfg = &state.config.registration.payment;
+    if !cfg.require_payment {
+        return Err(AppError::ValidationError(
+            "This instance does not require registration payment.".into(),
+        ));
+    }
+    let provider = state.payment.as_ref().ok_or_else(|| {
+        warn!(
+            gate = "payment",
+            "payment gate on but no provider configured"
+        );
+        AppError::Internal("payment provider not configured".into())
+    })?;
+
+    // Light hygiene only (the authoritative key-format check is at
+    // /auth/extension): non-empty, bounded, printable — so we don't mint invoices
+    // for obvious garbage. A bind to a junk hash is harmless (never redeemable).
+    let key = req.btc_public_key.trim();
+    if key.is_empty() || key.len() > 200 || !key.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(AppError::ValidationError("Invalid BTC public key.".into()));
+    }
+    let pubkey_hash = hash_public_key(key);
+
+    // A known wallet bypasses payment; minting for it would waste the payer's money.
+    if state
+        .db
+        .get_user_by_pubkey_hash(&pubkey_hash)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::ValidationError(
+            "This wallet is already registered; no payment is required.".into(),
+        ));
+    }
+
+    let invoice = provider
+        .create_invoice(&crate::infra::payment::InvoiceRequest {
+            amount: cfg.amount.clone(),
+            currency: cfg.currency.clone(),
+            confirmations: cfg.confirmations,
+            bind: pubkey_hash.clone(),
+            expires_minutes: cfg.expires_minutes,
+        })
+        .await?;
+
+    state
+        .db
+        .insert_payment_invoice(
+            &invoice.id,
+            &pubkey_hash,
+            provider.kind(),
+            &cfg.amount,
+            &cfg.currency,
+        )
+        .await?;
+
+    info!(gate = "payment", "created registration payment invoice");
+    Ok(Json(PaymentInvoiceResponse {
+        invoice_id: invoice.id,
+        pay_to: invoice.pay_to,
+        amount: cfg.amount.clone(),
+        currency: cfg.currency.clone(),
+    }))
 }
 
 // ── POST /auth/check-restore ─────────────────────────────────────────────────
@@ -1139,6 +1373,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/auth/extension", post(extension_register))
         .route("/auth/check-restore", post(check_restore))
         .route("/auth/pow-challenge", post(pow_challenge))
+        .route("/auth/payment-invoice", post(payment_invoice))
         .route("/auth/refresh", post(refresh_token))
         .route("/auth/logout", post(logout))
         .route("/auth/me", get(get_me))

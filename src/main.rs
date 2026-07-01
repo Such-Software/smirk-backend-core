@@ -36,6 +36,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let sessions = SessionManager::new(&config.auth.jwt_secret, config.auth.jwt_expiry_hours);
     let chains = ChainClients::from_config(&config)?;
+    // Payment processor for the pay-to-register gate (None unless it's enabled).
+    let payment = smirk_backend_core::infra::payment::from_config(&config)?;
 
     // First-run bootstrap latch (operator §3.2). Only meaningful with the admin
     // surface enabled. Fail closed on a tampered latch (restore-to-pre-bootstrap).
@@ -87,6 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         db,
         sessions,
         chains,
+        payment,
         web_challenges: Arc::default(),
         prices: prices_cache,
         admin_sessions,

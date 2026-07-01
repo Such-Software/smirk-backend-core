@@ -76,6 +76,13 @@ pub struct RegistrationCapability {
     pub invite_required: bool,
     /// A proof-of-work solution is required to register.
     pub pow_required: bool,
+    /// A settled payment invoice (from `/auth/payment-invoice`) is required to
+    /// register a new wallet.
+    pub payment_required: bool,
+    /// The registration price + currency — present only when `payment_required`,
+    /// so the wallet can show "registration costs X" before minting an invoice.
+    pub payment_amount: Option<String>,
+    pub payment_currency: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -161,6 +168,17 @@ pub fn effective_capabilities(config: &Config) -> CapabilitiesResponse {
         registration: RegistrationCapability {
             invite_required: config.registration.require_invite,
             pow_required: config.pow.enabled && config.pow.required,
+            payment_required: config.registration.payment.require_payment,
+            payment_amount: config
+                .registration
+                .payment
+                .require_payment
+                .then(|| config.registration.payment.amount.clone()),
+            payment_currency: config
+                .registration
+                .payment
+                .require_payment
+                .then(|| config.registration.payment.currency.clone()),
         },
     }
 }

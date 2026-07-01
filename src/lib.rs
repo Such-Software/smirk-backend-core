@@ -59,6 +59,9 @@ pub struct AppState {
     pub sessions: SessionManager,
     /// Per-chain data-source clients (present only for enabled chains).
     pub chains: ChainClients,
+    /// Payment processor backing the optional pay-to-register gate; `Some` only
+    /// when `REGISTRATION_REQUIRE_PAYMENT` is on.
+    pub payment: Option<Arc<dyn crate::infra::payment::PaymentProvider>>,
     /// In-memory website-auth challenges, keyed by nonce. Single-node store;
     /// a shared/stateless variant is the load-balanced-fleet path.
     pub web_challenges: Arc<RwLock<HashMap<String, WebChallenge>>>,

@@ -239,6 +239,44 @@
         ]
       }
     },
+    "/auth/payment-invoice": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Create a registration-payment invoice on the operator's processor.",
+        "description": "Public (pre-registration) and deliberately cheap: it only binds an invoice to\nthe wallet's `pubkey_hash`, which is worthless to anyone who cannot later\nprove control of that BTC key at `/auth/extension`. The unauthenticated-surface\nrate limiter bounds invoice spam and unpaid invoices expire on the processor,\nso no signature proof is required here. Returns 400 when the pay gate is off\nor the wallet is already registered (it would bypass payment anyway).",
+        "operationId": "payment_invoice",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PaymentInvoiceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Payment invoice created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentInvoiceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Pay gate off, already registered, or invalid key"
+          },
+          "503": {
+            "description": "Payment processor unavailable"
+          }
+        }
+      }
+    },
     "/auth/pow-challenge": {
       "post": {
         "tags": [
@@ -2118,6 +2156,13 @@
             },
             "description": "Public keys for each supported asset. A `btc` key is required (it is the\nidentity)."
           },
+          "payment_invoice_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Settled payment-invoice id from `/auth/payment-invoice`. Required when the\ninstance enables the pay-to-register gate (see `/capabilities` →\n`registration.payment_required`); ignored otherwise and for returning\nwallets. Its settlement is verified against the processor and the invoice\natomically consumed (single-use) before the wallet is granted."
+          },
           "rotation_signature": {
             "type": [
               "string",
@@ -2719,6 +2764,47 @@
           }
         }
       },
+      "PaymentInvoiceRequest": {
+        "type": "object",
+        "description": "Request a registration-payment invoice for a wallet about to register.",
+        "required": [
+          "btc_public_key"
+        ],
+        "properties": {
+          "btc_public_key": {
+            "type": "string",
+            "description": "The wallet's BTC public key. Its hash is the identity the invoice binds\nto; only a later `/auth/extension` proving control of this key can redeem\nthe settled invoice, so this endpoint needs no separate proof."
+          }
+        }
+      },
+      "PaymentInvoiceResponse": {
+        "type": "object",
+        "description": "A created payment invoice: what to pay, and the id to present at registration.",
+        "required": [
+          "invoice_id",
+          "pay_to",
+          "amount",
+          "currency"
+        ],
+        "properties": {
+          "amount": {
+            "type": "string",
+            "description": "Price to pay."
+          },
+          "currency": {
+            "type": "string",
+            "description": "Price currency."
+          },
+          "invoice_id": {
+            "type": "string",
+            "description": "Opaque invoice id — send it back as `/auth/extension`'s `payment_invoice_id`."
+          },
+          "pay_to": {
+            "type": "string",
+            "description": "Where to pay (a hosted checkout URL, or an address)."
+          }
+        }
+      },
       "PendingRelaysResponse": {
         "type": "object",
         "required": [
@@ -2947,12 +3033,30 @@
         "description": "Registration gates this instance enforces for a NEW wallet (returning wallets\nand self-hosting bypass them). The wallet uses these to shape onboarding —\nprompt for an invite code, solve PoW, etc.",
         "required": [
           "invite_required",
-          "pow_required"
+          "pow_required",
+          "payment_required"
         ],
         "properties": {
           "invite_required": {
             "type": "boolean",
             "description": "A valid operator-minted invite code is required to register."
+          },
+          "payment_amount": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The registration price + currency — present only when `payment_required`,\nso the wallet can show \"registration costs X\" before minting an invoice."
+          },
+          "payment_currency": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "payment_required": {
+            "type": "boolean",
+            "description": "A settled payment invoice (from `/auth/payment-invoice`) is required to\nregister a new wallet."
           },
           "pow_required": {
             "type": "boolean",
