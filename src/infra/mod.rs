@@ -8,3 +8,4 @@ pub mod grin;
 pub mod lws;
 pub mod payment;
 pub mod prices;
+pub mod relay;

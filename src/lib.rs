@@ -62,6 +62,9 @@ pub struct AppState {
     /// Payment processor backing the optional pay-to-register gate; `Some` only
     /// when `REGISTRATION_REQUIRE_PAYMENT` is on.
     pub payment: Option<Arc<dyn crate::infra::payment::PaymentProvider>>,
+    /// Optional first-party Nostr relay (messaging plane); `Some` only when
+    /// `RELAY_ENABLED` is on. Advertised via `/capabilities` + NIP-05 hints.
+    pub relay: Option<Arc<dyn crate::infra::relay::RelayProvider>>,
     /// In-memory website-auth challenges, keyed by nonce. Single-node store;
     /// a shared/stateless variant is the load-balanced-fleet path.
     pub web_challenges: Arc<RwLock<HashMap<String, WebChallenge>>>,

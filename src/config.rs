@@ -150,6 +150,7 @@ pub struct Config {
     pub retention: RetentionConfig,
     pub restore: RestoreConfig,
     pub registration: RegistrationConfig,
+    pub messaging: MessagingConfig,
 }
 
 #[derive(Clone)]
@@ -506,6 +507,44 @@ pub struct PaymentConfig {
     pub expires_minutes: u32,
 }
 
+/// Messaging plane (identity + encrypted delivery). Today it holds the optional
+/// first-party Nostr relay; the seam leaves room for other messaging backends.
+#[derive(Clone)]
+pub struct MessagingConfig {
+    pub relay: RelayConfig,
+}
+
+/// Optional first-party Nostr relay. When `enabled`, the operator runs a relay
+/// (the packaged `nostr-rs-relay`, or an external one) that the backend
+/// ADVERTISES (NIP-05 / kind-10050) and, for a non-`open` policy, write-restricts
+/// via a gRPC event-admission service. It is the user's INBOX relay, never the
+/// only relay — clients also use the public interop relays. Self-hosting concern;
+/// off by default. Does not derive `Debug` (URL/policy are fine, but kept
+/// consistent with the other adapter configs).
+#[derive(Clone)]
+pub struct RelayConfig {
+    /// Master switch for the relay integration.
+    pub enabled: bool,
+    /// `bundled` (operator runs the packaged nostr-rs-relay) or `external`
+    /// (point at any relay the operator already runs). The seam handles both.
+    pub mode: String,
+    /// Public `wss://` URL clients connect to + we advertise.
+    pub advertised_url: String,
+    /// Admission policy the gRPC service enforces: `inbox-outbox` (default),
+    /// `author-allowlist`, or `open`.
+    pub write_policy: String,
+    /// NIP-13 proof-of-work bits required on cross-ecosystem (non-registered-
+    /// author) inbound events; `0` disables the PoW gate.
+    pub inbound_pow_bits: u8,
+    /// Loopback address the gRPC event-admission service binds (nostr-rs-relay
+    /// calls it per event). Only used when `write_policy != open`.
+    pub admission_bind: String,
+    /// Reject events larger than this many bytes (the relay enforces it too).
+    pub max_event_bytes: usize,
+    /// Event retention (days) — advisory for operator housekeeping/advertising.
+    pub retention_days: u32,
+}
+
 impl Config {
     /// Load configuration from the environment and validate it (fail-closed).
     pub fn from_env() -> Result<Self, AppError> {
@@ -689,6 +728,18 @@ impl Config {
                     currency: env_or("PAYMENT_CURRENCY", "").to_uppercase(),
                     confirmations: env_parse("PAYMENT_CONFIRMATIONS", 1u32)?,
                     expires_minutes: env_parse("PAYMENT_EXPIRES_MINUTES", 60u32)?,
+                },
+            },
+            messaging: MessagingConfig {
+                relay: RelayConfig {
+                    enabled: env_bool("RELAY_ENABLED", false),
+                    mode: env_or("RELAY_MODE", "bundled").to_lowercase(),
+                    advertised_url: env_or("RELAY_URL", ""),
+                    write_policy: env_or("RELAY_WRITE_POLICY", "inbox-outbox").to_lowercase(),
+                    inbound_pow_bits: env_parse("RELAY_INBOUND_POW_BITS", 0u8)?,
+                    admission_bind: env_or("RELAY_ADMISSION_BIND", "127.0.0.1:8090"),
+                    max_event_bytes: env_parse("RELAY_MAX_EVENT_BYTES", 65536usize)?,
+                    retention_days: env_parse("RELAY_RETENTION_DAYS", 30u32)?,
                 },
             },
         };
@@ -930,6 +981,49 @@ impl Config {
             }
         }
 
+        // ── Nostr relay (optional messaging plane) ──────────────────────────
+        if self.messaging.relay.enabled {
+            let r = &self.messaging.relay;
+            if !matches!(r.mode.as_str(), "bundled" | "external") {
+                return Err(cfg_err(format!(
+                    "RELAY_MODE {:?} is not supported; use bundled|external",
+                    r.mode
+                )));
+            }
+            if r.advertised_url.trim().is_empty() {
+                return Err(cfg_err(
+                    "RELAY_URL is required when RELAY_ENABLED (the ws(s):// URL clients connect to)",
+                ));
+            }
+            if !(r.advertised_url.starts_with("wss://") || r.advertised_url.starts_with("ws://")) {
+                return Err(cfg_err("RELAY_URL must be a ws:// or wss:// URL"));
+            }
+            if prod && r.advertised_url.starts_with("ws://") {
+                return Err(cfg_err("RELAY_URL must be wss:// in production"));
+            }
+            if !matches!(
+                r.write_policy.as_str(),
+                "inbox-outbox" | "author-allowlist" | "open"
+            ) {
+                return Err(cfg_err(format!(
+                    "RELAY_WRITE_POLICY {:?} is not supported; use inbox-outbox|author-allowlist|open",
+                    r.write_policy
+                )));
+            }
+            // Bound PoW difficulty: 0 = off; a value this high is unsolvable in
+            // practice and would silently reject every inbound event.
+            if r.inbound_pow_bits > 40 {
+                return Err(cfg_err("RELAY_INBOUND_POW_BITS must be <= 40 (0 disables)"));
+            }
+            // A non-`open` policy is enforced by the gRPC admission service, which
+            // needs a bind address the relay can reach.
+            if r.write_policy != "open" && r.admission_bind.trim().is_empty() {
+                return Err(cfg_err(
+                    "RELAY_ADMISSION_BIND is required for a non-open RELAY_WRITE_POLICY",
+                ));
+            }
+        }
+
         Ok(())
     }
 }
@@ -1062,6 +1156,18 @@ mod tests {
                     currency: String::new(),
                     confirmations: 1,
                     expires_minutes: 60,
+                },
+            },
+            messaging: MessagingConfig {
+                relay: RelayConfig {
+                    enabled: false,
+                    mode: "bundled".into(),
+                    advertised_url: String::new(),
+                    write_policy: "inbox-outbox".into(),
+                    inbound_pow_bits: 0,
+                    admission_bind: "127.0.0.1:8090".into(),
+                    max_event_bytes: 65536,
+                    retention_days: 30,
                 },
             },
         }
@@ -1341,6 +1447,75 @@ mod tests {
         let mut c = valid();
         c.registration.payment = valid_payment();
         c.registration.payment.amount = "0".into();
+        assert!(c.validate().is_err());
+    }
+
+    fn valid_relay() -> RelayConfig {
+        RelayConfig {
+            enabled: true,
+            mode: "bundled".into(),
+            advertised_url: "wss://relay.example.org".into(),
+            write_policy: "inbox-outbox".into(),
+            inbound_pow_bits: 20,
+            admission_bind: "127.0.0.1:8090".into(),
+            max_event_bytes: 65536,
+            retention_days: 30,
+        }
+    }
+
+    #[test]
+    fn relay_off_skips_validation() {
+        let mut c = valid();
+        c.messaging.relay.enabled = false;
+        c.messaging.relay.write_policy = "nonsense".into(); // ignored when off
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn relay_enabled_full_config_passes() {
+        let mut c = valid();
+        c.messaging.relay = valid_relay();
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn relay_enabled_requires_url() {
+        let mut c = valid();
+        c.messaging.relay = valid_relay();
+        c.messaging.relay.advertised_url = String::new();
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn relay_rejects_non_ws_url() {
+        let mut c = valid();
+        c.messaging.relay = valid_relay();
+        c.messaging.relay.advertised_url = "https://relay.example.org".into();
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn relay_rejects_unknown_policy() {
+        let mut c = valid();
+        c.messaging.relay = valid_relay();
+        c.messaging.relay.write_policy = "whitelist-only".into();
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn relay_rejects_excessive_pow() {
+        let mut c = valid();
+        c.messaging.relay = valid_relay();
+        c.messaging.relay.inbound_pow_bits = 64;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn relay_rejects_ws_in_production() {
+        let mut c = valid();
+        c.environment = "production".into();
+        c.messaging.relay = valid_relay();
+        c.messaging.relay.advertised_url = "ws://relay.example.org".into();
         assert!(c.validate().is_err());
     }
 
