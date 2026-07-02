@@ -11,9 +11,25 @@
 //!   (outbox); anyone may deliver a NIP-17 gift-wrap (kind 1059) ADDRESSED to a
 //!   registered user (inbox), optionally behind a NIP-13 proof-of-work gate to
 //!   blunt cross-ecosystem spam. Everything else is rejected.
+//! * `premium-post` — registered users publish `WALLET_KINDS` (DMs, tips, swap
+//!   coordination) free; a general (non-wallet) event requires the author to hold
+//!   an active premium subscription. Inbox delivery works as in `inbox-outbox`.
 
 /// NIP-59 gift-wrap event kind (the sealed envelope carrying a NIP-17 DM).
 pub const GIFT_WRAP_KIND: u64 = 1059;
+
+/// Event kinds that make the Smirk wallet + its peer features work — free to
+/// publish for any registered user under the `premium-post` policy (premium
+/// unlocks *general* Nostr posting on top). Extensible as tip / atomic-swap
+/// coordination kinds define their on-Nostr shape.
+pub const WALLET_KINDS: &[u64] = &[
+    GIFT_WRAP_KIND, // 1059 — NIP-17 encrypted DMs (incl. tip + swap payloads)
+    10050,          // NIP-17 DM relay list (where a user receives DMs)
+];
+
+fn is_wallet_kind(kind: u64) -> bool {
+    WALLET_KINDS.contains(&kind)
+}
 
 /// Operator write policy. Parsed from the validated `RELAY_WRITE_POLICY` string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +37,9 @@ pub enum WritePolicy {
     Open,
     AuthorAllowlist,
     InboxOutbox,
+    /// Wallet events free for registered users; general Nostr posting requires an
+    /// active premium subscription.
+    PremiumPost,
 }
 
 impl WritePolicy {
@@ -31,6 +50,7 @@ impl WritePolicy {
             "open" => Some(Self::Open),
             "author-allowlist" => Some(Self::AuthorAllowlist),
             "inbox-outbox" => Some(Self::InboxOutbox),
+            "premium-post" => Some(Self::PremiumPost),
             _ => None,
         }
     }
@@ -79,17 +99,35 @@ pub fn leading_zero_bits(id_hex: &str) -> u32 {
     count
 }
 
+/// Inbox delivery of a NIP-17 gift-wrap (kind 1059) to a registered user,
+/// optionally behind a NIP-13 PoW gate. Shared by `inbox-outbox` + `premium-post`.
+fn giftwrap_inbox(meta: &EventMeta, inbound_pow_bits: u8, recipient_registered: bool) -> Admit {
+    if meta.kind == GIFT_WRAP_KIND && recipient_registered {
+        // Optionally require proof-of-work to blunt cross-ecosystem spam.
+        if inbound_pow_bits > 0 && leading_zero_bits(meta.id_hex) < u32::from(inbound_pow_bits) {
+            Admit::Deny("insufficient proof-of-work for cross-ecosystem delivery")
+        } else {
+            Admit::Permit
+        }
+    } else {
+        Admit::Deny("external authors may only deliver gift-wrapped DMs to registered users")
+    }
+}
+
 /// Decide whether to admit an event.
 ///
 /// `author_registered` = the author pubkey is a registered Smirk npub.
 /// `recipient_registered` = at least one `p` tag is a registered Smirk npub.
-/// (The caller resolves both against the DB before calling.)
+/// `author_premium` = the author holds an active premium subscription (only the
+/// `premium-post` policy consults it). The caller resolves all three against the
+/// DB before calling.
 pub fn decide(
     meta: &EventMeta,
     policy: WritePolicy,
     inbound_pow_bits: u8,
     author_registered: bool,
     recipient_registered: bool,
+    author_premium: bool,
 ) -> Admit {
     match policy {
         WritePolicy::Open => Admit::Permit,
@@ -104,20 +142,25 @@ pub fn decide(
             if author_registered {
                 // Outbox: a registered user publishing their own events.
                 Admit::Permit
-            } else if meta.kind == GIFT_WRAP_KIND && recipient_registered {
-                // Inbox: an external author delivering a gift-wrapped DM to one of
-                // our users. Optionally require proof-of-work to blunt spam.
-                if inbound_pow_bits > 0
-                    && leading_zero_bits(meta.id_hex) < u32::from(inbound_pow_bits)
-                {
-                    Admit::Deny("insufficient proof-of-work for cross-ecosystem delivery")
-                } else {
-                    Admit::Permit
-                }
             } else {
+                giftwrap_inbox(meta, inbound_pow_bits, recipient_registered)
+            }
+        }
+        WritePolicy::PremiumPost => {
+            if author_premium {
+                // Premium member: the general-purpose relay — any kind.
+                Admit::Permit
+            } else if author_registered && is_wallet_kind(meta.kind) {
+                // Free for registered users: the events that make the wallet work.
+                Admit::Permit
+            } else if author_registered {
+                // Registered, but a general (non-wallet) event without premium.
                 Admit::Deny(
-                    "external authors may only deliver gift-wrapped DMs to registered users",
+                    "premium membership required to post general Nostr events to this relay",
                 )
+            } else {
+                // External author: only gift-wrapped DM inbox delivery, as inbox-outbox.
+                giftwrap_inbox(meta, inbound_pow_bits, recipient_registered)
             }
         }
     }
@@ -151,44 +194,48 @@ mod tests {
             WritePolicy::parse("inbox-outbox"),
             Some(WritePolicy::InboxOutbox)
         );
+        assert_eq!(
+            WritePolicy::parse("premium-post"),
+            Some(WritePolicy::PremiumPost)
+        );
         assert_eq!(WritePolicy::parse("nope"), None);
     }
 
     #[test]
     fn open_permits_everything() {
         let m = meta(A, 1, FF);
-        assert!(decide(&m, WritePolicy::Open, 0, false, false).is_permit());
+        assert!(decide(&m, WritePolicy::Open, 0, false, false, false).is_permit());
     }
 
     #[test]
     fn author_allowlist_gates_on_author() {
         let m = meta(A, 1, FF);
-        assert!(decide(&m, WritePolicy::AuthorAllowlist, 0, true, false).is_permit());
-        assert!(!decide(&m, WritePolicy::AuthorAllowlist, 0, false, false).is_permit());
+        assert!(decide(&m, WritePolicy::AuthorAllowlist, 0, true, false, false).is_permit());
+        assert!(!decide(&m, WritePolicy::AuthorAllowlist, 0, false, false, false).is_permit());
     }
 
     #[test]
     fn inbox_outbox_permits_registered_author_outbox() {
         let m = meta(A, 1, FF); // any kind, registered author
-        assert!(decide(&m, WritePolicy::InboxOutbox, 0, true, false).is_permit());
+        assert!(decide(&m, WritePolicy::InboxOutbox, 0, true, false, false).is_permit());
     }
 
     #[test]
     fn inbox_outbox_permits_giftwrap_to_registered_recipient() {
         let m = meta(A, GIFT_WRAP_KIND, FF);
-        assert!(decide(&m, WritePolicy::InboxOutbox, 0, false, true).is_permit());
+        assert!(decide(&m, WritePolicy::InboxOutbox, 0, false, true, false).is_permit());
     }
 
     #[test]
     fn inbox_outbox_rejects_external_non_giftwrap() {
         let m = meta(A, 1, FF); // external author, non-gift-wrap
-        assert!(!decide(&m, WritePolicy::InboxOutbox, 0, false, true).is_permit());
+        assert!(!decide(&m, WritePolicy::InboxOutbox, 0, false, true, false).is_permit());
     }
 
     #[test]
     fn inbox_outbox_rejects_giftwrap_to_unregistered_recipient() {
         let m = meta(A, GIFT_WRAP_KIND, FF);
-        assert!(!decide(&m, WritePolicy::InboxOutbox, 0, false, false).is_permit());
+        assert!(!decide(&m, WritePolicy::InboxOutbox, 0, false, false, false).is_permit());
     }
 
     #[test]
@@ -205,8 +252,8 @@ mod tests {
         let id = format!("0000{}", "ff".repeat(30));
         let m = meta(A, GIFT_WRAP_KIND, &id);
         // require 8 bits → permit; require 20 → deny.
-        assert!(decide(&m, WritePolicy::InboxOutbox, 8, false, true).is_permit());
-        assert!(!decide(&m, WritePolicy::InboxOutbox, 20, false, true).is_permit());
+        assert!(decide(&m, WritePolicy::InboxOutbox, 8, false, true, false).is_permit());
+        assert!(!decide(&m, WritePolicy::InboxOutbox, 20, false, true, false).is_permit());
     }
 
     #[test]
@@ -214,6 +261,46 @@ mod tests {
         // A registered author's low-PoW event is still fine (PoW is inbound-only).
         let id = "ff".repeat(32); // 0 leading zero bits
         let m = meta(A, 1, &id);
-        assert!(decide(&m, WritePolicy::InboxOutbox, 20, true, false).is_permit());
+        assert!(decide(&m, WritePolicy::InboxOutbox, 20, true, false, false).is_permit());
+    }
+
+    // ── premium-post ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn premium_post_premium_author_posts_anything() {
+        let m = meta(A, 1, FF); // a general kind-1 note
+                                // premium → permit even a non-wallet kind.
+        assert!(decide(&m, WritePolicy::PremiumPost, 0, true, false, true).is_permit());
+    }
+
+    #[test]
+    fn premium_post_registered_gets_wallet_kinds_free() {
+        for k in WALLET_KINDS {
+            let m = meta(A, *k, FF);
+            // registered, NOT premium → wallet kinds still permitted.
+            assert!(
+                decide(&m, WritePolicy::PremiumPost, 0, true, false, false).is_permit(),
+                "wallet kind {k} should be free for registered users"
+            );
+        }
+    }
+
+    #[test]
+    fn premium_post_registered_needs_premium_for_general() {
+        let m = meta(A, 1, FF); // general kind-1, registered but not premium
+        assert!(!decide(&m, WritePolicy::PremiumPost, 0, true, false, false).is_permit());
+    }
+
+    #[test]
+    fn premium_post_allows_external_giftwrap_inbox() {
+        let m = meta(A, GIFT_WRAP_KIND, FF);
+        // external (unregistered) author delivering a DM to a registered user.
+        assert!(decide(&m, WritePolicy::PremiumPost, 0, false, true, false).is_permit());
+    }
+
+    #[test]
+    fn premium_post_rejects_external_general() {
+        let m = meta(A, 1, FF); // external author, non-gift-wrap
+        assert!(!decide(&m, WritePolicy::PremiumPost, 0, false, true, false).is_permit());
     }
 }

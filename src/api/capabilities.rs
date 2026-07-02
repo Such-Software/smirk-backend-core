@@ -47,6 +47,8 @@ pub struct FeatureCapabilities {
     pub nostr_identity: bool,
     /// First-party Nostr relay (encrypted DM inbox). See `messaging` for details.
     pub nostr_relay: bool,
+    /// Paid premium tier for general Nostr posting to the relay. See `premium`.
+    pub premium_relay: bool,
     /// Tipping (parked).
     pub tips: bool,
 }
@@ -64,6 +66,26 @@ pub struct MessagingCapability {
     pub inbound_pow_bits: u8,
     /// NIPs the relay speaks (e.g. `[1, 17, 44, 59]`).
     pub supported_nips: Vec<u16>,
+}
+
+/// A single premium plan (discount tier): `days` of relay-posting access for
+/// `amount` in [`PremiumCapability::currency`].
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct PremiumPlanInfo {
+    pub id: String,
+    pub days: i32,
+    pub amount: String,
+}
+
+/// Premium tier details (present only when `features.premium_relay`). The wallet
+/// renders the plan tiers (discount visible) and gates general-Nostr posting to
+/// the Smirk relay on the user's premium status; wallet events stay free.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct PremiumCapability {
+    pub currency: String,
+    pub plans: Vec<PremiumPlanInfo>,
+    /// The relay premium posting targets (mirrors `messaging.relay_url`).
+    pub relay_url: String,
 }
 
 /// This instance's wallet-restore (import) policy. The wallet uses it to adapt
@@ -117,6 +139,9 @@ pub struct CapabilitiesResponse {
     /// First-party Nostr relay details; present only when `features.nostr_relay`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub messaging: Option<MessagingCapability>,
+    /// Premium tier details; present only when `features.premium_relay`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub premium: Option<PremiumCapability>,
 }
 
 /// Whether an enabled chain can actually be served (its infra secret/URL is
@@ -176,6 +201,7 @@ pub fn effective_capabilities(config: &Config) -> CapabilitiesResponse {
             // Relay advertised only when enabled AND a URL is configured (config
             // presence downgrade — never advertise a relay clients can't reach).
             nostr_relay: relay_advertised(config),
+            premium_relay: premium_advertised(config),
             tips: config.features.tips,
         },
         restore: RestoreCapability {
@@ -212,6 +238,20 @@ pub fn effective_capabilities(config: &Config) -> CapabilitiesResponse {
                 supported_nips: crate::infra::relay::SUPPORTED_NIPS.to_vec(),
             }
         }),
+        premium: premium_advertised(config).then(|| PremiumCapability {
+            currency: config.premium.currency.clone(),
+            plans: config
+                .premium
+                .plans
+                .iter()
+                .map(|p| PremiumPlanInfo {
+                    id: p.id.clone(),
+                    days: p.days,
+                    amount: p.amount.clone(),
+                })
+                .collect(),
+            relay_url: config.messaging.relay.advertised_url.clone(),
+        }),
     }
 }
 
@@ -220,6 +260,12 @@ pub fn effective_capabilities(config: &Config) -> CapabilitiesResponse {
 /// client can't connect to.
 fn relay_advertised(config: &Config) -> bool {
     config.messaging.relay.enabled && !config.messaging.relay.advertised_url.trim().is_empty()
+}
+
+/// Whether the premium tier is enabled AND the relay it gates is advertised
+/// (config validation already couples premium to relay + the premium-post policy).
+fn premium_advertised(config: &Config) -> bool {
+    config.premium.enabled && relay_advertised(config)
 }
 
 /// Describe this instance's enabled chains and features.

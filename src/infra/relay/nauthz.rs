@@ -15,7 +15,7 @@ use tonic::{Request, Response, Status};
 
 use crate::infra::db::Database;
 
-use super::{decide, Admit, EventMeta, RelayProvider};
+use super::{decide, Admit, EventMeta, RelayProvider, WritePolicy};
 
 /// Generated from `proto/nauthz.proto` (see `build.rs`).
 pub mod proto {
@@ -80,6 +80,14 @@ impl Authorization for AdmissionService {
             .await
             .unwrap_or(false);
 
+        // Premium membership — only the `premium-post` policy consults it, so skip
+        // the (cheap, indexed) lookup entirely under the other policies.
+        let author_premium = if self.relay.write_policy() == WritePolicy::PremiumPost {
+            self.db.is_premium_npub(&author_hex).await.unwrap_or(false)
+        } else {
+            false
+        };
+
         // Recipient registration (only when the author isn't already registered):
         // collect up to MAX_P_TAGS distinct `p` tags and resolve them in ONE
         // batched query — bounds the work so a crafted event stuffed with `p` tags
@@ -114,6 +122,7 @@ impl Authorization for AdmissionService {
             self.relay.inbound_pow_bits(),
             author_registered,
             recipient_registered,
+            author_premium,
         ) {
             Admit::Permit => permit(),
             Admit::Deny(msg) => deny(msg),

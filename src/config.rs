@@ -151,6 +151,7 @@ pub struct Config {
     pub restore: RestoreConfig,
     pub registration: RegistrationConfig,
     pub messaging: MessagingConfig,
+    pub premium: PremiumConfig,
 }
 
 #[derive(Clone)]
@@ -507,6 +508,44 @@ pub struct PaymentConfig {
     pub expires_minutes: u32,
 }
 
+/// A single premium purchase option (a discount tier): `days` of relay-posting
+/// access for `amount` in the shared [`PremiumConfig::currency`].
+#[derive(Debug, Clone)]
+pub struct PremiumPlan {
+    pub id: String,
+    pub days: i32,
+    pub amount: String,
+}
+
+/// Premium subscription tier: recurring, tiered access to the operator's Nostr
+/// relay for general posting (the `premium-post` write policy). Reuses the
+/// registration PaymentProvider for invoicing. Off by default.
+#[derive(Clone)]
+pub struct PremiumConfig {
+    pub enabled: bool,
+    pub currency: String,
+    pub plans: Vec<PremiumPlan>,
+}
+
+/// Parse `PREMIUM_PLANS` = comma-separated `id:days:amount` entries (e.g.
+/// `quarter:90:5,year:365:15`). Malformed entries are dropped; `validate()`
+/// rejects an empty result when premium is enabled.
+fn parse_premium_plans(s: &str) -> Vec<PremiumPlan> {
+    s.split(',')
+        .filter_map(|entry| {
+            let mut parts = entry.trim().splitn(3, ':');
+            let id = parts.next()?.trim();
+            let days = parts.next()?.trim().parse::<i32>().ok()?;
+            let amount = parts.next()?.trim();
+            (!id.is_empty() && !amount.is_empty() && days > 0).then(|| PremiumPlan {
+                id: id.to_string(),
+                days,
+                amount: amount.to_string(),
+            })
+        })
+        .collect()
+}
+
 /// Messaging plane (identity + encrypted delivery). Today it holds the optional
 /// first-party Nostr relay; the seam leaves room for other messaging backends.
 #[derive(Clone)]
@@ -747,6 +786,11 @@ impl Config {
                     max_event_bytes: env_parse("RELAY_MAX_EVENT_BYTES", 65536usize)?,
                     retention_days: env_parse("RELAY_RETENTION_DAYS", 30u32)?,
                 },
+            },
+            premium: PremiumConfig {
+                enabled: env_bool("PREMIUM_ENABLED", false),
+                currency: env_or("PREMIUM_CURRENCY", "").to_uppercase(),
+                plans: parse_premium_plans(&env_or("PREMIUM_PLANS", "")),
             },
         };
 
@@ -1009,10 +1053,10 @@ impl Config {
             }
             if !matches!(
                 r.write_policy.as_str(),
-                "inbox-outbox" | "author-allowlist" | "open"
+                "inbox-outbox" | "author-allowlist" | "open" | "premium-post"
             ) {
                 return Err(cfg_err(format!(
-                    "RELAY_WRITE_POLICY {:?} is not supported; use inbox-outbox|author-allowlist|open",
+                    "RELAY_WRITE_POLICY {:?} is not supported; use inbox-outbox|author-allowlist|open|premium-post",
                     r.write_policy
                 )));
             }
@@ -1046,6 +1090,89 @@ impl Config {
                         "RELAY_ADMISSION_BIND must be loopback (it is a registration oracle); \
                          set RELAY_ADMISSION_ALLOW_PUBLIC=true to override + firewall it",
                     ));
+                }
+            }
+        }
+
+        // Premium tier reuses the registration PaymentProvider for invoicing, so
+        // the processor credentials must be present, the relay must be on with the
+        // premium-post policy, and there must be at least one priced plan.
+        if self.premium.enabled {
+            let p = &self.registration.payment;
+            if !matches!(p.provider.as_str(), "btcpay") {
+                return Err(cfg_err(format!(
+                    "PREMIUM_ENABLED needs a supported PAYMENT_PROVIDER (btcpay); got {:?}",
+                    p.provider
+                )));
+            }
+            if p.provider_url.trim().is_empty() {
+                return Err(cfg_err("PREMIUM_ENABLED needs PAYMENT_PROVIDER_URL"));
+            }
+            if prod && !p.provider_url.starts_with("https://") {
+                return Err(cfg_err(
+                    "PAYMENT_PROVIDER_URL must be https:// in production",
+                ));
+            }
+            if p.store_id.trim().is_empty() {
+                return Err(cfg_err("PREMIUM_ENABLED needs PAYMENT_STORE_ID"));
+            }
+            if p.api_key.len() < 8 {
+                return Err(cfg_err(
+                    "PREMIUM_ENABLED needs PAYMENT_API_KEY (>= 8 bytes)",
+                ));
+            }
+            // The same processor-safety floors the pay-to-register path enforces —
+            // premium's common case is require_payment=false, which skips that
+            // block. A 0-conf invoice settles on first mempool sighting and can
+            // then be double-spent AWAY after the premium grant; a 0/oversize
+            // expiry is a malformed invoice window.
+            if p.confirmations == 0 {
+                return Err(cfg_err(
+                    "PAYMENT_CONFIRMATIONS must be >= 1 when PREMIUM_ENABLED is on \
+                     (0-conf lets a settled premium payment be double-spent after activation)",
+                ));
+            }
+            if p.expires_minutes == 0 || p.expires_minutes > 10080 {
+                return Err(cfg_err(
+                    "PAYMENT_EXPIRES_MINUTES must be between 1 and 10080 (7 days)",
+                ));
+            }
+            if self.premium.currency.trim().is_empty() {
+                return Err(cfg_err("PREMIUM_ENABLED needs PREMIUM_CURRENCY"));
+            }
+            if !self.messaging.relay.enabled {
+                return Err(cfg_err("PREMIUM_ENABLED needs RELAY_ENABLED=true"));
+            }
+            if self.messaging.relay.write_policy != "premium-post" {
+                return Err(cfg_err(
+                    "PREMIUM_ENABLED needs RELAY_WRITE_POLICY=premium-post",
+                ));
+            }
+            if self.premium.plans.is_empty() {
+                return Err(cfg_err(
+                    "PREMIUM_ENABLED needs at least one PREMIUM_PLANS entry (id:days:amount)",
+                ));
+            }
+            let mut seen = std::collections::HashSet::new();
+            for plan in &self.premium.plans {
+                if !seen.insert(plan.id.as_str()) {
+                    return Err(cfg_err(format!("duplicate PREMIUM_PLANS id {:?}", plan.id)));
+                }
+                // Same positive-decimal rule as PAYMENT_AMOUNT (rejects NaN/inf/1e5).
+                if !is_positive_decimal(&plan.amount) {
+                    return Err(cfg_err(format!(
+                        "PREMIUM_PLANS[{}] amount {:?} must be a positive decimal",
+                        plan.id, plan.amount
+                    )));
+                }
+                // Cap the period: a plan longer than ~10 years is a config error,
+                // and a huge value would overflow the premium_until timestamp math
+                // (make_interval) at activation — after the invoice is consumed.
+                if plan.days > 3660 {
+                    return Err(cfg_err(format!(
+                        "PREMIUM_PLANS[{}] days {} exceeds the 3660-day (10-year) maximum",
+                        plan.id, plan.days
+                    )));
                 }
             }
         }
@@ -1196,6 +1323,11 @@ mod tests {
                     max_event_bytes: 65536,
                     retention_days: 30,
                 },
+            },
+            premium: PremiumConfig {
+                enabled: false,
+                currency: String::new(),
+                plans: Vec::new(),
             },
         }
     }
@@ -1504,6 +1636,130 @@ mod tests {
         let mut c = valid();
         c.messaging.relay = valid_relay();
         assert!(c.validate().is_ok());
+    }
+
+    /// Fully-wired premium tier (free registration + paid premium) on top of the
+    /// base valid() config: relay on with the premium-post policy, processor
+    /// creds present, and priced plans.
+    fn wire_premium(c: &mut Config) {
+        c.messaging.relay = valid_relay();
+        c.messaging.relay.write_policy = "premium-post".into();
+        c.registration.payment = valid_payment();
+        c.registration.payment.require_payment = false; // free to register; pay for premium
+        c.premium.enabled = true;
+        c.premium.currency = "XMR".into();
+        c.premium.plans = vec![
+            PremiumPlan {
+                id: "quarter".into(),
+                days: 90,
+                amount: "5".into(),
+            },
+            PremiumPlan {
+                id: "year".into(),
+                days: 365,
+                amount: "15".into(),
+            },
+        ];
+    }
+
+    #[test]
+    fn premium_off_skips_validation() {
+        let c = valid(); // premium disabled by default
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn premium_plans_parse_drops_malformed() {
+        // valid: quarter, year; dropped: "bad" (no fields), "x::5" (empty id),
+        // "y:0:5" (non-positive days), "z:9:" (empty amount).
+        let p = parse_premium_plans("quarter:90:5, year:365:15 ,bad, x::5, y:0:5, z:9:");
+        assert_eq!(p.len(), 2);
+        assert_eq!(
+            (p[0].id.as_str(), p[0].days, p[0].amount.as_str()),
+            ("quarter", 90, "5")
+        );
+        assert_eq!(p[1].id, "year");
+        assert!(parse_premium_plans("").is_empty());
+    }
+
+    #[test]
+    fn premium_enabled_full_config_passes() {
+        let mut c = valid();
+        wire_premium(&mut c);
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn premium_requires_relay_and_premium_post_policy() {
+        let mut c = valid();
+        wire_premium(&mut c);
+        c.messaging.relay.enabled = false; // premium needs the relay on
+        assert!(c.validate().is_err());
+
+        let mut c = valid();
+        wire_premium(&mut c);
+        c.messaging.relay.write_policy = "inbox-outbox".into(); // wrong policy
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn premium_requires_plans_and_processor_creds() {
+        let mut c = valid();
+        wire_premium(&mut c);
+        c.premium.plans.clear(); // no plans
+        assert!(c.validate().is_err());
+
+        let mut c = valid();
+        wire_premium(&mut c);
+        c.registration.payment.provider_url = String::new(); // missing processor creds
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn premium_rejects_duplicate_plan_ids() {
+        let mut c = valid();
+        wire_premium(&mut c);
+        c.premium.plans = vec![
+            PremiumPlan {
+                id: "dup".into(),
+                days: 90,
+                amount: "5".into(),
+            },
+            PremiumPlan {
+                id: "dup".into(),
+                days: 365,
+                amount: "15".into(),
+            },
+        ];
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn premium_rejects_zero_confirmations() {
+        // 0-conf lets a settled premium payment be double-spent after activation;
+        // the guard must hold on the premium path (require_payment is off here).
+        let mut c = valid();
+        wire_premium(&mut c);
+        c.registration.payment.confirmations = 0;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn premium_rejects_absurd_plan_days() {
+        let mut c = valid();
+        wire_premium(&mut c);
+        c.premium.plans[0].days = 900_000_000; // would overflow premium_until math
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn premium_rejects_non_decimal_plan_amount() {
+        for bad in ["NaN", "inf", "1e5", "-1", "abc"] {
+            let mut c = valid();
+            wire_premium(&mut c);
+            c.premium.plans[0].amount = bad.to_string();
+            assert!(c.validate().is_err(), "amount {bad:?} must be rejected");
+        }
     }
 
     #[test]

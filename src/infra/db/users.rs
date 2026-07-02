@@ -145,6 +145,61 @@ impl Database {
         Ok(exists)
     }
 
+    /// Whether an x-only pubkey (canonical lowercase hex) is a registered npub
+    /// with a CURRENTLY-ACTIVE premium subscription — the membership check behind
+    /// the `premium-post` relay policy. Not peppered (npub is public); safe per
+    /// inbound relay event.
+    #[instrument(skip(self, nostr_pubkey))]
+    pub async fn is_premium_npub(&self, nostr_pubkey: &str) -> Result<bool, AppError> {
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM users \
+             WHERE nostr_pubkey = $1 AND premium_until IS NOT NULL AND premium_until > NOW())",
+        )
+        .bind(nostr_pubkey)
+        .fetch_one(self.pool())
+        .await?;
+        Ok(exists)
+    }
+
+    /// Extend a user's premium window by `days`, stacking from the later of `NOW()`
+    /// and the current expiry (so an early renewal never shortens the window).
+    /// Returns the new expiry.
+    #[instrument(skip(self))]
+    pub async fn extend_premium(
+        &self,
+        user_id: Uuid,
+        days: i32,
+    ) -> Result<chrono::DateTime<chrono::Utc>, AppError> {
+        let until = sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
+            "UPDATE users SET \
+               premium_until = GREATEST(COALESCE(premium_until, NOW()), NOW()) \
+                             + make_interval(days => $2), \
+               updated_at = NOW() \
+             WHERE id = $1 RETURNING premium_until",
+        )
+        .bind(user_id)
+        .bind(days)
+        .fetch_one(self.pool())
+        .await?;
+        Ok(until)
+    }
+
+    /// A user's current premium expiry (`None` if never premium / lapsed to NULL).
+    #[instrument(skip(self))]
+    pub async fn get_premium_until(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, AppError> {
+        let until = sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+            "SELECT premium_until FROM users WHERE id = $1",
+        )
+        .bind(user_id)
+        .fetch_optional(self.pool())
+        .await?
+        .flatten();
+        Ok(until)
+    }
+
     /// Replace a user's `pubkey_hash` (derivation-scheme rotation, keyed by the
     /// unchanged `seed_fingerprint`). Peppered.
     #[instrument(skip(self, new_pubkey_hash))]

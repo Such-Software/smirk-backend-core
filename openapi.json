@@ -513,6 +513,119 @@
         ]
       }
     },
+    "/premium/activate": {
+      "post": {
+        "tags": [
+          "premium"
+        ],
+        "summary": "Verify a settled premium invoice and extend the caller's premium window.",
+        "operationId": "activate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActivateReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Premium extended",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResp"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown, unpaid, or already-used invoice"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/premium/invoice": {
+      "post": {
+        "tags": [
+          "premium"
+        ],
+        "summary": "Mint a premium invoice for a chosen plan, bound to the caller.",
+        "operationId": "invoice",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InvoiceReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Invoice minted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvoiceResp"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Premium off or unknown plan"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/premium/status": {
+      "get": {
+        "tags": [
+          "premium"
+        ],
+        "summary": "The caller's current premium status.",
+        "operationId": "status",
+        "responses": {
+          "200": {
+            "description": "Premium status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResp"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/prices": {
       "get": {
         "tags": [
@@ -1770,6 +1883,17 @@
   },
   "components": {
     "schemas": {
+      "ActivateReq": {
+        "type": "object",
+        "required": [
+          "invoice_id"
+        ],
+        "properties": {
+          "invoice_id": {
+            "type": "string"
+          }
+        }
+      },
       "AddressRequest": {
         "type": "object",
         "description": "An address query for a UTXO asset.",
@@ -1984,6 +2108,17 @@
               {
                 "$ref": "#/components/schemas/MessagingCapability",
                 "description": "First-party Nostr relay details; present only when `features.nostr_relay`."
+              }
+            ]
+          },
+          "premium": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PremiumCapability",
+                "description": "Premium tier details; present only when `features.premium_relay`."
               }
             ]
           },
@@ -2265,6 +2400,7 @@
           "prices",
           "nostr_identity",
           "nostr_relay",
+          "premium_relay",
           "tips"
         ],
         "properties": {
@@ -2279,6 +2415,10 @@
           "nostr_relay": {
             "type": "boolean",
             "description": "First-party Nostr relay (encrypted DM inbox). See `messaging` for details."
+          },
+          "premium_relay": {
+            "type": "boolean",
+            "description": "Paid premium tier for general Nostr posting to the relay. See `premium`."
           },
           "prices": {
             "type": "boolean",
@@ -2603,6 +2743,46 @@
           }
         }
       },
+      "InvoiceReq": {
+        "type": "object",
+        "required": [
+          "plan"
+        ],
+        "properties": {
+          "plan": {
+            "type": "string",
+            "description": "Plan id (see `/capabilities` → `premium.plans`), e.g. `quarter`."
+          }
+        }
+      },
+      "InvoiceResp": {
+        "type": "object",
+        "required": [
+          "invoice_id",
+          "pay_to",
+          "plan",
+          "amount",
+          "currency"
+        ],
+        "properties": {
+          "amount": {
+            "type": "string"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "invoice_id": {
+            "type": "string"
+          },
+          "pay_to": {
+            "type": "string",
+            "description": "Where to pay (a checkout URL or address)."
+          },
+          "plan": {
+            "type": "string"
+          }
+        }
+      },
       "LogoutRequest": {
         "type": "object",
         "required": [
@@ -2909,6 +3089,51 @@
             "items": {
               "$ref": "#/components/schemas/RelayEntry"
             }
+          }
+        }
+      },
+      "PremiumCapability": {
+        "type": "object",
+        "description": "Premium tier details (present only when `features.premium_relay`). The wallet\nrenders the plan tiers (discount visible) and gates general-Nostr posting to\nthe Smirk relay on the user's premium status; wallet events stay free.",
+        "required": [
+          "currency",
+          "plans",
+          "relay_url"
+        ],
+        "properties": {
+          "currency": {
+            "type": "string"
+          },
+          "plans": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PremiumPlanInfo"
+            }
+          },
+          "relay_url": {
+            "type": "string",
+            "description": "The relay premium posting targets (mirrors `messaging.relay_url`)."
+          }
+        }
+      },
+      "PremiumPlanInfo": {
+        "type": "object",
+        "description": "A single premium plan (discount tier): `days` of relay-posting access for\n`amount` in [`PremiumCapability::currency`].",
+        "required": [
+          "id",
+          "days",
+          "amount"
+        ],
+        "properties": {
+          "amount": {
+            "type": "string"
+          },
+          "days": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "id": {
+            "type": "string"
           }
         }
       },
@@ -3344,6 +3569,25 @@
           },
           "tx_pub_key": {
             "type": "string"
+          }
+        }
+      },
+      "StatusResp": {
+        "type": "object",
+        "required": [
+          "active"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean",
+            "description": "Whether the caller currently holds active premium."
+          },
+          "premium_until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Premium expiry (RFC3339), or null if never premium / lapsed."
           }
         }
       },
@@ -3799,6 +4043,10 @@
     {
       "name": "grin_relay",
       "description": "Grin slatepack relay: async non-custodial mailbox for interactive Grin transfers (feature-flagged)."
+    },
+    {
+      "name": "premium",
+      "description": "Premium subscription: mint a tier invoice, activate on settlement, read status (feature-flagged)."
     }
   ]
 }

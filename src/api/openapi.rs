@@ -62,6 +62,9 @@ use utoipa::OpenApi;
         crate::api::wallet::grin_relay::cancel,
         crate::api::wallet::heights::heights,
         crate::api::nip05::well_known_nostr,
+        crate::api::premium::invoice,
+        crate::api::premium::activate,
+        crate::api::premium::status,
     ),
     components(schemas(
         crate::api::health::HealthResponse,
@@ -72,6 +75,8 @@ use utoipa::OpenApi;
         crate::api::capabilities::RestoreCapability,
         crate::api::capabilities::RegistrationCapability,
         crate::api::capabilities::MessagingCapability,
+        crate::api::capabilities::PremiumCapability,
+        crate::api::capabilities::PremiumPlanInfo,
         crate::api::prices::PricesResponse,
         crate::api::auth::AuthResponse,
         crate::api::auth::UserInfo,
@@ -143,6 +148,10 @@ use utoipa::OpenApi;
         crate::api::wallet::grin_relay::PendingRelaysResponse,
         crate::api::wallet::heights::HeightsResponse,
         crate::api::nip05::WellKnownResponse,
+        crate::api::premium::InvoiceReq,
+        crate::api::premium::InvoiceResp,
+        crate::api::premium::ActivateReq,
+        crate::api::premium::StatusResp,
     )),
     tags(
         (name = "system", description = "Service health and metadata."),
@@ -151,7 +160,8 @@ use utoipa::OpenApi;
         (name = "btc_ltc", description = "Bitcoin/Litecoin chain access via Electrum (balance, UTXOs, history, tip, fee, broadcast)."),
         (name = "xmr_wow", description = "Monero/Wownero chain access via LWS (register, balance, history, unspent/random outs, submit, height, confirmations)."),
         (name = "grin", description = "Grin view-only chain access (rewind_hash scan, tip height, broadcast)."),
-        (name = "grin_relay", description = "Grin slatepack relay: async non-custodial mailbox for interactive Grin transfers (feature-flagged).")
+        (name = "grin_relay", description = "Grin slatepack relay: async non-custodial mailbox for interactive Grin transfers (feature-flagged)."),
+        (name = "premium", description = "Premium subscription: mint a tier invoice, activate on settlement, read status (feature-flagged).")
     )
 )]
 pub struct ApiDoc;

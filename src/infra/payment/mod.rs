@@ -112,7 +112,9 @@ pub trait PaymentProvider: Send + Sync {
 /// validation already rejects it when the gate is on, so this is defensive).
 pub fn from_config(cfg: &Config) -> Result<Option<Arc<dyn PaymentProvider>>, AppError> {
     let p = &cfg.registration.payment;
-    if !p.require_payment {
+    // Build the provider when the pay-to-register gate OR the premium tier needs
+    // it (premium reuses the same processor for its recurring invoices).
+    if !p.require_payment && !cfg.premium.enabled {
         return Ok(None);
     }
     let provider: Arc<dyn PaymentProvider> = match p.provider.as_str() {
