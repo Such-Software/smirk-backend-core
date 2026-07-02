@@ -108,16 +108,31 @@ pub async fn well_known_nostr(
         let name = raw.to_lowercase();
         if let Some(user) = state.db.get_user_by_username(&name).await? {
             if let Some(pubkey) = user.nostr_pubkey {
-                relays.insert(
-                    pubkey.clone(),
-                    DEFAULT_RELAYS.iter().map(|r| r.to_string()).collect(),
-                );
+                relays.insert(pubkey.clone(), relay_hints(&state.config));
                 names.insert(name, pubkey);
             }
         }
     }
 
     Ok(Json(WellKnownResponse { names, relays }))
+}
+
+/// Relay hints advertised for a resolved pubkey: this instance's own relay (the
+/// user's DM inbox) FIRST when enabled, then the public interop relays so
+/// cross-wallet (e.g. Goblin) delivery still works before any per-user list.
+/// Per-user lists (NIP-65 kind 10002 / NIP-17 inbox relays) remain future work.
+fn relay_hints(config: &crate::config::Config) -> Vec<String> {
+    let mut hints = Vec::new();
+    let r = &config.messaging.relay;
+    if r.enabled && !r.advertised_url.trim().is_empty() {
+        hints.push(r.advertised_url.clone());
+    }
+    for d in DEFAULT_RELAYS {
+        if !hints.iter().any(|h| h == d) {
+            hints.push((*d).to_string());
+        }
+    }
+    hints
 }
 
 // ── router ─────────────────────────────────────────────────────────────────────

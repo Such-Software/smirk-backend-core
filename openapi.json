@@ -1976,6 +1976,17 @@
           "features": {
             "$ref": "#/components/schemas/FeatureCapabilities"
           },
+          "messaging": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MessagingCapability",
+                "description": "First-party Nostr relay details; present only when `features.nostr_relay`."
+              }
+            ]
+          },
           "registration": {
             "$ref": "#/components/schemas/RegistrationCapability",
             "description": "Registration gates for a new wallet on this instance."
@@ -2253,6 +2264,7 @@
           "grin_relay",
           "prices",
           "nostr_identity",
+          "nostr_relay",
           "tips"
         ],
         "properties": {
@@ -2263,6 +2275,10 @@
           "nostr_identity": {
             "type": "boolean",
             "description": "Nostr-native identity (NIP-98 login/link, NIP-05 directory)."
+          },
+          "nostr_relay": {
+            "type": "boolean",
+            "description": "First-party Nostr relay (encrypted DM inbox). See `messaging` for details."
           },
           "prices": {
             "type": "boolean",
@@ -2738,6 +2754,41 @@
             "items": {
               "$ref": "#/components/schemas/TxDto"
             }
+          }
+        }
+      },
+      "MessagingCapability": {
+        "type": "object",
+        "description": "First-party Nostr relay details (present only when `features.nostr_relay`).\nThe wallet connects here as its DM inbox (alongside the public interop\nrelays) and adapts its UI to the policy.",
+        "required": [
+          "relay_url",
+          "write_policy",
+          "inbound_pow_bits",
+          "supported_nips"
+        ],
+        "properties": {
+          "inbound_pow_bits": {
+            "type": "integer",
+            "format": "int32",
+            "description": "NIP-13 PoW bits required on cross-ecosystem inbound (0 = off).",
+            "minimum": 0
+          },
+          "relay_url": {
+            "type": "string",
+            "description": "The ws(s):// relay URL clients connect to."
+          },
+          "supported_nips": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "NIPs the relay speaks (e.g. `[1, 17, 44, 59]`)."
+          },
+          "write_policy": {
+            "type": "string",
+            "description": "Write policy: `inbox-outbox` | `author-allowlist` | `open`."
           }
         }
       },

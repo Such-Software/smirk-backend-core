@@ -45,8 +45,25 @@ pub struct FeatureCapabilities {
     pub prices: bool,
     /// Nostr-native identity (NIP-98 login/link, NIP-05 directory).
     pub nostr_identity: bool,
+    /// First-party Nostr relay (encrypted DM inbox). See `messaging` for details.
+    pub nostr_relay: bool,
     /// Tipping (parked).
     pub tips: bool,
+}
+
+/// First-party Nostr relay details (present only when `features.nostr_relay`).
+/// The wallet connects here as its DM inbox (alongside the public interop
+/// relays) and adapts its UI to the policy.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct MessagingCapability {
+    /// The ws(s):// relay URL clients connect to.
+    pub relay_url: String,
+    /// Write policy: `inbox-outbox` | `author-allowlist` | `open`.
+    pub write_policy: String,
+    /// NIP-13 PoW bits required on cross-ecosystem inbound (0 = off).
+    pub inbound_pow_bits: u8,
+    /// NIPs the relay speaks (e.g. `[1, 17, 44, 59]`).
+    pub supported_nips: Vec<u16>,
 }
 
 /// This instance's wallet-restore (import) policy. The wallet uses it to adapt
@@ -97,6 +114,9 @@ pub struct CapabilitiesResponse {
     pub restore: RestoreCapability,
     /// Registration gates for a new wallet on this instance.
     pub registration: RegistrationCapability,
+    /// First-party Nostr relay details; present only when `features.nostr_relay`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub messaging: Option<MessagingCapability>,
 }
 
 /// Whether an enabled chain can actually be served (its infra secret/URL is
@@ -153,6 +173,9 @@ pub fn effective_capabilities(config: &Config) -> CapabilitiesResponse {
             // Nostr identity needs the canonical PUBLIC_API_URL.
             nostr_identity: config.features.nostr_identity
                 && config.identity.public_api_url.is_some(),
+            // Relay advertised only when enabled AND a URL is configured (config
+            // presence downgrade — never advertise a relay clients can't reach).
+            nostr_relay: relay_advertised(config),
             tips: config.features.tips,
         },
         restore: RestoreCapability {
@@ -180,7 +203,23 @@ pub fn effective_capabilities(config: &Config) -> CapabilitiesResponse {
                 .require_payment
                 .then(|| config.registration.payment.currency.clone()),
         },
+        messaging: relay_advertised(config).then(|| {
+            let r = &config.messaging.relay;
+            MessagingCapability {
+                relay_url: r.advertised_url.clone(),
+                write_policy: r.write_policy.clone(),
+                inbound_pow_bits: r.inbound_pow_bits,
+                supported_nips: crate::infra::relay::SUPPORTED_NIPS.to_vec(),
+            }
+        }),
     }
+}
+
+/// Whether the relay is enabled AND reachable (a URL is configured). Mirrors the
+/// chain/nostr-identity secret-presence downgrade: never advertise a relay the
+/// client can't connect to.
+fn relay_advertised(config: &Config) -> bool {
+    config.messaging.relay.enabled && !config.messaging.relay.advertised_url.trim().is_empty()
 }
 
 /// Describe this instance's enabled chains and features.
