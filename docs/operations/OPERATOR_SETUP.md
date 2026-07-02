@@ -110,6 +110,13 @@ self-hosting bypass them. All default off or open.
 - **Restore policy** — `WALLET_RESTORE_POLICY=create-only|bounded|unlimited` (default `create-only`), with optional proof-of-work pricing on restore depth.
 - **Pay-to-register** — `REGISTRATION_REQUIRE_PAYMENT=true` against a BTCPay-compatible processor (`PAYMENT_*`); a new wallet settles an invoice, paid to your own wallet, before it can register.
 
+## 7. Nostr relay (optional)
+
+Run a first-party, locked-down Nostr relay as your users' encrypted-DM inbox
+(`RELAY_ENABLED=true` + `RELAY_*`). Off by default; write-restricted via a gRPC
+admission service, advertised through `/capabilities` + NIP-05. Full guide:
+[RELAY.md](RELAY.md).
+
 ## Testing an instance
 
 The `@smirk/smoke-tests` harness drives the API client end-to-end. Point it at an

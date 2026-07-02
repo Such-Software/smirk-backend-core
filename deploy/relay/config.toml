@@ -1,0 +1,50 @@
+# nostr-rs-relay config for a locked-down Smirk messaging relay.
+#
+# REFERENCE TEMPLATE — the exact key set is version-specific; check it against the
+# nostr-rs-relay release you pin. The load-bearing piece is [grpc]
+# event_admission_server: it points at the Smirk backend's gRPC admission service,
+# which enforces RELAY_WRITE_POLICY + the NIP-13 PoW gate per event. Do NOT also
+# set a static [authorization] pubkey_whitelist — that would double-gate and
+# break the inbox (gift-wraps from non-registered senders).
+
+[info]
+relay_url = "wss://relay.example.org/"
+name = "Smirk relay"
+description = "Locked-down Nostr relay for a self-hosted Smirk backend (DM inbox)."
+# pubkey = "<operator x-only hex pubkey>"   # optional contact identity
+
+[database]
+# SQLite is simplest for a single-node self-host; switch to postgres to share
+# infra. Keep it on a persisted volume (see docker-compose.yml).
+engine = "sqlite"
+data_directory = "/usr/src/app/db"
+
+[grpc]
+# Smirk backend event-admission (nauthz). With host networking the backend's
+# loopback RELAY_ADMISSION_BIND is reachable here. This is what enforces the
+# write policy — keep it set.
+event_admission_server = "http://127.0.0.1:8090"
+
+[network]
+address = "0.0.0.0"
+port = 8080
+
+# Conservative, self-host-friendly resource ceilings (the anti-abuse floor even
+# for the `open` policy). Tune to your box.
+[limits]
+messages_per_sec = 10
+subscriptions_per_min = 60
+max_event_bytes = 65536
+max_ws_message_bytes = 131072
+max_ws_frame_bytes = 131072
+broadcast_buffer = 16384
+event_persist_buffer = 4096
+limit_scrapers = true
+
+[options]
+# Reject events dated too far in the future (clock-skew abuse).
+reject_future_seconds = 1800
+
+[authorization]
+# Write restriction is enforced by the gRPC admission service above, NOT a static
+# whitelist. Leave pubkey_whitelist unset.

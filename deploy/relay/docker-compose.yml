@@ -1,0 +1,35 @@
+# Bundled, locked-down Nostr relay for a self-hosted Smirk backend.
+#
+# This runs nostr-rs-relay as the messaging-plane relay. WRITE ADMISSION is
+# delegated to the Smirk backend's gRPC service (RELAY_ADMISSION_BIND, default
+# 127.0.0.1:8090) via nostr-rs-relay's [grpc] event_admission_server hook — so
+# the RELAY_WRITE_POLICY (inbox-outbox / author-allowlist / open) + NIP-13 PoW
+# are enforced by the backend, not baked into this file.
+#
+# Networking: the relay uses the HOST network so it can reach the backend's
+# loopback admission socket (127.0.0.1:8090) while keeping that socket private.
+# host networking is Linux-only; on other hosts, bind RELAY_ADMISSION_BIND to a
+# docker-reachable address behind your firewall and drop `network_mode: host`,
+# adding `extra_hosts: ["host.docker.internal:host-gateway"]` + a port mapping.
+#
+# This is a REFERENCE template — verify the config keys against the nostr-rs-relay
+# version you pin (https://github.com/scsibug/nostr-rs-relay).
+services:
+  relay:
+    image: ghcr.io/scsibug/nostr-rs-relay:latest # pin a digest in production
+    restart: unless-stopped
+    network_mode: host # reach the backend admission socket on 127.0.0.1
+    user: "1000:1000"
+    volumes:
+      - ./config.toml:/usr/src/app/config.toml:ro
+      - relay-data:/usr/src/app/db
+    environment:
+      RUST_LOG: info
+    # Modest, self-host-friendly resource ceilings.
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+volumes:
+  relay-data:
