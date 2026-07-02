@@ -63,6 +63,12 @@ impl Authorization for AdmissionService {
             return Ok(Response::new(deny("missing event")));
         };
 
+        // Defence-in-depth size cap (the relay enforces its own limit too): reject
+        // an oversized event before any DB work.
+        if event.content.len() > self.relay.max_event_bytes() {
+            return Ok(Response::new(deny("event exceeds max size")));
+        }
+
         // Canonical lowercase hex (matches how we store/verify npubs).
         let author_hex = hex::encode(&event.pubkey);
         let id_hex = hex::encode(&event.id);
@@ -74,20 +80,28 @@ impl Authorization for AdmissionService {
             .await
             .unwrap_or(false);
 
-        // Recipient registration: any `p` tag that is a registered npub. Only
-        // resolved when needed (skipped once the author is already registered).
-        let mut recipient_registered = false;
-        if !author_registered {
+        // Recipient registration (only when the author isn't already registered):
+        // collect up to MAX_P_TAGS distinct `p` tags and resolve them in ONE
+        // batched query — bounds the work so a crafted event stuffed with `p` tags
+        // can't trigger an unbounded per-tag query storm.
+        let recipient_registered = if author_registered {
+            false
+        } else {
+            const MAX_P_TAGS: usize = 20;
+            let mut p_tags: Vec<String> = Vec::new();
             for tag in &event.tags {
+                if p_tags.len() >= MAX_P_TAGS {
+                    break;
+                }
                 if tag.values.len() >= 2 && tag.values[0] == "p" {
                     let p = tag.values[1].to_lowercase();
-                    if self.db.is_registered_npub(&p).await.unwrap_or(false) {
-                        recipient_registered = true;
-                        break;
+                    if !p_tags.contains(&p) {
+                        p_tags.push(p);
                     }
                 }
             }
-        }
+            self.db.any_registered_npub(&p_tags).await.unwrap_or(false)
+        };
 
         let meta = EventMeta {
             author_pubkey: &author_hex,

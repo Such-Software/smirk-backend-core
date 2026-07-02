@@ -537,8 +537,13 @@ pub struct RelayConfig {
     /// author) inbound events; `0` disables the PoW gate.
     pub inbound_pow_bits: u8,
     /// Loopback address the gRPC event-admission service binds (nostr-rs-relay
-    /// calls it per event). Only used when `write_policy != open`.
+    /// calls it per event). Only used when `write_policy != open`. It answers
+    /// "is this npub registered?", so it MUST stay loopback (a registration
+    /// oracle) unless explicitly opted out.
     pub admission_bind: String,
+    /// Allow a NON-loopback `admission_bind` (e.g. a relay in a container without
+    /// host networking). Off by default; the operator must firewall it.
+    pub admission_allow_public: bool,
     /// Reject events larger than this many bytes (the relay enforces it too).
     pub max_event_bytes: usize,
     /// Event retention (days) — advisory for operator housekeeping/advertising.
@@ -738,6 +743,7 @@ impl Config {
                     write_policy: env_or("RELAY_WRITE_POLICY", "inbox-outbox").to_lowercase(),
                     inbound_pow_bits: env_parse("RELAY_INBOUND_POW_BITS", 0u8)?,
                     admission_bind: env_or("RELAY_ADMISSION_BIND", "127.0.0.1:8090"),
+                    admission_allow_public: env_bool("RELAY_ADMISSION_ALLOW_PUBLIC", false),
                     max_event_bytes: env_parse("RELAY_MAX_EVENT_BYTES", 65536usize)?,
                     retention_days: env_parse("RELAY_RETENTION_DAYS", 30u32)?,
                 },
@@ -1022,6 +1028,26 @@ impl Config {
                     "RELAY_ADMISSION_BIND is required for a non-open RELAY_WRITE_POLICY",
                 ));
             }
+            // The admission service answers "is this npub registered?" per event —
+            // a registration oracle. Require a loopback bind unless the operator
+            // explicitly opts out (and firewalls it).
+            if r.write_policy != "open" && !r.admission_allow_public {
+                use std::net::ToSocketAddrs;
+                let loopback = r
+                    .admission_bind
+                    .to_socket_addrs()
+                    .map(|addrs| {
+                        let addrs: Vec<_> = addrs.collect();
+                        !addrs.is_empty() && addrs.iter().all(|a| a.ip().is_loopback())
+                    })
+                    .unwrap_or(false);
+                if !loopback {
+                    return Err(cfg_err(
+                        "RELAY_ADMISSION_BIND must be loopback (it is a registration oracle); \
+                         set RELAY_ADMISSION_ALLOW_PUBLIC=true to override + firewall it",
+                    ));
+                }
+            }
         }
 
         Ok(())
@@ -1166,6 +1192,7 @@ mod tests {
                     write_policy: "inbox-outbox".into(),
                     inbound_pow_bits: 0,
                     admission_bind: "127.0.0.1:8090".into(),
+                    admission_allow_public: false,
                     max_event_bytes: 65536,
                     retention_days: 30,
                 },
@@ -1458,6 +1485,7 @@ mod tests {
             write_policy: "inbox-outbox".into(),
             inbound_pow_bits: 20,
             admission_bind: "127.0.0.1:8090".into(),
+            admission_allow_public: false,
             max_event_bytes: 65536,
             retention_days: 30,
         }
@@ -1517,6 +1545,20 @@ mod tests {
         c.messaging.relay = valid_relay();
         c.messaging.relay.advertised_url = "ws://relay.example.org".into();
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn relay_rejects_non_loopback_admission_bind() {
+        let mut c = valid();
+        c.messaging.relay = valid_relay();
+        c.messaging.relay.admission_bind = "0.0.0.0:8090".into();
+        assert!(
+            c.validate().is_err(),
+            "non-loopback admission bind rejected"
+        );
+        // …unless explicitly opted out.
+        c.messaging.relay.admission_allow_public = true;
+        assert!(c.validate().is_ok());
     }
 
     #[test]

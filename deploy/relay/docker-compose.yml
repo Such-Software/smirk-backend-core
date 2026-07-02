@@ -16,7 +16,9 @@
 # version you pin (https://github.com/scsibug/nostr-rs-relay).
 services:
   relay:
-    image: ghcr.io/scsibug/nostr-rs-relay:latest # pin a digest in production
+    # SECURITY: pin a digest in production — the relay's admission fail-open
+    # behavior can change across versions (see docs/operations/RELAY.md).
+    image: scsibug/nostr-rs-relay:latest
     restart: unless-stopped
     network_mode: host # reach the backend admission socket on 127.0.0.1
     user: "1000:1000"

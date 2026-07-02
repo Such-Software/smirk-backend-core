@@ -78,6 +78,28 @@ author allowlist. Only the `inbox-outbox` external-inbound branch is gated.
   event → rejected (`inbox-outbox`); an under-PoW cross-ecosystem event →
   rejected (when `RELAY_INBOUND_POW_BITS > 0`).
 
+## Security notes (read before exposing a public relay)
+
+- **The relay fails OPEN if admission is unreachable.** `nostr-rs-relay` treats an
+  unreachable gRPC admission server as PERMIT. So a down/crashed admission service
+  = an unrestricted relay. Two defences: (1) the backend **exits** if its admission
+  service stops (so your supervisor restarts a clean pair — don't run them
+  independently), and (2) run the relay + backend as one supervised unit so the
+  relay isn't serving while admission is down. Pin the relay image to a **digest**,
+  not `:latest` — the fail-open semantics can change across versions.
+- **The admission socket is a registration oracle** (it answers "is this npub
+  registered?"). It MUST stay loopback; `validate()` refuses a non-loopback
+  `RELAY_ADMISSION_BIND` unless you set `RELAY_ADMISSION_ALLOW_PUBLIC=true` and
+  firewall it yourself.
+- **Default `RELAY_INBOUND_POW_BITS=0` has no spam friction.** Under `inbox-outbox`
+  a `p` tag is public, so anyone can address gift-wraps to a registered user's
+  inbox. A PUBLIC operator should raise the PoW bits (e.g. 8–16) to blunt inbox
+  flooding; content is always encrypted, so this is a storage/spam concern, not a
+  confidentiality one.
+- **Clients verify the sender.** A gift-wrap's inner author is only trusted after
+  the wallet checks the seal signature + `seal.pubkey == rumor.pubkey`, so a
+  relay/sender cannot forge the displayed "from".
+
 ## Modularity
 
 `nostr-rs-relay` is the first adapter behind the `RelayProvider` seam

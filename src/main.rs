@@ -247,11 +247,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let db = state.db.clone();
             tracing::info!("relay event-admission (nauthz) listening on {addr}");
             tokio::spawn(async move {
-                if let Err(e) =
-                    smirk_backend_core::infra::relay::nauthz::serve(addr, relay, db).await
-                {
-                    tracing::error!(error = %e, "relay admission service exited");
-                }
+                let result = smirk_backend_core::infra::relay::nauthz::serve(addr, relay, db).await;
+                // nostr-rs-relay fails OPEN if the admission service is unreachable
+                // (accepts every event). So a dead admission = an unrestricted
+                // relay. Fail SAFE: take the backend down so the operator's
+                // supervisor restarts a clean relay+admission pair, rather than
+                // leaving an open relay running behind a healthy-looking API.
+                tracing::error!(
+                    ?result,
+                    "relay admission service stopped — exiting to avoid an unrestricted relay"
+                );
+                std::process::exit(1);
             });
         }
     }

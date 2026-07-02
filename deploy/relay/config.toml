@@ -27,7 +27,8 @@ event_admission_server = "http://127.0.0.1:8090"
 
 [network]
 address = "0.0.0.0"
-port = 8080
+# NOT 8080 — the Smirk backend uses that. Front this with your TLS terminator.
+port = 8088
 
 # Conservative, self-host-friendly resource ceilings (the anti-abuse floor even
 # for the `open` policy). Tune to your box.

@@ -128,6 +128,23 @@ impl Database {
         Ok(exists)
     }
 
+    /// Whether ANY of `pubkeys` (canonical lowercase hex) is a registered npub —
+    /// a single batched query, so resolving an event's recipient `p` tags costs
+    /// one round-trip instead of one-per-tag (no N+1 blowup on a crafted event).
+    #[instrument(skip(self, pubkeys))]
+    pub async fn any_registered_npub(&self, pubkeys: &[String]) -> Result<bool, AppError> {
+        if pubkeys.is_empty() {
+            return Ok(false);
+        }
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM users WHERE nostr_pubkey = ANY($1))",
+        )
+        .bind(pubkeys)
+        .fetch_one(self.pool())
+        .await?;
+        Ok(exists)
+    }
+
     /// Replace a user's `pubkey_hash` (derivation-scheme rotation, keyed by the
     /// unchanged `seed_fingerprint`). Peppered.
     #[instrument(skip(self, new_pubkey_hash))]

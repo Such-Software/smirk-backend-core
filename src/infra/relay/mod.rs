@@ -38,6 +38,9 @@ pub trait RelayProvider: Send + Sync {
     fn write_policy(&self) -> WritePolicy;
     /// NIP-13 PoW bits required on cross-ecosystem inbound (0 = off).
     fn inbound_pow_bits(&self) -> u8;
+    /// Max event size (bytes) the admission service enforces as defence-in-depth
+    /// (the relay enforces its own limit too).
+    fn max_event_bytes(&self) -> usize;
     /// NIPs advertised as supported.
     fn supported_nips(&self) -> &'static [u16] {
         SUPPORTED_NIPS
@@ -69,6 +72,7 @@ pub fn from_config(cfg: &Config) -> Result<Option<Arc<dyn RelayProvider>>, AppEr
             advertised_url: r.advertised_url.clone(),
             policy,
             inbound_pow_bits: r.inbound_pow_bits,
+            max_event_bytes: r.max_event_bytes,
         }),
         other => {
             return Err(AppError::ConfigError(format!(
@@ -86,6 +90,7 @@ struct NostrRelayProvider {
     advertised_url: String,
     policy: WritePolicy,
     inbound_pow_bits: u8,
+    max_event_bytes: usize,
 }
 
 impl RelayProvider for NostrRelayProvider {
@@ -100,5 +105,8 @@ impl RelayProvider for NostrRelayProvider {
     }
     fn inbound_pow_bits(&self) -> u8 {
         self.inbound_pow_bits
+    }
+    fn max_event_bytes(&self) -> usize {
+        self.max_event_bytes
     }
 }
