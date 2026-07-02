@@ -83,7 +83,11 @@ const RESERVED_USERNAMES: &[&str] = &[
 /// Mirrors [`crate::api::auth`]'s username rules and adds the anti-impersonation
 /// reserved-name guard (a 409, the same status a UNIQUE collision yields, so the
 /// "taken" and "reserved" outcomes are indistinguishable to a probing client).
-fn validate_username(username: &str) -> Result<(), AppError> {
+///
+/// `pub` so the `smirk-admin migrate-legacy` importer applies the identical
+/// format + reserved-name rules before it writes a legacy username directly via
+/// the DB layer (which bypasses this HTTP handler's checks).
+pub fn validate_username(username: &str) -> Result<(), AppError> {
     if username.len() < 3 || username.len() > 32 {
         return Err(AppError::ValidationError(
             "Username must be 3-32 characters".into(),
