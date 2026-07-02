@@ -1,0 +1,50 @@
+// nostr-rs-relay event-admission (nauthz) gRPC contract.
+//
+// This MUST match the proto nostr-rs-relay ships (its `[grpc]
+// event_admission_server` calls `Authorization.EventAdmit` once per inbound
+// event). Keep field numbers/types identical or the relay cannot talk to us.
+// Upstream: nostr-rs-relay/proto/nauthz.proto.
+syntax = "proto3";
+
+package nauthz;
+
+// Authorization for actions against a relay.
+service Authorization {
+  // Determine if an event should be admitted to the relay.
+  rpc EventAdmit(EventRequest) returns (EventReply);
+}
+
+message Event {
+  bytes id = 1;
+  bytes pubkey = 2;
+  fixed64 created_at = 3;
+  uint64 kind = 4;
+  string content = 5;
+  repeated TagEntry tags = 6;
+  bytes sig = 7;
+}
+
+message TagEntry {
+  repeated string values = 1;
+}
+
+// Event data + connection metadata for the admission decision.
+message EventRequest {
+  Event event = 1;
+  optional string ip_addr = 2;
+  optional string origin = 3;
+  optional string user_agent = 4;
+  optional bytes auth_pubkey = 5;
+  optional string nip05 = 6;
+}
+
+message EventReply {
+  Decision decision = 1;
+  optional string message = 2;
+}
+
+enum Decision {
+  DECISION_UNSPECIFIED = 0;
+  DECISION_PERMIT = 1;
+  DECISION_DENY = 2;
+}

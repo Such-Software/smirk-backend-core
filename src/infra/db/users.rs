@@ -114,6 +114,20 @@ impl Database {
             .await?)
     }
 
+    /// Whether an x-only pubkey (canonical lowercase hex) is linked to any user —
+    /// the fast membership check behind the relay write-admission policy. No PII
+    /// returned, so it is safe to call per inbound relay event.
+    #[instrument(skip(self, nostr_pubkey))]
+    pub async fn is_registered_npub(&self, nostr_pubkey: &str) -> Result<bool, AppError> {
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM users WHERE nostr_pubkey = $1)",
+        )
+        .bind(nostr_pubkey)
+        .fetch_one(self.pool())
+        .await?;
+        Ok(exists)
+    }
+
     /// Replace a user's `pubkey_hash` (derivation-scheme rotation, keyed by the
     /// unchanged `seed_fingerprint`). Peppered.
     #[instrument(skip(self, new_pubkey_hash))]

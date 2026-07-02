@@ -11,6 +11,7 @@
 //! write policy, enforces admission via `nostr-rs-relay`'s gRPC event-admission
 //! hook, evaluated by the pure engine in [`policy`].
 
+pub mod nauthz;
 mod policy;
 
 pub use policy::{decide, leading_zero_bits, Admit, EventMeta, WritePolicy, GIFT_WRAP_KIND};

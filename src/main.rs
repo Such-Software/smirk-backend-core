@@ -231,6 +231,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Nostr relay event-admission (nauthz) gRPC service — only for a non-`open`
+    // write policy (open needs no admission). Loopback socket, like the admin
+    // plane; nostr-rs-relay is configured to call it per inbound event.
+    if let Some(relay) = state.relay.clone() {
+        use smirk_backend_core::infra::relay::WritePolicy;
+        if relay.write_policy() != WritePolicy::Open {
+            let addr: std::net::SocketAddr = state
+                .config
+                .messaging
+                .relay
+                .admission_bind
+                .parse()
+                .map_err(|e| format!("invalid RELAY_ADMISSION_BIND: {e}"))?;
+            let db = state.db.clone();
+            tracing::info!("relay event-admission (nauthz) listening on {addr}");
+            tokio::spawn(async move {
+                if let Err(e) =
+                    smirk_backend_core::infra::relay::nauthz::serve(addr, relay, db).await
+                {
+                    tracing::error!(error = %e, "relay admission service exited");
+                }
+            });
+        }
+    }
+
     let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;

@@ -107,6 +107,17 @@ async-trait = "0.1"
 validator = { version = "0.16", features = ["derive"] }
 bech32 = "0.12.0"
 
+# gRPC (nostr-rs-relay event-admission hook, `nauthz`). Runtime-gated by
+# RELAY_ENABLED; reuses the hyper/tower/h2 stack axum already pulls in.
+tonic = "0.12"
+prost = "0.13"
+
+[build-dependencies]
+# Compile proto/nauthz.proto. protoc is vendored so building from source needs
+# no system protobuf-compiler.
+tonic-build = "0.12"
+protoc-bin-vendored = "3"
+
 [dev-dependencies]
 tokio-test = "0.4"
 mockall = "0.12"
