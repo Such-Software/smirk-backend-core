@@ -60,7 +60,7 @@ pub struct FeatureCapabilities {
 pub struct MessagingCapability {
     /// The ws(s):// relay URL clients connect to.
     pub relay_url: String,
-    /// Write policy: `inbox-outbox` | `author-allowlist` | `open`.
+    /// Write policy: `inbox-outbox` | `author-allowlist` | `open` | `premium-post`.
     pub write_policy: String,
     /// NIP-13 PoW bits required on cross-ecosystem inbound (0 = off).
     pub inbound_pow_bits: u8,

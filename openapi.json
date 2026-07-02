@@ -2968,7 +2968,7 @@
           },
           "write_policy": {
             "type": "string",
-            "description": "Write policy: `inbox-outbox` | `author-allowlist` | `open`."
+            "description": "Write policy: `inbox-outbox` | `author-allowlist` | `open` | `premium-post`."
           }
         }
       },

@@ -865,6 +865,16 @@ impl Config {
         if self.pow.enabled {
             require_secret("ALTCHA_HMAC_KEY", &self.pow.hmac_key, 32)?;
         }
+        // Fail closed on the silent-disarm footgun: asking for PoW (POW_REQUIRED or a
+        // per-pubkey list) while the feature master switch is off means the gate never
+        // applies and /capabilities reports pow_required:false — a signup endpoint the
+        // operator believes is protected but isn't.
+        if !self.pow.enabled && (self.pow.required || !self.pow.required_for_pubkeys.is_empty()) {
+            return Err(cfg_err(
+                "POW_REQUIRED (or TEST_POW_REQUIRED_FOR_PUBKEYS) is set but FEATURE_POW is off \
+                 — the PoW gate would never apply; set FEATURE_POW=true",
+            ));
+        }
 
         // Admin surface: dedicated secrets + a real public URL when enabled.
         if self.admin.enabled {
@@ -1116,11 +1126,7 @@ impl Config {
             if p.store_id.trim().is_empty() {
                 return Err(cfg_err("PREMIUM_ENABLED needs PAYMENT_STORE_ID"));
             }
-            if p.api_key.len() < 8 {
-                return Err(cfg_err(
-                    "PREMIUM_ENABLED needs PAYMENT_API_KEY (>= 8 bytes)",
-                ));
-            }
+            require_secret("PAYMENT_API_KEY", &p.api_key, 8)?;
             // The same processor-safety floors the pay-to-register path enforces —
             // premium's common case is require_payment=false, which skips that
             // block. A 0-conf invoice settles on first mempool sighting and can
@@ -1386,6 +1392,19 @@ mod tests {
         let mut c = valid();
         c.pow.enabled = true;
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn pow_required_without_feature_pow_rejected() {
+        // POW_REQUIRED=true while FEATURE_POW is off silently disarms the gate.
+        let mut c = valid();
+        c.pow.enabled = false;
+        c.pow.required = true;
+        assert!(c.validate().is_err());
+        // Enabling the master switch (with a key) makes it valid.
+        c.pow.enabled = true;
+        c.pow.hmac_key = "a".repeat(32);
+        assert!(c.validate().is_ok());
     }
 
     #[test]

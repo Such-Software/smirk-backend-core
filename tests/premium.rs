@@ -30,10 +30,13 @@ async fn activate_premium_is_single_use_and_stacks() {
     let db = &app.state.db;
     let user_id = app.create_user().await;
 
-    db.insert_premium_invoice("inv-a", user_id, "btcpay", "quarter", 90, "5", "USD")
+    // Unique per run so the suite is re-runnable against a persistent test DB.
+    let inv_a = format!("inv-a-{}", Uuid::new_v4());
+    let inv_b = format!("inv-b-{}", Uuid::new_v4());
+    db.insert_premium_invoice(&inv_a, user_id, "btcpay", "quarter", 90, "5", "USD")
         .await
         .unwrap();
-    db.insert_premium_invoice("inv-b", user_id, "btcpay", "quarter", 90, "5", "USD")
+    db.insert_premium_invoice(&inv_b, user_id, "btcpay", "quarter", 90, "5", "USD")
         .await
         .unwrap();
     assert_eq!(
@@ -43,7 +46,7 @@ async fn activate_premium_is_single_use_and_stacks() {
 
     // First activation grants a future expiry.
     let until1 = db
-        .activate_premium("inv-a", user_id, 90)
+        .activate_premium(&inv_a, user_id, 90)
         .await
         .unwrap()
         .expect("first activation grants");
@@ -51,14 +54,14 @@ async fn activate_premium_is_single_use_and_stacks() {
 
     // Re-activating the SAME invoice is a no-op (single-use) — no double grant.
     assert!(db
-        .activate_premium("inv-a", user_id, 90)
+        .activate_premium(&inv_a, user_id, 90)
         .await
         .unwrap()
         .is_none());
 
     // A second invoice STACKS from the current expiry.
     let until2 = db
-        .activate_premium("inv-b", user_id, 90)
+        .activate_premium(&inv_b, user_id, 90)
         .await
         .unwrap()
         .expect("second activation grants");
@@ -77,13 +80,14 @@ async fn activate_premium_rejects_cross_user_invoice() {
     let db = &app.state.db;
     let owner = app.create_user().await;
     let attacker = app.create_user().await;
-    db.insert_premium_invoice("inv-x", owner, "btcpay", "quarter", 90, "5", "USD")
+    let inv_x = format!("inv-x-{}", Uuid::new_v4());
+    db.insert_premium_invoice(&inv_x, owner, "btcpay", "quarter", 90, "5", "USD")
         .await
         .unwrap();
 
     // Another user cannot activate the owner's invoice; it stays unconsumed.
     assert!(db
-        .activate_premium("inv-x", attacker, 90)
+        .activate_premium(&inv_x, attacker, 90)
         .await
         .unwrap()
         .is_none());
@@ -98,7 +102,7 @@ async fn activate_premium_rejects_cross_user_invoice() {
 async fn is_premium_npub_respects_membership_and_expiry() {
     let app = require_app!();
     let db = &app.state.db;
-    let npub = "a".repeat(64);
+    let npub = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let user = db
         .create_user(new_user_with_npub(Some(npub.clone())))
         .await
