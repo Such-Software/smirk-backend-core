@@ -202,7 +202,7 @@
           "auth"
         ],
         "summary": "Link a Nostr identity (npub) to the authenticated user.",
-        "description": "Dual auth: the Bearer JWT identifies the user; a NIP-98 *signed-action* proof\n(not a login token) proves control of the npub AND binds a server-issued\nsingle-use `nonce`, the purpose `nostr_link`, and this exact request via the\nrequest-descriptor hash. On success the npub is stored so a later\n[`nostr_login`] resolves to the same wallet; a collision is 409.\n\n## Descriptor binding is a CONTRACT (not an implementation detail)\n\nThe `payload` tag binds `descriptor_sha256(request_descriptor(\"POST\",\n\"/api/v1/auth/nostr/link\", \"\", b\"\"))` — an EMPTY body hash, with no query.\nThe JSON `{nostr_token, nonce}` rides in the HTTP body but is deliberately NOT\npart of the signed descriptor (it carries the proof itself, so it cannot also\nbe inside it). The wallet MUST build the identical descriptor. This exact\nmethod/path/query/empty-body shape is a cross-impl contract and must be pinned\nin a shared test vector (mirroring the nip98.rs interop test) before\n`consume_link_nonce` is un-stubbed — otherwise the binding silently breaks or\nweakens at integration time.\n\nTODO(operator-surface): the server-nonce *issue* (`GET\n/auth/nostr/link-challenge`, rand 32 bytes, stored) + the ATOMIC single-use\n*consume* (a `DELETE ... WHERE nonce=$1 RETURNING` so a replay loses the race,\nnever check-then-delete), plus the wallet's signed-action token builder, are\nwired in the operator-surface phase. Until then [`consume_link_nonce`] always\nreturns `false` and this handler FAILS CLOSED: it validates the full proof\nshape but refuses every link, because it cannot yet prove the nonce was issued\nby this server and is unused.",
+        "description": "Dual auth: the Bearer JWT identifies the user; a NIP-98 *signed-action* proof\n(not a login token) proves control of the npub AND binds a server-issued\nsingle-use `nonce`, the purpose `nostr_link`, and this exact request via the\nrequest-descriptor hash. On success the npub is stored so a later\n[`nostr_login`] resolves to the same wallet; a collision is 409.\n\nFlow: the wallet first calls `GET /auth/nostr/link-challenge` (authenticated)\nto obtain a single-use `nonce`, signs an action committing to it, then POSTs\nhere. The nonce is consumed atomically ([`Database::consume_challenge`]) and\ncross-checked to have been issued to THIS user.\n\n## Descriptor binding is a CONTRACT (not an implementation detail)\n\nThe `payload` tag binds `descriptor_sha256(request_descriptor(\"POST\",\n\"/api/v1/auth/nostr/link\", \"\", b\"\"))` — an EMPTY body hash, with no query.\nThe JSON `{nostr_token, nonce}` rides in the HTTP body but is deliberately NOT\npart of the signed descriptor (it carries the proof itself, so it cannot also\nbe inside it). The wallet MUST build the identical descriptor. This exact\nmethod/path/query/empty-body shape is a cross-impl contract, pinned in a shared\ntest vector (`descriptor_sha256` KAT in this file's tests, mirroring the\nnip98.rs interop test) so the binding cannot silently drift at integration time.",
         "operationId": "nostr_link",
         "requestBody": {
           "content": {
@@ -230,6 +230,36 @@
           },
           "409": {
             "description": "npub already linked to another account"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/auth/nostr/link-challenge": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Issue a single-use nonce for linking a Nostr identity.",
+        "description": "Authenticated (Bearer JWT). The nonce is bound to the calling user (as the\nchallenge `subject`) and the `nostr_link` purpose, valid for a short TTL, and\nconsumed atomically by [`nostr_link`]. It pairs with the signed-action proof\nthere: the wallet signs an action committing to THIS nonce, so the server can\nprove the npub-holder authorized the link for THIS account and the request\ncannot be replayed.",
+        "operationId": "nostr_link_challenge",
+        "responses": {
+          "200": {
+            "description": "Single-use link nonce",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NostrLinkChallengeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid session"
           }
         },
         "security": [
@@ -2720,6 +2750,18 @@
               "null"
             ],
             "description": "The caller's username, or `null` if they have not claimed one."
+          }
+        }
+      },
+      "NostrLinkChallengeResponse": {
+        "type": "object",
+        "required": [
+          "nonce"
+        ],
+        "properties": {
+          "nonce": {
+            "type": "string",
+            "description": "Server-issued single-use nonce (hex). The wallet embeds it as the signed\naction's `challenge` tag when calling `POST /auth/nostr/link`."
           }
         }
       },

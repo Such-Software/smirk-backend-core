@@ -69,6 +69,10 @@ const NIP98_LOGIN_MAX_AGE_SECS: i64 = 60;
 /// Deliberately tighter than login.
 const NIP98_ACTION_MAX_AGE_SECS: i64 = 30;
 
+/// TTL for a Nostr-link nonce (seconds): long enough for the wallet to sign and
+/// POST, short enough to bound an unused nonce's lifetime.
+const NOSTR_LINK_NONCE_TTL_SECS: i64 = 300;
+
 /// Max accepted drift for the extension's signed-timestamp proof (seconds).
 const SIGNED_TS_MAX_DRIFT_SECS: i64 = 300;
 
@@ -1243,6 +1247,50 @@ pub async fn nostr_login(
     }))
 }
 
+// ── GET /auth/nostr/link-challenge (issue the link nonce) ────────────────────
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct NostrLinkChallengeResponse {
+    /// Server-issued single-use nonce (hex). The wallet embeds it as the signed
+    /// action's `challenge` tag when calling `POST /auth/nostr/link`.
+    pub nonce: String,
+}
+
+/// Issue a single-use nonce for linking a Nostr identity.
+///
+/// Authenticated (Bearer JWT). The nonce is bound to the calling user (as the
+/// challenge `subject`) and the `nostr_link` purpose, valid for a short TTL, and
+/// consumed atomically by [`nostr_link`]. It pairs with the signed-action proof
+/// there: the wallet signs an action committing to THIS nonce, so the server can
+/// prove the npub-holder authorized the link for THIS account and the request
+/// cannot be replayed.
+#[utoipa::path(
+    security(("bearer_auth" = [])),
+    get,
+    path = "/auth/nostr/link-challenge",
+    responses(
+        (status = 200, description = "Single-use link nonce", body = NostrLinkChallengeResponse),
+        (status = 401, description = "Missing or invalid session")
+    ),
+    tag = "auth"
+)]
+#[instrument(skip(state, headers))]
+pub async fn nostr_link_challenge(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<NostrLinkChallengeResponse>, AppError> {
+    let user_id = extract_user_id_from_token(&state, &headers).await?;
+    let nonce = state
+        .db
+        .issue_challenge(
+            "nostr_link",
+            Some(&user_id.to_string()),
+            NOSTR_LINK_NONCE_TTL_SECS,
+        )
+        .await?;
+    Ok(Json(NostrLinkChallengeResponse { nonce }))
+}
+
 // ── POST /auth/nostr/link (state change) ─────────────────────────────────────
 
 /// Link a Nostr identity to the authenticated user. This is a STATE CHANGE, so
@@ -1271,6 +1319,11 @@ pub struct NostrLinkResponse {
 /// request-descriptor hash. On success the npub is stored so a later
 /// [`nostr_login`] resolves to the same wallet; a collision is 409.
 ///
+/// Flow: the wallet first calls `GET /auth/nostr/link-challenge` (authenticated)
+/// to obtain a single-use `nonce`, signs an action committing to it, then POSTs
+/// here. The nonce is consumed atomically ([`Database::consume_challenge`]) and
+/// cross-checked to have been issued to THIS user.
+///
 /// ## Descriptor binding is a CONTRACT (not an implementation detail)
 ///
 /// The `payload` tag binds `descriptor_sha256(request_descriptor("POST",
@@ -1278,19 +1331,9 @@ pub struct NostrLinkResponse {
 /// The JSON `{nostr_token, nonce}` rides in the HTTP body but is deliberately NOT
 /// part of the signed descriptor (it carries the proof itself, so it cannot also
 /// be inside it). The wallet MUST build the identical descriptor. This exact
-/// method/path/query/empty-body shape is a cross-impl contract and must be pinned
-/// in a shared test vector (mirroring the nip98.rs interop test) before
-/// `consume_link_nonce` is un-stubbed — otherwise the binding silently breaks or
-/// weakens at integration time.
-///
-/// TODO(operator-surface): the server-nonce *issue* (`GET
-/// /auth/nostr/link-challenge`, rand 32 bytes, stored) + the ATOMIC single-use
-/// *consume* (a `DELETE ... WHERE nonce=$1 RETURNING` so a replay loses the race,
-/// never check-then-delete), plus the wallet's signed-action token builder, are
-/// wired in the operator-surface phase. Until then [`consume_link_nonce`] always
-/// returns `false` and this handler FAILS CLOSED: it validates the full proof
-/// shape but refuses every link, because it cannot yet prove the nonce was issued
-/// by this server and is unused.
+/// method/path/query/empty-body shape is a cross-impl contract, pinned in a shared
+/// test vector (`descriptor_sha256` KAT in this file's tests, mirroring the
+/// nip98.rs interop test) so the binding cannot silently drift at integration time.
 #[utoipa::path(
     security(("bearer_auth" = [])),
     post,
@@ -1312,13 +1355,18 @@ pub async fn nostr_link(
     // 1. JWT identifies the acting user.
     let user_id = extract_user_id_from_token(&state, &headers).await?;
 
-    // 2. Atomically consume the server-issued nonce. FAIL CLOSED: the
-    // issue/consume store is not wired until the operator-surface phase, so
-    // `consume_link_nonce` currently always returns false and every request is
-    // rejected here. This is intentional — better to refuse links than to accept
-    // a proof whose nonce we cannot prove we issued + has not been replayed.
-    if !consume_link_nonce(&state, &req.nonce).await {
-        warn!("nostr_link: nonce not recognized / store not wired — refusing (fail-closed)");
+    // 2. Atomically consume the server-issued nonce (single-use `DELETE …
+    // RETURNING`, so a replay loses the race). It was issued to THIS user (subject
+    // bound at issue via `/auth/nostr/link-challenge`), so a nonce minted for a
+    // different account is rejected. Consume happens BEFORE proof verification, so
+    // a failed proof burns the nonce — a legit client simply fetches a fresh one.
+    let consumed = state
+        .db
+        .consume_challenge(&req.nonce, "nostr_link")
+        .await?
+        .ok_or_else(|| AppError::AuthError("Invalid or expired nonce".into()))?;
+    if consumed.subject.as_deref() != Some(user_id.to_string().as_str()) {
+        warn!("nostr_link: nonce subject mismatch — refusing (fail-closed)");
         return Err(AppError::AuthError("Invalid or expired nonce".into()));
     }
 
@@ -1351,17 +1399,6 @@ pub async fn nostr_link(
     }))
 }
 
-/// Atomically consume a server-issued single-use link nonce.
-///
-/// TODO(operator-surface): back this with the shared challenge store — issue on a
-/// `GET /auth/nostr/link-challenge` (rand 32 bytes, stored), and consume here via
-/// an ATOMIC single-use delete (`DELETE ... WHERE nonce=$1 RETURNING`) so a
-/// replay loses the race. Until then it returns `false` so [`nostr_link`] fails
-/// closed — no nonce can be accepted that we cannot prove we issued.
-async fn consume_link_nonce(_state: &AppState, _nonce: &str) -> bool {
-    false
-}
-
 // ── router ───────────────────────────────────────────────────────────────────
 
 /// Auth routes, RELATIVE to the `/api/v1` mount point. The application is
@@ -1378,6 +1415,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/auth/logout", post(logout))
         .route("/auth/me", get(get_me))
         .route("/auth/nostr", post(nostr_login))
+        .route("/auth/nostr/link-challenge", get(nostr_link_challenge))
         .route("/auth/nostr/link", post(nostr_link))
 }
 
