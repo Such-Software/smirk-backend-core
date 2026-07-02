@@ -10,16 +10,17 @@ Each recipe is a directory with:
   called out; copy the full `../../.env.example` and apply the deltas).
 - **`README.md`** — what it's for, what it costs to run, the legal/operational notes.
 
-> **Status.** `personal/`, `public-free/`, and `paid-relay/` (the flagship — it
-> uses the shipped [premium-relay feature](../docs/design/premium-relay.md)) have
-> full `.env.example`s. `friends/`, `paid-access/`, and `community/` are summarized
-> below and get their own directories on the next pass.
+> Each recipe below has its own directory with a tuned `.env.example` and a short
+> README. `paid-relay/` is the flagship — it uses the shipped
+> [premium-relay feature](../docs/design/premium-relay.md).
 
 ## Every recipe, the same three steps
 1. `cp ../../.env.example .env`, then apply the recipe's deltas.
-2. Generate each secret: `openssl rand -hex 32` (`JWT_SECRET`, `SEED_FINGERPRINT_PEPPER`,
-   `REFRESH_TOKEN_PEPPER`, `IP_SALT`, `ALTCHA_HMAC_KEY`, `ADMIN_*_SECRET`). Fill chain
-   endpoints. `chmod 600 .env`.
+2. Set `PUBLIC_API_URL` to your real domain (a placeholder is rejected at boot in
+   production). Generate each secret: `openssl rand -hex 32` (`JWT_SECRET`,
+   `SEED_FINGERPRINT_PEPPER`, `REFRESH_TOKEN_PEPPER`, `IP_SALT`, `ADMIN_*_SECRET`, plus
+   `ALTCHA_HMAC_KEY` only if the recipe sets `FEATURE_POW=true`). Fill chain endpoints.
+   `chmod 600 .env`.
 3. Run the binary (migrations apply on boot). Reverse-proxy TLS; bind the API to
    `127.0.0.1`.
 
@@ -30,12 +31,12 @@ funds. **Self-hosting bypasses every gate.** Secrets are never committed.
 
 | Recipe | For | Registration | Relay | Pitch | Status |
 |---|---|---|---|---|---|
-| [`personal/`](personal/) | Just you | open, no gate | off (or open, just you) | Your own sovereign backend | ✅ boots today |
-| [`public-free/`](public-free/) | A free public instance | **open + PoW** | off (v1) | What `api.smirk.cash` runs | ✅ boots today |
-| `friends/` | Your circle | **invite-only** | on, `inbox-outbox` | A backend for people you trust | 📝 2nd pass |
-| `paid-access/` | A paid wallet service | **pay-to-register** | optional | Charge once for a hosted wallet backend | 📝 2nd pass |
-| `paid-relay/` | Monetize a relay | **open + PoW** (free wallet) | on, **`premium-post`** | Free wallet, paid ($/quarter) Nostr posting | ✅ premium-relay shipped |
-| `community/` | A project/DAO space | invite | on, `author-allowlist` | A gated relay for a named group | 📝 2nd pass |
+| [`personal/`](personal/) | Just you | open, no gate | off (or open, just you) | Your own sovereign backend | ✅ set domain + secrets |
+| [`public-free/`](public-free/) | A free public instance | **open + PoW** | off (v1) | The shape a free public instance runs | ✅ set domain + secrets |
+| [`friends/`](friends/) | Your circle | **invite-only** | on, `inbox-outbox` | A backend for people you trust | ✅ |
+| [`paid-access/`](paid-access/) | A paid wallet service | **pay-to-register** | optional | Charge once for a hosted wallet backend | ✅ |
+| [`paid-relay/`](paid-relay/) | Monetize a relay | **open + PoW** (free wallet) | on, **`premium-post`** | Free wallet, paid ($/quarter) Nostr posting | ✅ premium-relay shipped |
+| [`community/`](community/) | A project/community space | invite | on, `author-allowlist` | A gated relay for a named group | ✅ |
 
 ## Recipe summaries (config deltas)
 
@@ -52,8 +53,8 @@ funds. **Self-hosting bypasses every gate.** Secrets are never committed.
   processor paying *your* wallet). A one-time access fee gates wallet creation. Non-custodial;
   you never touch funds (pull-model invoice reads only).
 - **`paid-relay`** — free wallet (open + PoW) **plus** `PREMIUM_ENABLED=true`,
-  `RELAY_ENABLED=true`, `RELAY_WRITE_POLICY=premium-post`, `PREMIUM_AMOUNT` /
-  `PREMIUM_CURRENCY` / `PREMIUM_PERIOD_DAYS`. Recurring revenue for relay posting; reads
+  `RELAY_ENABLED=true`, `RELAY_WRITE_POLICY=premium-post`, `PREMIUM_CURRENCY` +
+  `PREMIUM_PLANS` (`id:days:amount`). Recurring revenue for relay posting; reads
   open (v1). **Content posture:** running a relay carries user content — see the NCMEC/DMCA
   clauses in the published Terms (§6, §9.1). Spec: [premium-relay](../docs/design/premium-relay.md).
 - **`community`** — `REGISTRATION_REQUIRE_INVITE=true`, `RELAY_ENABLED=true` +
@@ -61,8 +62,7 @@ funds. **Self-hosting bypasses every gate.** Secrets are never committed.
 
 ## Choosing
 
-- Want **freedom**? `personal` (or `friends` for a group).
-- Want a **free public good**? `public-free`.
-- Want it to **pay for itself**? `paid-relay` (recurring, real utility) or `paid-access`
-  (one-time). `paid-relay` is the flagship — recurring revenue tied to a service people
-  actually value, and the live demo runs at `api.smirk.cash`.
+- Solo, or a trusted group → `personal` / `friends`.
+- A free public instance → `public-free`.
+- Cost recovery → `paid-relay` (recurring, tied to a real service — the flagship) or
+  `paid-access` (a one-time signup fee).
