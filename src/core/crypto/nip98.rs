@@ -150,7 +150,11 @@ pub fn verify_nip98(
     if !exactly_one(&ev, "method")?.eq_ignore_ascii_case(expected_method) {
         return Err(Nip98Error::MethodMismatch);
     }
-    Ok(ev.pubkey)
+    // Canonicalize: BIP-340 hex-decode is case-insensitive, so an UPPER-case-hex
+    // pubkey verifies just fine. Return lowercase so storage / the UNIQUE index /
+    // login lookup / NIP-05 hosting are all canonical — otherwise the same key
+    // could bind to two accounts via case variance (defeating the 409).
+    Ok(ev.pubkey.to_lowercase())
 }
 
 /// Canonical request descriptor bound into a signed action. Covers method,
@@ -222,7 +226,9 @@ pub fn verify_signed_action(
         }
     }
 
-    Ok(ev.pubkey)
+    // Canonicalize the verified key to lowercase hex (see verify_nip98) so every
+    // downstream store/compare is on the canonical form.
+    Ok(ev.pubkey.to_lowercase())
 }
 
 #[cfg(test)]
@@ -345,6 +351,54 @@ mod tests {
             vec!["challenge".into(), nonce.into()],
             vec!["payload".into(), payload.into()],
         ]
+    }
+
+    #[test]
+    fn canonicalizes_uppercase_pubkey() {
+        // An UPPER-case-hex pubkey is self-consistent (the id commits to it, and
+        // BIP-340 hex-decode is case-insensitive), so it verifies — but the
+        // returned key MUST be canonical lowercase so it can't bind twice.
+        use k256::schnorr::SigningKey;
+        let sk = SigningKey::from_bytes(&[7u8; 32]).expect("valid scalar");
+        let pk_upper = hex::encode(sk.verifying_key().to_bytes()).to_uppercase();
+        let p = payload_hash();
+        let tags = action_tags("admin_action", "nonce-up", &p);
+        let created_at = 1000;
+        let serial = serde_json::to_string(&serde_json::json!([
+            0, pk_upper, created_at, NIP98_KIND, tags, ""
+        ]))
+        .unwrap();
+        let id = hex::encode(Sha256::digest(serial.as_bytes()));
+        let sig = sk
+            .sign_raw(&hex::decode(&id).unwrap(), &[0u8; 32])
+            .expect("sign");
+        let ev = serde_json::json!({
+            "id": id, "pubkey": pk_upper, "created_at": created_at,
+            "kind": NIP98_KIND, "tags": tags, "content": "", "sig": hex::encode(sig.to_bytes())
+        });
+        let header = format!(
+            "Nostr {}",
+            STANDARD.encode(serde_json::to_vec(&ev).unwrap())
+        );
+        let got = verify_signed_action(
+            &header,
+            AURL,
+            "POST",
+            "admin_action",
+            "nonce-up",
+            &p,
+            None,
+            None,
+            created_at,
+            30,
+        )
+        .unwrap();
+        assert_eq!(
+            got,
+            pk_upper.to_lowercase(),
+            "returned key is canonical lowercase"
+        );
+        assert_ne!(got, pk_upper, "not the verbatim uppercase input");
     }
 
     #[test]

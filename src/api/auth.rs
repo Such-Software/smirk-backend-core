@@ -61,9 +61,10 @@ use crate::AppState;
 
 // ── shared constants ────────────────────────────────────────────────────────
 
-/// Replay window for a NIP-98 LOGIN token (seconds). Wide enough for client
-/// clock skew, tight enough to bound replay.
-const NIP98_LOGIN_MAX_AGE_SECS: i64 = 60;
+/// Replay window for a NIP-98 LOGIN token (seconds). A captured login token is a
+/// bearer credential within this window, so keep it tight — matched to the
+/// state-change grade below. Still ample for real client clock skew.
+const NIP98_LOGIN_MAX_AGE_SECS: i64 = 30;
 
 /// Replay window for a NIP-98 STATE-CHANGE (signed action) token (seconds).
 /// Deliberately tighter than login.
@@ -1393,6 +1394,13 @@ pub async fn nostr_link(
 
     // 4. Persist. UNIQUE collision -> 409 CONFLICT (handled in set_nostr_pubkey).
     state.db.set_nostr_pubkey(user_id, &pubkey).await?;
+    // Observability: linking (incl. a rotation that REPLACES an existing npub) is a
+    // security-relevant binding change, so record it in the login history — a
+    // session-authed rebind should never be silent.
+    let _ = state
+        .db
+        .record_login_event(Some(user_id), "btc", Platform::Nostr.as_str(), None, None)
+        .await;
     info!(user_id = %user_id, "linked Nostr identity");
     Ok(Json(NostrLinkResponse {
         nostr_pubkey: pubkey,
