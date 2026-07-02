@@ -70,17 +70,31 @@ curl -s localhost:8080/api/v1/capabilities    # enabled chains, features, restor
 
 Admin functions — key management, erasure, tamper-evident audit — run on a
 separate loopback listener; the public API needs no admin. To enable it, set
-`ADMIN_ENABLED=true` and the two admin secrets, then bootstrap:
+`ADMIN_ENABLED=true` and the two admin secrets, then bootstrap with **one** of
+two mutually-exclusive first-run commands:
 
 ```sh
+# A) You already have a Sign-in-with-Smirk (Nostr) key — seed its pubkey (active now):
 smirk-admin setup --pubkey <x-only-hex>    # seed the first admin + latch the bootstrap
+
+# B) You want the CLI to generate a key — writes the secret 0600, registers it
+#    PENDING, and latches in one step (no `setup` needed):
+smirk-admin create-admin-wallet --out admin-key.hex
+
 smirk-admin doctor                         # database, live keys, audit chain
 ```
 
 `<x-only-hex>` is the admin's Sign-in-with-Smirk (Nostr) public key; the admin
-authenticates with the matching key over NIP-98. The bootstrap latch is
-MAC-protected and one-way — a live deployment is adopted as already-bootstrapped,
-and tampering fails closed.
+authenticates with the matching key over NIP-98. Both commands latch the
+bootstrap, so run **only one** — after either, the other is refused by design (a
+live admin key already exists). With (B) the generated key is *pending* and
+activates on the holder's first NIP-98 login; import `admin-key.hex` into your
+signer and log in. If you lose that secret before the first login, re-run
+`create-admin-wallet` (adds a fresh key) and `revoke-key` the stale one.
+
+The bootstrap latch is MAC-protected and one-way — a live deployment is adopted
+as already-bootstrapped, and tampering fails closed (the CLI and the boot path
+both refuse a tampered latch; run `reset-setup --i-understand` to re-open setup).
 
 Expose the admin plane over a Tor onion or an SSH tunnel; never bind it to a
 public interface. `ADMIN_BIND` defaults to loopback, and a non-loopback bind

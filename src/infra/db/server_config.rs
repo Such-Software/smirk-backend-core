@@ -13,8 +13,9 @@ use tracing::instrument;
 
 use crate::core::crypto::pepper::peppered_hex;
 use crate::error::AppError;
-use crate::models::db::{NewAdminAudit, ServerConfig};
+use crate::models::db::{NewAdminAudit, NewAdminKey, ServerConfig};
 
+use super::admin_keys::AddKeyOutcome;
 use super::Database;
 
 /// Resolved bootstrap state.
@@ -121,8 +122,12 @@ impl Database {
     }
 
     /// Headless bootstrap (CLI): insert the FIRST admin (active) and latch
-    /// `locked`, in ONE transaction + a hash-chained audit row. Refuses if an
-    /// active admin already exists (use `add-key` for more admins).
+    /// `locked`, in ONE transaction + a hash-chained audit row. Refuses if ANY
+    /// live admin key already exists — active OR pending — so `setup` composes
+    /// cleanly with `create-admin-wallet` (which registers a pending key + latches)
+    /// instead of seeding a confusing second admin. The adopt-existing-deployment
+    /// path is unaffected: a deployment with users but no admin keys has no live
+    /// key, so bootstrap still proceeds to seed the first admin.
     #[instrument(skip(self, secret))]
     pub async fn bootstrap_admin(&self, pubkey: &str, secret: &str) -> Result<(), AppError> {
         use crate::core::crypto::admin_mac::{compute_admin_key_mac, AdminKeyMacInput};
@@ -132,14 +137,16 @@ impl Database {
         super::admin_keys::admin_keys_mutate_lock(&mut tx).await?;
 
         let has_admin = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (SELECT 1 FROM admin_keys WHERE revoked_at IS NULL AND activated_at IS NOT NULL)",
+            "SELECT EXISTS (SELECT 1 FROM admin_keys WHERE revoked_at IS NULL)",
         )
         .fetch_one(&mut *tx)
         .await?;
         if has_admin {
             tx.rollback().await?;
             return Err(AppError::Conflict(
-                "an active admin already exists; use add-key".into(),
+                "an admin key already exists (active or pending); use add-key, or \
+                 create-admin-wallet to add another generated key"
+                    .into(),
             ));
         }
 
@@ -203,11 +210,110 @@ impl Database {
         Ok(())
     }
 
+    /// Register a generated PENDING admin key and, if the instance is not yet
+    /// bootstrapped, latch `locked` in the SAME transaction — so `create-admin-
+    /// wallet` on a fresh instance is a COMPLETE first-run bootstrap (key + latch),
+    /// not a key without a latch that leaves setup half-open (the bug this fixes).
+    /// Keeps pending semantics: the generated key activates on its holder's first
+    /// login (unlike `bootstrap_admin`, which seeds an already-active key from an
+    /// operator's own pubkey). On an already-locked instance this is a plain pending
+    /// add (no re-latch). FAILS CLOSED on a tampered latch (defers to `reset-setup`,
+    /// mirroring the boot path) rather than silently healing it. Serialized with all
+    /// admin-key mutations via the advisory lock, so it cannot race `bootstrap_admin`.
+    ///
+    /// Returns the add outcome and whether it latched (true = this call bootstrapped
+    /// a fresh instance). NOTE: `CapReached` returns `latched = false` WITHOUT
+    /// inserting or latching, so a caller passing a finite cap must treat that as
+    /// "instance still un-bootstrapped".
+    #[instrument(skip(self, input, audit, secret))]
+    pub async fn create_admin_key_bootstrapping(
+        &self,
+        input: NewAdminKey,
+        audit: &NewAdminAudit,
+        secret: &str,
+        max_live: i64,
+    ) -> Result<(AddKeyOutcome, bool), AppError> {
+        let mut tx = self.pool().begin().await?;
+        super::admin_keys::admin_keys_mutate_lock(&mut tx).await?;
+
+        // Resolve the latch state up front (under the lock). A missing row (Fresh)
+        // or a valid `uninitialized` row means "bootstrap now"; a valid `locked` row
+        // means "already bootstrapped, just add the key". A MAC-INVALID row is a
+        // tamper / restore-to-pre-bootstrap: FAIL CLOSED here exactly like the boot
+        // path, instead of silently re-stamping a valid `locked` latch over it and
+        // erasing the tamper evidence. The operator must acknowledge the recovery
+        // with `reset-setup --i-understand` first.
+        let cfg = sqlx::query_as::<_, ServerConfig>(
+            "SELECT id, setup_state, bootstrap_completed_at, locked_at, updated_at, integrity_mac \
+             FROM server_config WHERE id = 1",
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        if matches!(&cfg, Some(c) if !verify_latch(secret, c)) {
+            tx.rollback().await?;
+            return Err(AppError::Conflict(
+                "server_config bootstrap latch MAC invalid (tamper or restore-to-pre-bootstrap); \
+                 run `reset-setup --i-understand` first if this is intentional"
+                    .into(),
+            ));
+        }
+        // Past the tamper gate, a present row is MAC-valid, so this is genuinely
+        // "already locked" only for a real `locked` state.
+        let already_locked = matches!(&cfg, Some(c) if c.setup_state == "locked");
+
+        // Cap check under the lock (the CLI passes i64::MAX — effectively no cap).
+        let live = super::admin_keys::live_key_count(&mut tx).await?;
+        if live >= max_live {
+            tx.rollback().await?;
+            return Ok((AddKeyOutcome::CapReached, false));
+        }
+
+        let key = super::admin_keys::insert_admin_key(&mut tx, &input, secret).await?;
+
+        // Latch `locked` unless already validly locked (so additional generated keys
+        // do not re-stamp bootstrap_completed_at). INVARIANT: latching with only a
+        // PENDING key (zero active admins) is safe ONLY because no runtime path gates
+        // on `setup_state` — admin login authorizes on a pending key and activates it
+        // on first use (see api/admin.rs). Do NOT add a "reject unless Locked && >=1
+        // active admin" gate: it would make this state an unrecoverable lockout (the
+        // login that would activate the key is the one such a gate would block).
+        let latched = if already_locked {
+            false
+        } else {
+            let now = Utc::now().trunc_subsecs(6);
+            let latch = latch_mac(secret, "locked", Some(now.timestamp_micros()));
+            sqlx::query(
+                "INSERT INTO server_config (id, setup_state, bootstrap_completed_at, locked_at, integrity_mac) \
+                 VALUES (1, 'locked', $1, $1, $2) \
+                 ON CONFLICT (id) DO UPDATE SET setup_state = 'locked', \
+                    bootstrap_completed_at = $1, locked_at = $1, updated_at = NOW(), integrity_mac = $2",
+            )
+            .bind(now)
+            .bind(&latch)
+            .execute(&mut *tx)
+            .await?;
+            true
+        };
+
+        self.append_admin_audit(&mut tx, audit, secret).await?;
+        tx.commit().await?;
+        Ok((AddKeyOutcome::Created(key), latched))
+    }
+
     /// Reset the latch to `uninitialized` (shell `reset-setup` only). Recomputes
     /// the MAC so it verifies again; existing admin keys are left untouched, so
-    /// recovery cannot worsen a lockout.
+    /// recovery cannot worsen a lockout. Takes the admin-keys advisory lock so all
+    /// latch writers (`bootstrap_admin`, `create_admin_key_bootstrapping`) serialize
+    /// on one lock — a concurrent reset can't tear a check-then-latch.
+    ///
+    /// Recovery note: keys are preserved, so if a LIVE key still exists after the
+    /// reset, `setup` stays refused (its guard rejects any live key). Recover by
+    /// re-running `create-admin-wallet` (adds a fresh key + re-latches), or by
+    /// `revoke-key`-ing the stale key(s) and then running `setup`.
     #[instrument(skip(self, secret))]
     pub async fn reset_setup(&self, secret: &str) -> Result<(), AppError> {
+        let mut tx = self.pool().begin().await?;
+        super::admin_keys::admin_keys_mutate_lock(&mut tx).await?;
         let mac = latch_mac(secret, "uninitialized", None);
         sqlx::query(
             "INSERT INTO server_config (id, setup_state, bootstrap_completed_at, locked_at, integrity_mac) \
@@ -216,8 +322,9 @@ impl Database {
                 bootstrap_completed_at = NULL, locked_at = NULL, updated_at = NOW(), integrity_mac = $1",
         )
         .bind(&mac)
-        .execute(self.pool())
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 }

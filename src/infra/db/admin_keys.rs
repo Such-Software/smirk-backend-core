@@ -355,7 +355,7 @@ impl Database {
 /// Insert a pending allowlist entry on `conn` (so it can share a caller's
 /// transaction). Computes the integrity MAC over the exact stored values. 409 if
 /// an active key with this pubkey already exists.
-async fn insert_admin_key(
+pub(crate) async fn insert_admin_key(
     conn: &mut PgConnection,
     input: &NewAdminKey,
     secret: &str,
@@ -406,7 +406,7 @@ pub(crate) async fn admin_keys_mutate_lock(conn: &mut PgConnection) -> Result<()
 }
 
 /// Count live (non-revoked) keys on `conn` (so it reflects the locked tx).
-async fn live_key_count(conn: &mut PgConnection) -> Result<i64, AppError> {
+pub(crate) async fn live_key_count(conn: &mut PgConnection) -> Result<i64, AppError> {
     let n =
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM admin_keys WHERE revoked_at IS NULL")
             .fetch_one(&mut *conn)

@@ -12,7 +12,10 @@
 //!   revoke-key         --id <uuid>            (may revoke the LAST key)
 //!   replace-key        --old <uuid> --pubkey <64hex> [--revoke-all]
 //!   create-admin-wallet --out <path>          (generates a key; writes the
-//!                                              secret 0600; registers the pubkey)
+//!                                              secret 0600; registers the pubkey
+//!                                              as pending; latches the bootstrap
+//!                                              on a fresh instance — a complete
+//!                                              first-run, no `setup` needed)
 //!   doctor
 //!
 //! Deferred (documented): remac-keys (integrity-secret rotation must also
@@ -43,7 +46,7 @@ COMMANDS:
     add-key             --pubkey <64hex> [--label <s>]
     revoke-key          --id <uuid>
     replace-key         --old <uuid> --pubkey <64hex> [--revoke-all]
-    create-admin-wallet --out <path>
+    create-admin-wallet --out <path>              (generate a key + bootstrap a fresh instance)
     mint-invite         [--count <n>] [--label <s>]  (registration invite codes)
     doctor
 ";
@@ -343,9 +346,11 @@ async fn create_admin_wallet(db: &Database, secret: &str, args: &[String]) -> Re
     secret_hex.zeroize();
     write_res.map_err(|e| format!("write secret to {out}: {e}"))?;
 
-    // Register the PUBLIC key only.
-    match db
-        .create_admin_key_audited(
+    // Register the PUBLIC key only (pending), and latch the bootstrap if this is a
+    // fresh instance — so `create-admin-wallet` alone fully bootstraps, atomically,
+    // rather than leaving setup half-open for a later `setup` to collide with.
+    let latched = match db
+        .create_admin_key_bootstrapping(
             NewAdminKey {
                 pubkey: pubkey.clone(),
                 label: Some("cli-generated".into()),
@@ -360,13 +365,23 @@ async fn create_admin_wallet(db: &Database, secret: &str, args: &[String]) -> Re
         .await
         .map_err(|e| e.to_string())?
     {
-        AddKeyOutcome::Created(_) => {}
-        AddKeyOutcome::CapReached => return Err("unexpected: cap reached".into()),
-    }
+        (AddKeyOutcome::Created(_), latched) => latched,
+        (AddKeyOutcome::CapReached, _) => return Err("unexpected: cap reached".into()),
+    };
 
     println!("generated admin key; secret written to {out} (mode 0600)");
     println!("pubkey: {pubkey}");
-    println!("import the secret into your NIP-98 signer; it activates on first login");
+    if latched {
+        println!("fresh instance bootstrapped: setup latched (locked) — no `setup` needed");
+        println!("import the secret into your NIP-98 signer and log in to activate.");
+        println!(
+            "if you lose this secret before that first login, recover by re-running \
+             `create-admin-wallet` (adds a fresh key), then `revoke-key` the stale one"
+        );
+    } else {
+        println!("instance already bootstrapped: added a pending admin key");
+        println!("import the secret into your NIP-98 signer; it activates on first login");
+    }
     Ok(())
 }
 

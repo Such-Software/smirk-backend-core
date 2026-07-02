@@ -83,10 +83,12 @@ inconsistent feature configuration rather than booting with a control silently
 defeated. Generate secrets with `openssl rand -hex 32`. See
 [`.env.example`](.env.example) for the full, documented configuration surface.
 
-First admin (headless bootstrap):
+First admin (headless bootstrap) — run **one** of these; both latch, so the
+other is refused afterward by design:
 
 ```sh
-smirk-admin setup --pubkey <x-only-hex>   # seed the first admin + latch the bootstrap
+smirk-admin setup --pubkey <x-only-hex>       # seed YOUR pubkey (active immediately)
+smirk-admin create-admin-wallet --out key.hex # generate a key (pending) + latch, no setup needed
 ```
 
 `<x-only-hex>` is the admin's Sign-in-with-Smirk (Nostr) public key; the admin
