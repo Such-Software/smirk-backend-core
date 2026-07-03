@@ -38,6 +38,19 @@ fn looks_placeholder(s: &str) -> bool {
     PLACEHOLDERS.iter().any(|p| l.contains(p))
 }
 
+/// True if the URL's host is loopback (127.0.0.0/8, ::1, or `localhost`).
+/// Plaintext to a loopback processor is acceptable even in production: the hop
+/// never leaves the host (e.g. a payment processor reached over an SSH tunnel or
+/// a local reverse proxy), so the https requirement is relaxed for it.
+fn is_loopback_url(s: &str) -> bool {
+    match url::Url::parse(s).ok().and_then(|u| u.host().map(|h| h.to_owned())) {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
 /// Whether `s` is a positive decimal literal — digits with at most one dot and
 /// at least one non-zero digit (`"0.01"`, `"1"`, `"10.5"` yes; `"0"`, `"0.00"`,
 /// `"-1"`, `"1e5"`, `""` no). Validates a price without pulling in float math.
@@ -1000,8 +1013,10 @@ impl Config {
             }
             let url = url::Url::parse(&p.provider_url)
                 .map_err(|_| cfg_err("PAYMENT_PROVIDER_URL must be an absolute URL"))?;
-            if prod && url.scheme() != "https" {
-                return Err(cfg_err("PAYMENT_PROVIDER_URL must be https in production"));
+            if prod && url.scheme() != "https" && !is_loopback_url(&p.provider_url) {
+                return Err(cfg_err(
+                    "PAYMENT_PROVIDER_URL must be https in production (loopback exempt)",
+                ));
             }
             if p.store_id.is_empty() {
                 return Err(cfg_err(
@@ -1118,9 +1133,9 @@ impl Config {
             if p.provider_url.trim().is_empty() {
                 return Err(cfg_err("PREMIUM_ENABLED needs PAYMENT_PROVIDER_URL"));
             }
-            if prod && !p.provider_url.starts_with("https://") {
+            if prod && !p.provider_url.starts_with("https://") && !is_loopback_url(&p.provider_url) {
                 return Err(cfg_err(
-                    "PAYMENT_PROVIDER_URL must be https:// in production",
+                    "PAYMENT_PROVIDER_URL must be https:// in production (loopback exempt)",
                 ));
             }
             if p.store_id.trim().is_empty() {
@@ -1679,6 +1694,16 @@ mod tests {
                 amount: "15".into(),
             },
         ];
+    }
+
+    #[test]
+    fn loopback_url_detection() {
+        assert!(is_loopback_url("http://127.0.0.1:8099"));
+        assert!(is_loopback_url("http://localhost:8000"));
+        assert!(is_loopback_url("http://[::1]:8099"));
+        assert!(!is_loopback_url("http://pay.example.org"));
+        assert!(!is_loopback_url("https://10.0.0.5"));
+        assert!(!is_loopback_url("not a url"));
     }
 
     #[test]
