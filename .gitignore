@@ -30,3 +30,6 @@ hs_ed25519_secret_key
 .idea/
 .vscode/
 *.swp
+
+# container cross-build output (glibc-compat binary for deploy)
+/target-deb/
