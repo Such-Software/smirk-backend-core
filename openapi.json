@@ -2100,6 +2100,17 @@
           "features": {
             "$ref": "#/components/schemas/FeatureCapabilities"
           },
+          "feed": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FeedCapability",
+                "description": "Public curated feed details; present only when `features.feed`."
+              }
+            ]
+          },
           "messaging": {
             "oneOf": [
               {
@@ -2401,9 +2412,14 @@
           "nostr_identity",
           "nostr_relay",
           "premium_relay",
+          "feed",
           "tips"
         ],
         "properties": {
+          "feed": {
+            "type": "boolean",
+            "description": "Public curated Nostr feed for this instance. See `feed`."
+          },
           "grin_relay": {
             "type": "boolean",
             "description": "Grin async slatepack relay mailbox."
@@ -2466,6 +2482,52 @@
             ],
             "format": "double",
             "description": "Estimated fee rate in sat/vB, or `null` if the server can't estimate."
+          }
+        }
+      },
+      "FeedCapability": {
+        "type": "object",
+        "description": "Public curated feed details (present only when `features.feed`). A read-only\nweb feed (e.g. `feed.<domain>`) reads from the relay and shows posts per the\noperator's curation knobs.",
+        "required": [
+          "relay_url",
+          "show_owner",
+          "show_premium",
+          "allowlist_npubs",
+          "extra_relays"
+        ],
+        "properties": {
+          "allowlist_npubs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Specific featured npubs to surface."
+          },
+          "extra_relays": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Extra relays to also pull the allowlisted authors from."
+          },
+          "owner_npub": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The operator's npub for owner filtering + display; `null` when unset."
+          },
+          "relay_url": {
+            "type": "string",
+            "description": "The relay the feed reads from (mirrors `messaging.relay_url`)."
+          },
+          "show_owner": {
+            "type": "boolean",
+            "description": "Include the operator's own posts."
+          },
+          "show_premium": {
+            "type": "boolean",
+            "description": "Include premium members' posts (all general notes on the gated relay)."
           }
         }
       },

@@ -49,6 +49,8 @@ pub struct FeatureCapabilities {
     pub nostr_relay: bool,
     /// Paid premium tier for general Nostr posting to the relay. See `premium`.
     pub premium_relay: bool,
+    /// Public curated Nostr feed for this instance. See `feed`.
+    pub feed: bool,
     /// Tipping (parked).
     pub tips: bool,
 }
@@ -86,6 +88,25 @@ pub struct PremiumCapability {
     pub plans: Vec<PremiumPlanInfo>,
     /// The relay premium posting targets (mirrors `messaging.relay_url`).
     pub relay_url: String,
+}
+
+/// Public curated feed details (present only when `features.feed`). A read-only
+/// web feed (e.g. `feed.<domain>`) reads from the relay and shows posts per the
+/// operator's curation knobs.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct FeedCapability {
+    /// The relay the feed reads from (mirrors `messaging.relay_url`).
+    pub relay_url: String,
+    /// Include the operator's own posts.
+    pub show_owner: bool,
+    /// Include premium members' posts (all general notes on the gated relay).
+    pub show_premium: bool,
+    /// The operator's npub for owner filtering + display; `null` when unset.
+    pub owner_npub: Option<String>,
+    /// Specific featured npubs to surface.
+    pub allowlist_npubs: Vec<String>,
+    /// Extra relays to also pull the allowlisted authors from.
+    pub extra_relays: Vec<String>,
 }
 
 /// This instance's wallet-restore (import) policy. The wallet uses it to adapt
@@ -142,6 +163,9 @@ pub struct CapabilitiesResponse {
     /// Premium tier details; present only when `features.premium_relay`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub premium: Option<PremiumCapability>,
+    /// Public curated feed details; present only when `features.feed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feed: Option<FeedCapability>,
 }
 
 /// Whether an enabled chain can actually be served (its infra secret/URL is
@@ -202,6 +226,7 @@ pub fn effective_capabilities(config: &Config) -> CapabilitiesResponse {
             // presence downgrade — never advertise a relay clients can't reach).
             nostr_relay: relay_advertised(config),
             premium_relay: premium_advertised(config),
+            feed: feed_advertised(config),
             tips: config.features.tips,
         },
         restore: RestoreCapability {
@@ -252,6 +277,17 @@ pub fn effective_capabilities(config: &Config) -> CapabilitiesResponse {
                 .collect(),
             relay_url: config.messaging.relay.advertised_url.clone(),
         }),
+        feed: feed_advertised(config).then(|| {
+            let f = &config.feed;
+            FeedCapability {
+                relay_url: config.messaging.relay.advertised_url.clone(),
+                show_owner: f.show_owner,
+                show_premium: f.show_premium,
+                owner_npub: (!f.owner_npub.is_empty()).then(|| f.owner_npub.clone()),
+                allowlist_npubs: f.allowlist_npubs.clone(),
+                extra_relays: f.extra_relays.clone(),
+            }
+        }),
     }
 }
 
@@ -266,6 +302,11 @@ fn relay_advertised(config: &Config) -> bool {
 /// (config validation already couples premium to relay + the premium-post policy).
 fn premium_advertised(config: &Config) -> bool {
     config.premium.enabled && relay_advertised(config)
+}
+
+/// Whether the public feed is enabled AND the relay it reads is advertised.
+fn feed_advertised(config: &Config) -> bool {
+    config.feed.enabled && relay_advertised(config)
 }
 
 /// Describe this instance's enabled chains and features.

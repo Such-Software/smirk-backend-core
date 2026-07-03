@@ -165,6 +165,7 @@ pub struct Config {
     pub registration: RegistrationConfig,
     pub messaging: MessagingConfig,
     pub premium: PremiumConfig,
+    pub feed: FeedConfig,
 }
 
 #[derive(Clone)]
@@ -602,6 +603,26 @@ pub struct RelayConfig {
     pub retention_days: u32,
 }
 
+/// Public curated feed (`feed.<domain>`) — an operator knob for what the
+/// read-only web feed shows. It reads from the relay, so it requires
+/// `RELAY_ENABLED`. All public display config, no secrets.
+#[derive(Clone)]
+pub struct FeedConfig {
+    /// Master switch — advertise a curated public feed for this instance.
+    pub enabled: bool,
+    /// Include the operator's own posts.
+    pub show_owner: bool,
+    /// Include premium members' posts (all general notes on the gated relay).
+    pub show_premium: bool,
+    /// The operator's npub (hex or `npub1…`) for owner filtering + display;
+    /// empty when unset.
+    pub owner_npub: String,
+    /// Specific featured npubs to surface (hex or `npub1…`).
+    pub allowlist_npubs: Vec<String>,
+    /// Extra relays to also pull the allowlisted authors from.
+    pub extra_relays: Vec<String>,
+}
+
 impl Config {
     /// Load configuration from the environment and validate it (fail-closed).
     pub fn from_env() -> Result<Self, AppError> {
@@ -804,6 +825,14 @@ impl Config {
                 enabled: env_bool("PREMIUM_ENABLED", false),
                 currency: env_or("PREMIUM_CURRENCY", "").to_uppercase(),
                 plans: parse_premium_plans(&env_or("PREMIUM_PLANS", "")),
+            },
+            feed: FeedConfig {
+                enabled: env_bool("FEED_ENABLED", false),
+                show_owner: env_bool("FEED_SHOW_OWNER", true),
+                show_premium: env_bool("FEED_SHOW_PREMIUM", true),
+                owner_npub: env_or("FEED_OWNER_NPUB", "").trim().to_string(),
+                allowlist_npubs: env_list("FEED_ALLOWLIST_NPUBS"),
+                extra_relays: env_list("FEED_EXTRA_RELAYS"),
             },
         };
 
@@ -1122,6 +1151,13 @@ impl Config {
         // Premium tier reuses the registration PaymentProvider for invoicing, so
         // the processor credentials must be present, the relay must be on with the
         // premium-post policy, and there must be at least one priced plan.
+        // The public feed reads from the relay, so it needs the relay enabled.
+        if self.feed.enabled && !self.messaging.relay.enabled {
+            return Err(cfg_err(
+                "FEED_ENABLED needs RELAY_ENABLED=true (the feed reads posts from the relay)",
+            ));
+        }
+
         if self.premium.enabled {
             let p = &self.registration.payment;
             if !matches!(p.provider.as_str(), "btcpay") {
@@ -1349,6 +1385,14 @@ mod tests {
                 enabled: false,
                 currency: String::new(),
                 plans: Vec::new(),
+            },
+            feed: FeedConfig {
+                enabled: false,
+                show_owner: true,
+                show_premium: true,
+                owner_npub: String::new(),
+                allowlist_npubs: Vec::new(),
+                extra_relays: Vec::new(),
             },
         }
     }
@@ -1668,6 +1712,16 @@ mod tests {
     #[test]
     fn relay_enabled_full_config_passes() {
         let mut c = valid();
+        c.messaging.relay = valid_relay();
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn feed_requires_relay_enabled() {
+        // FEED_ENABLED without the relay it reads from is a fail-closed misconfig.
+        let mut c = valid();
+        c.feed.enabled = true;
+        assert!(c.validate().is_err());
         c.messaging.relay = valid_relay();
         assert!(c.validate().is_ok());
     }

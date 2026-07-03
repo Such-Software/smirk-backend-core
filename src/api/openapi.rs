@@ -77,6 +77,7 @@ use utoipa::OpenApi;
         crate::api::capabilities::MessagingCapability,
         crate::api::capabilities::PremiumCapability,
         crate::api::capabilities::PremiumPlanInfo,
+        crate::api::capabilities::FeedCapability,
         crate::api::prices::PricesResponse,
         crate::api::auth::AuthResponse,
         crate::api::auth::UserInfo,
