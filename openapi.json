@@ -2469,6 +2469,7 @@
           "grin_relay",
           "prices",
           "nostr_identity",
+          "nostr_native_auth",
           "nostr_relay",
           "premium_relay",
           "feed",
@@ -2486,6 +2487,10 @@
           "nostr_identity": {
             "type": "boolean",
             "description": "Nostr-native identity (NIP-98 login/link, NIP-05 directory)."
+          },
+          "nostr_native_auth": {
+            "type": "boolean",
+            "description": "npub-native registration: a wallet can register + authenticate from its\nseed-derived Nostr key alone (POST /auth/nostr/register), no BTC signature.\nThe wallet uses this to choose the NIP-98 bootstrap over the legacy BTC one."
           },
           "nostr_relay": {
             "type": "boolean",

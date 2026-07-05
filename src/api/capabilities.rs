@@ -45,6 +45,10 @@ pub struct FeatureCapabilities {
     pub prices: bool,
     /// Nostr-native identity (NIP-98 login/link, NIP-05 directory).
     pub nostr_identity: bool,
+    /// npub-native registration: a wallet can register + authenticate from its
+    /// seed-derived Nostr key alone (POST /auth/nostr/register), no BTC signature.
+    /// The wallet uses this to choose the NIP-98 bootstrap over the legacy BTC one.
+    pub nostr_native_auth: bool,
     /// First-party Nostr relay (encrypted DM inbox). See `messaging` for details.
     pub nostr_relay: bool,
     /// Paid premium tier for general Nostr posting to the relay. See `premium`.
@@ -226,6 +230,9 @@ pub fn effective_capabilities(config: &Config) -> CapabilitiesResponse {
             prices: config.features.prices,
             // Nostr identity needs the canonical PUBLIC_API_URL.
             nostr_identity: config.features.nostr_identity
+                && config.identity.public_api_url.is_some(),
+            // npub-native register shares the same NIP-98 infra requirement.
+            nostr_native_auth: config.features.nostr_identity
                 && config.identity.public_api_url.is_some(),
             // Relay advertised only when enabled AND a URL is configured (config
             // presence downgrade — never advertise a relay clients can't reach).
