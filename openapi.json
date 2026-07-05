@@ -269,6 +269,65 @@
         ]
       }
     },
+    "/auth/nostr/register": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "npub-native registration. Verifies a NIP-98 signed-action over a server nonce,\nre-runs the abuse gates keyed on the npub (a create path must not bypass the\nPoW/invite/payment gates that `/auth/extension` enforces), then get-or-creates\nby npub with a `seed_fingerprint` MERGE so a wallet that already has a row\n(BTC-anchored, or previously linked) is never split into two identities.",
+        "description": "SECURITY NOTE: the proof binds an EMPTY-body descriptor (the same contract as\n`/auth/nostr/link`), so replay is prevented by the single-use nonce and npub\ncontrol is proven, but the chain `keys` are TLS-bound rather than\nproof-bound. Binding the key list into the signed payload is a documented\nhardening follow-up (defends a TLS-breaking active MITM swapping the keys).",
+        "operationId": "nostr_register",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NostrRegisterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Wallet registered or authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid proof or nonce"
+          },
+          "409": {
+            "description": "Seed already registered under a different Nostr identity"
+          }
+        }
+      }
+    },
+    "/auth/nostr/register-challenge": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Issue a single-use nonce for npub-native registration. UNAUTHENTICATED: no\nuser exists yet, so (unlike the link challenge) the nonce is subject-less; the\nregister signed-action binds it purely as replay protection.",
+        "operationId": "nostr_register_challenge",
+        "responses": {
+          "200": {
+            "description": "Single-use register nonce",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NostrLinkChallengeResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/auth/payment-invoice": {
       "post": {
         "tags": [
@@ -3085,6 +3144,81 @@
           "nostr_pubkey": {
             "type": "string",
             "description": "The linked x-only Nostr pubkey (hex)."
+          }
+        }
+      },
+      "NostrRegisterRequest": {
+        "type": "object",
+        "description": "Register (or resolve) a wallet keyed by its **Nostr identity**: the\nself-sovereign, npub-native create path. Unlike [`nostr_login`] (create-never)\nand [`nostr_link`] (needs a prior BTC-authed JWT), this MINTS a user from the\nnpub alone: no BTC signature is ever required. The npub is the identity anchor;\nthe chain `keys` still ship (for tip addresses + restore) but are NOT the auth\nproof.",
+        "required": [
+          "nostr_token",
+          "nonce",
+          "keys"
+        ],
+        "properties": {
+          "altcha_solution": {
+            "type": "object"
+          },
+          "invite_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AssetPublicKey"
+            },
+            "description": "Chain public keys (for tip addresses + restore). A `btc` key is expected\nfor pay-to-register invoice binding, but it is no longer the identity."
+          },
+          "nonce": {
+            "type": "string",
+            "description": "The server-issued single-use nonce (from `/auth/nostr/register-challenge`)."
+          },
+          "nostr_token": {
+            "type": "string",
+            "description": "`Nostr <base64(event)>` signed-action token proving control of the npub AND\nbinding the server nonce + the `nostr_register` purpose."
+          },
+          "payment_invoice_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "seed_fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "wallet_birthday": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Wallet creation time (unix seconds), to bound chain scans."
+          },
+          "wow_start_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "xmr_start_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
           }
         }
       },

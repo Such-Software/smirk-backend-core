@@ -1520,6 +1520,191 @@ pub async fn nostr_link(
     }))
 }
 
+// ── GET /auth/nostr/register-challenge (issue the register nonce) ─────────────
+
+/// Issue a single-use nonce for npub-native registration. UNAUTHENTICATED: no
+/// user exists yet, so (unlike the link challenge) the nonce is subject-less; the
+/// register signed-action binds it purely as replay protection.
+#[utoipa::path(
+    get,
+    path = "/auth/nostr/register-challenge",
+    responses((status = 200, description = "Single-use register nonce", body = NostrLinkChallengeResponse)),
+    tag = "auth"
+)]
+#[instrument(skip(state))]
+pub async fn nostr_register_challenge(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<NostrLinkChallengeResponse>, AppError> {
+    let nonce = state
+        .db
+        .issue_challenge("nostr_register", None, NOSTR_LINK_NONCE_TTL_SECS)
+        .await?;
+    Ok(Json(NostrLinkChallengeResponse { nonce }))
+}
+
+// ── POST /auth/nostr/register (npub-native create) ───────────────────────────
+
+/// Register (or resolve) a wallet keyed by its **Nostr identity**: the
+/// self-sovereign, npub-native create path. Unlike [`nostr_login`] (create-never)
+/// and [`nostr_link`] (needs a prior BTC-authed JWT), this MINTS a user from the
+/// npub alone: no BTC signature is ever required. The npub is the identity anchor;
+/// the chain `keys` still ship (for tip addresses + restore) but are NOT the auth
+/// proof.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct NostrRegisterRequest {
+    /// `Nostr <base64(event)>` signed-action token proving control of the npub AND
+    /// binding the server nonce + the `nostr_register` purpose.
+    pub nostr_token: String,
+    /// The server-issued single-use nonce (from `/auth/nostr/register-challenge`).
+    pub nonce: String,
+    /// Chain public keys (for tip addresses + restore). A `btc` key is expected
+    /// for pay-to-register invoice binding, but it is no longer the identity.
+    pub keys: Vec<AssetPublicKey>,
+    pub username: Option<String>,
+    /// Wallet creation time (unix seconds), to bound chain scans.
+    pub wallet_birthday: Option<i64>,
+    pub seed_fingerprint: Option<String>,
+    pub xmr_start_height: Option<i64>,
+    pub wow_start_height: Option<i64>,
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    pub altcha_solution: Option<altcha::Payload>,
+    #[serde(default)]
+    pub invite_code: Option<String>,
+    #[serde(default)]
+    pub payment_invoice_id: Option<String>,
+}
+
+/// npub-native registration. Verifies a NIP-98 signed-action over a server nonce,
+/// re-runs the abuse gates keyed on the npub (a create path must not bypass the
+/// PoW/invite/payment gates that `/auth/extension` enforces), then get-or-creates
+/// by npub with a `seed_fingerprint` MERGE so a wallet that already has a row
+/// (BTC-anchored, or previously linked) is never split into two identities.
+///
+/// SECURITY NOTE: the proof binds an EMPTY-body descriptor (the same contract as
+/// `/auth/nostr/link`), so replay is prevented by the single-use nonce and npub
+/// control is proven, but the chain `keys` are TLS-bound rather than
+/// proof-bound. Binding the key list into the signed payload is a documented
+/// hardening follow-up (defends a TLS-breaking active MITM swapping the keys).
+#[utoipa::path(
+    post,
+    path = "/auth/nostr/register",
+    request_body = NostrRegisterRequest,
+    responses(
+        (status = 200, description = "Wallet registered or authenticated", body = AuthResponse),
+        (status = 401, description = "Invalid proof or nonce"),
+        (status = 409, description = "Seed already registered under a different Nostr identity")
+    ),
+    tag = "auth"
+)]
+#[instrument(skip(state, headers, req, peer))]
+pub async fn nostr_register(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<NostrRegisterRequest>,
+) -> Result<Json<AuthResponse>, AppError> {
+    let ip = client_ip(&state, &headers, peer);
+    if let Some(ref username) = req.username {
+        validate_username(username)?;
+    }
+
+    // 1. Atomically consume the subject-less register nonce (single-use replay
+    //    guard). Consume BEFORE proof verification so a failed proof burns it.
+    let _consumed = state
+        .db
+        .consume_challenge(&req.nonce, "nostr_register")
+        .await?
+        .ok_or_else(|| AppError::AuthError("Invalid or expired nonce".into()))?;
+
+    // 2. Prove npub control + bind the nonce/purpose. Empty-body descriptor
+    //    contract (mirrors /auth/nostr/link). The verifier lowercases the pubkey.
+    let url = nip98_url(&state, "/auth/nostr/register")?;
+    let descriptor = request_descriptor("POST", "/api/v1/auth/nostr/register", "", b"");
+    let payload_sha256 = descriptor_sha256(&descriptor);
+    let pubkey = verify_signed_action(
+        &req.nostr_token,
+        &url,
+        "POST",
+        "nostr_register",
+        &req.nonce,
+        &payload_sha256,
+        None,
+        None,
+        Utc::now().timestamp(),
+        NIP98_ACTION_MAX_AGE_SECS,
+    )
+    .map_err(|_| AppError::AuthError("Invalid Nostr proof".into()))?;
+
+    // 3. Returning npub bypasses the abuse gates, exactly like a returning
+    //    pubkey_hash on the BTC path.
+    let returning = state.db.find_user_by_nostr_pubkey(&pubkey).await?.is_some();
+
+    // 4. Re-run the abuse gates on the npub path; a user-minting endpoint must
+    //    not be a gate bypass. PoW keys on the npub (the per-pubkey allowlist is
+    //    BTC-only, so only the GLOBAL requirement applies here). Pay-to-register
+    //    invoices bind to sha256(btc pubkey), so the payment check still uses the
+    //    BTC key carried in `keys` even though it is no longer the identity.
+    enforce_pow(&state, &pubkey, returning, req.altcha_solution.as_ref())?;
+    let btc_hash = req
+        .keys
+        .iter()
+        .find(|k| k.asset.eq_ignore_ascii_case("btc"))
+        .map(|k| hash_public_key(&k.public_key));
+    enforce_method_gates(
+        &state,
+        returning,
+        btc_hash.as_deref().unwrap_or(&pubkey),
+        req.invite_code.as_deref(),
+        req.payment_invoice_id.as_deref(),
+    )
+    .await?;
+
+    // 5. Get-or-create by npub (seed_fingerprint MERGE dedup inside).
+    let wallet_birthday = req
+        .wallet_birthday
+        .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
+    let user = state
+        .db
+        .get_or_create_user_by_nostr_pubkey(
+            &pubkey,
+            req.username.clone(),
+            wallet_birthday,
+            req.seed_fingerprint.clone(),
+            req.xmr_start_height,
+            req.wow_start_height,
+        )
+        .await?;
+
+    // 6. Session.
+    let pair = issue_session(
+        &state,
+        user.id,
+        Platform::Nostr,
+        "Nostr",
+        Some(IpNetwork::from(ip)),
+    )
+    .await?;
+    let _ = state
+        .db
+        .record_login_event(
+            Some(user.id),
+            "nostr",
+            Platform::Nostr.as_str(),
+            None,
+            Some(&ip.to_string()),
+        )
+        .await;
+    info!(user_id = %user.id, is_new = %!returning, "npub-native register/auth (NIP-98)");
+    Ok(Json(AuthResponse {
+        access_token: pair.access_token,
+        refresh_token: pair.refresh_token,
+        expires_in: pair.expires_in,
+        user: user_info(&user),
+        is_new: !returning,
+    }))
+}
+
 // ── router ───────────────────────────────────────────────────────────────────
 
 /// Auth routes, RELATIVE to the `/api/v1` mount point. The application is
@@ -1536,6 +1721,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/auth/logout", post(logout))
         .route("/auth/me", get(get_me))
         .route("/auth/nostr", post(nostr_login))
+        .route("/auth/nostr/register-challenge", get(nostr_register_challenge))
+        .route("/auth/nostr/register", post(nostr_register))
         .route("/auth/nostr/link-challenge", get(nostr_link_challenge))
         .route("/auth/nostr/link", post(nostr_link))
 }

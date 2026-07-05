@@ -293,6 +293,150 @@ impl Database {
         .await
     }
 
+    /// Get-or-create a user keyed by their **Nostr pubkey**: the npub-native
+    /// registration path for the self-sovereign backend (no BTC signature).
+    /// `nostr_pubkey` is lowercase x-only hex, stored RAW (public, never peppered,
+    /// mirroring [`find_user_by_nostr_pubkey`]).
+    ///
+    /// DEDUP is load-bearing: a wallet may already have a row from the BTC path or
+    /// a prior link, joined only by `seed_fingerprint` (derivation-independent). A
+    /// naive insert would collide on the `seed_fingerprint` UNIQUE and split one
+    /// wallet into two identities. So, in order:
+    ///   1. npub already known -> that user (COALESCE-backfill the optional fields).
+    ///   2. else `seed_fingerprint` matches an existing row -> MERGE: backfill the
+    ///      npub onto THAT row. If the row already carries a DIFFERENT npub the
+    ///      wallet is already registered under another identity -> fail closed.
+    ///   3. else create a fresh npub-keyed row (`pubkey_hash` NULL).
+    #[instrument(skip(self))]
+    pub async fn get_or_create_user_by_nostr_pubkey(
+        &self,
+        nostr_pubkey: &str,
+        username: Option<String>,
+        wallet_birthday: Option<chrono::DateTime<chrono::Utc>>,
+        seed_fingerprint: Option<String>,
+        xmr_start_height: Option<i64>,
+        wow_start_height: Option<i64>,
+    ) -> Result<User, AppError> {
+        // 1. Known npub -> that user, backfilling any newly-supplied optionals.
+        if let Some(existing) = self.find_user_by_nostr_pubkey(nostr_pubkey).await? {
+            return self
+                .backfill_optionals(
+                    existing,
+                    wallet_birthday,
+                    seed_fingerprint,
+                    xmr_start_height,
+                    wow_start_height,
+                )
+                .await;
+        }
+
+        // 2. DEDUP: same seed already has a row (BTC-anchored or link-less) -> MERGE
+        //    the npub onto it rather than split the identity.
+        if let Some(fp) = seed_fingerprint.as_deref() {
+            if let Some(existing) = self.get_user_by_seed_fingerprint(fp).await? {
+                match existing.nostr_pubkey.as_deref() {
+                    Some(pk) if pk == nostr_pubkey => {
+                        // Row already carries this npub (find-by-npub missed only if
+                        // the columns disagree) so treat as the known user.
+                        return self
+                            .backfill_optionals(
+                                existing,
+                                wallet_birthday,
+                                None,
+                                xmr_start_height,
+                                wow_start_height,
+                            )
+                            .await;
+                    }
+                    Some(_) => {
+                        // Same seed, different npub on file (e.g. a rotation): do not
+                        // silently re-point on an unauthenticated register.
+                        return Err(AppError::Conflict(
+                            "This wallet is already registered under a different Nostr identity. Sign in instead."
+                                .into(),
+                        ));
+                    }
+                    None => {
+                        let sql = format!(
+                            "UPDATE users SET \
+                               nostr_pubkey     = $2, \
+                               wallet_birthday  = COALESCE(wallet_birthday, $3), \
+                               xmr_start_height = COALESCE(xmr_start_height, $4), \
+                               wow_start_height = COALESCE(wow_start_height, $5), \
+                               updated_at = NOW() \
+                             WHERE id = $1 RETURNING {USER_COLS}"
+                        );
+                        let updated = sqlx::query_as::<_, User>(&sql)
+                            .bind(existing.id)
+                            .bind(nostr_pubkey)
+                            .bind(wallet_birthday)
+                            .bind(xmr_start_height)
+                            .bind(wow_start_height)
+                            .fetch_one(self.pool())
+                            .await
+                            .map_err(unique_violation_as(
+                                "This Nostr identity is already linked to another account",
+                            ))?;
+                        return Ok(updated);
+                    }
+                }
+            }
+        }
+
+        // 3. Fresh npub-keyed identity (no BTC anchor).
+        self.create_user(NewUser {
+            username,
+            pubkey_hash: None,
+            nostr_pubkey: Some(nostr_pubkey.to_string()),
+            wallet_birthday,
+            seed_fingerprint,
+            xmr_start_height,
+            wow_start_height,
+        })
+        .await
+    }
+
+    /// COALESCE-backfill only the NULL optional fields on an existing user row,
+    /// returning it unchanged when nothing is newly supplied. Shared by the
+    /// BTC and npub get-or-create paths.
+    async fn backfill_optionals(
+        &self,
+        existing: User,
+        wallet_birthday: Option<chrono::DateTime<chrono::Utc>>,
+        seed_fingerprint: Option<String>,
+        xmr_start_height: Option<i64>,
+        wow_start_height: Option<i64>,
+    ) -> Result<User, AppError> {
+        let needs = existing.wallet_birthday.is_none() && wallet_birthday.is_some()
+            || existing.seed_fingerprint.is_none() && seed_fingerprint.is_some()
+            || existing.xmr_start_height.is_none() && xmr_start_height.is_some()
+            || existing.wow_start_height.is_none() && wow_start_height.is_some();
+        if !needs {
+            return Ok(existing);
+        }
+        let peppered_fp = seed_fingerprint
+            .as_deref()
+            .map(|v| self.pepper("seed_fingerprint", v));
+        let sql = format!(
+            "UPDATE users SET \
+               wallet_birthday  = COALESCE(wallet_birthday, $2), \
+               seed_fingerprint = COALESCE(seed_fingerprint, $3), \
+               xmr_start_height = COALESCE(xmr_start_height, $4), \
+               wow_start_height = COALESCE(wow_start_height, $5), \
+               updated_at = NOW() \
+             WHERE id = $1 RETURNING {USER_COLS}"
+        );
+        let updated = sqlx::query_as::<_, User>(&sql)
+            .bind(existing.id)
+            .bind(wallet_birthday)
+            .bind(peppered_fp)
+            .bind(xmr_start_height)
+            .bind(wow_start_height)
+            .fetch_one(self.pool())
+            .await?;
+        Ok(updated)
+    }
+
     /// Update a user's username. UNIQUE collision -> 409 CONFLICT.
     #[instrument(skip(self))]
     pub async fn update_username(
@@ -325,13 +469,15 @@ impl Database {
         Ok(())
     }
 
-    /// Count registered wallets (users with a pubkey_hash).
+    /// Count registered wallets. A wallet is anchored by EITHER a BTC pubkey_hash
+    /// (legacy/BTC path) OR a nostr_pubkey (npub-native path), so count both; an
+    /// npub-only user is still a registered wallet.
     #[instrument(skip(self))]
     pub async fn get_user_count(&self) -> Result<i64, AppError> {
-        Ok(
-            sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE pubkey_hash IS NOT NULL")
-                .fetch_one(self.pool())
-                .await?,
+        Ok(sqlx::query_scalar(
+            "SELECT COUNT(*) FROM users WHERE pubkey_hash IS NOT NULL OR nostr_pubkey IS NOT NULL",
         )
+        .fetch_one(self.pool())
+        .await?)
     }
 }
