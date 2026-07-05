@@ -143,6 +143,11 @@ pub struct RegistrationCapability {
     /// so the wallet can show "registration costs X" before minting an invoice.
     pub payment_amount: Option<String>,
     pub payment_currency: Option<String>,
+    /// How the enabled gates combine: `"all"` (satisfy every gate; the default)
+    /// or `"any"` (the gates are alternatives; satisfy one). PoW is orthogonal
+    /// and applies regardless. The wallet routes onboarding on this: multiple
+    /// gates + `"any"` => "pick a method" buttons; `"all"` => satisfy each.
+    pub registration_mode: String,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -253,6 +258,7 @@ pub fn effective_capabilities(config: &Config) -> CapabilitiesResponse {
                 .payment
                 .require_payment
                 .then(|| config.registration.payment.currency.clone()),
+            registration_mode: config.registration.gate_mode.as_str().to_string(),
         },
         messaging: relay_advertised(config).then(|| {
             let r = &config.messaging.relay;

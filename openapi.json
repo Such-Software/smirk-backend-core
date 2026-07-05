@@ -3414,7 +3414,8 @@
         "required": [
           "invite_required",
           "pow_required",
-          "payment_required"
+          "payment_required",
+          "registration_mode"
         ],
         "properties": {
           "invite_required": {
@@ -3441,6 +3442,10 @@
           "pow_required": {
             "type": "boolean",
             "description": "A proof-of-work solution is required to register."
+          },
+          "registration_mode": {
+            "type": "string",
+            "description": "How the enabled gates combine: `\"all\"` (satisfy every gate; the default)\nor `\"any\"` (the gates are alternatives; satisfy one). PoW is orthogonal\nand applies regardless. The wallet routes onboarding on this: multiple\ngates + `\"any\"` => \"pick a method\" buttons; `\"all\"` => satisfy each."
           }
         }
       },

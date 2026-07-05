@@ -483,11 +483,13 @@ pub async fn extension_register(
         returning_by_pubkey,
         req.altcha_solution.as_ref(),
     )?;
-    enforce_invite(&state, returning_by_pubkey, req.invite_code.as_deref()).await?;
-    enforce_payment(
+    // Invite + payment gates, composed per the operator's gate mode (`all` =
+    // every enabled gate; `any` = one-of). PoW above is orthogonal to both.
+    enforce_method_gates(
         &state,
         returning_by_pubkey,
         &pubkey_hash,
+        req.invite_code.as_deref(),
         req.payment_invoice_id.as_deref(),
     )
     .await?;
@@ -608,6 +610,117 @@ fn enforce_pow(
         }
     }
     Ok(())
+}
+
+/// Compose the invite + payment gates per the operator's gate mode. PoW is
+/// enforced separately (orthogonal) and always applies on top. Returning wallets
+/// and self-hosting (both gates off) pass trivially.
+///
+/// - `All` (default): every ENABLED gate must pass, each consuming its own token
+///   — the historical conjunctive behavior (invite AND payment when both on).
+/// - `Any`: the enabled gates are ALTERNATIVES. With a single gate on it is just
+///   that gate. With BOTH on, the client presents exactly ONE method's credential
+///   and only that gate runs (and only it consumes its single-use token).
+///   Presenting BOTH is rejected outright — a one-of choice must never burn two
+///   tokens (an invite AND a paid invoice) in a single request.
+///
+/// Dispatching to a single gate's own `enforce_*` preserves its exact errors,
+/// including the payment "not yet confirmed" literal the client polls on.
+async fn enforce_method_gates(
+    state: &AppState,
+    returning: bool,
+    pubkey_hash: &str,
+    invite_code: Option<&str>,
+    payment_invoice_id: Option<&str>,
+) -> Result<(), AppError> {
+    if returning {
+        return Ok(());
+    }
+    let has_invite = invite_code.map(str::trim).is_some_and(|c| !c.is_empty());
+    let has_payment = payment_invoice_id
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+
+    match plan_gates(
+        state.config.registration.gate_mode,
+        state.config.registration.require_invite,
+        state.config.registration.payment.require_payment,
+        has_invite,
+        has_payment,
+    ) {
+        GatePlan::Open => Ok(()),
+        // Conjunction: run both (each self-disables when its own flag is off).
+        GatePlan::All => {
+            enforce_invite(state, returning, invite_code).await?;
+            enforce_payment(state, returning, pubkey_hash, payment_invoice_id).await?;
+            Ok(())
+        }
+        // Exactly ONE gate runs (and only it consumes its single-use token),
+        // preserving that gate's own error literals.
+        GatePlan::Invite => enforce_invite(state, returning, invite_code).await,
+        GatePlan::Payment => {
+            enforce_payment(state, returning, pubkey_hash, payment_invoice_id).await
+        }
+        GatePlan::RejectBothPresented => Err(AppError::ValidationError(
+            "Present exactly one registration method, not both.".into(),
+        )),
+        GatePlan::RequireOne => Err(AppError::ValidationError(
+            "Registration on this instance requires an invite code or a settled payment. \
+             Choose one and retry."
+                .into(),
+        )),
+    }
+}
+
+/// What to do about the invite + payment gates for a NEW wallet. The pure
+/// decision (no db / async), extracted so the fund-critical one-of dispatch is
+/// unit-testable. PoW is handled separately (orthogonal).
+#[derive(Debug, PartialEq, Eq)]
+enum GatePlan {
+    /// No enabled gates — accept (PoW aside).
+    Open,
+    /// Conjunction: every enabled gate must pass (`all` mode).
+    All,
+    /// Run only the invite gate.
+    Invite,
+    /// Run only the payment gate.
+    Payment,
+    /// `any` mode, both gates enabled, and the client presented BOTH credentials
+    /// — reject rather than risk burning two single-use tokens.
+    RejectBothPresented,
+    /// `any` mode, both gates enabled, but no usable credential presented.
+    RequireOne,
+}
+
+fn plan_gates(
+    mode: crate::config::GateMode,
+    require_invite: bool,
+    require_payment: bool,
+    has_invite: bool,
+    has_payment: bool,
+) -> GatePlan {
+    if !require_invite && !require_payment {
+        return GatePlan::Open;
+    }
+    match mode {
+        crate::config::GateMode::All => GatePlan::All,
+        crate::config::GateMode::Any => {
+            // A single enabled gate under `any` is just that gate.
+            if require_invite && !require_payment {
+                return GatePlan::Invite;
+            }
+            if require_payment && !require_invite {
+                return GatePlan::Payment;
+            }
+            // Both enabled => one-of, dispatched by the presented credential.
+            match (has_invite, has_payment) {
+                (true, true) => GatePlan::RejectBothPresented,
+                (true, false) => GatePlan::Invite,
+                (false, true) => GatePlan::Payment,
+                (false, false) => GatePlan::RequireOne,
+            }
+        }
+    }
 }
 
 /// Invite-code registration gate. A genuinely new wallet must present a valid,
@@ -1455,6 +1568,58 @@ mod tests {
         assert_eq!(a, hash_public_key("deadbeef"));
         assert_eq!(a.len(), 64);
         assert_ne!(a, hash_public_key("deadbee0"));
+    }
+
+    // ── registration gate composition (plan_gates) ─────────────────────────
+    // The pure one-of / conjunction dispatch. Money-safety hinges on `any`
+    // mode never planning to run (and thus consume) more than one token.
+    mod gate_plan {
+        use super::super::{plan_gates, GatePlan};
+        use crate::config::GateMode::{All, Any};
+
+        #[test]
+        fn no_gates_enabled_is_open_in_either_mode() {
+            assert_eq!(plan_gates(All, false, false, false, false), GatePlan::Open);
+            assert_eq!(plan_gates(Any, false, false, true, true), GatePlan::Open);
+        }
+
+        #[test]
+        fn all_mode_is_conjunction_regardless_of_presented_creds() {
+            // Both enabled -> All (run both). Single enabled -> still All (the
+            // off gate self-disables inside enforce_*).
+            assert_eq!(plan_gates(All, true, true, false, false), GatePlan::All);
+            assert_eq!(plan_gates(All, true, false, false, false), GatePlan::All);
+            assert_eq!(plan_gates(All, false, true, true, true), GatePlan::All);
+        }
+
+        #[test]
+        fn any_mode_single_gate_is_just_that_gate() {
+            assert_eq!(plan_gates(Any, true, false, false, false), GatePlan::Invite);
+            assert_eq!(plan_gates(Any, false, true, false, false), GatePlan::Payment);
+        }
+
+        #[test]
+        fn any_mode_both_enabled_dispatches_on_presented_credential() {
+            assert_eq!(plan_gates(Any, true, true, true, false), GatePlan::Invite);
+            assert_eq!(plan_gates(Any, true, true, false, true), GatePlan::Payment);
+        }
+
+        #[test]
+        fn any_mode_rejects_both_credentials_to_avoid_double_consume() {
+            // The load-bearing money-safety case: never plan to burn two tokens.
+            assert_eq!(
+                plan_gates(Any, true, true, true, true),
+                GatePlan::RejectBothPresented
+            );
+        }
+
+        #[test]
+        fn any_mode_both_enabled_no_credential_requires_one() {
+            assert_eq!(
+                plan_gates(Any, true, true, false, false),
+                GatePlan::RequireOne
+            );
+        }
     }
 
     /// Wire-shape regression: the extension request must accept the wrapped

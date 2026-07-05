@@ -481,6 +481,41 @@ impl RestoreConfig {
     }
 }
 
+/// How the composable registration gates (invite / payment) combine. PoW is
+/// orthogonal and always applies on top, regardless of mode.
+///
+/// - `All` (default): a new wallet must satisfy EVERY enabled gate (conjunction)
+///   — the historical behavior.
+/// - `Any`: the enabled gates are ALTERNATIVES; the wallet satisfies exactly ONE
+///   (the client presents that one method's credential). Lets an operator offer
+///   e.g. "invite code OR pay to register."
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum GateMode {
+    #[default]
+    All,
+    Any,
+}
+
+impl GateMode {
+    /// Wire string advertised via `/capabilities` and parsed from env.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GateMode::All => "all",
+            GateMode::Any => "any",
+        }
+    }
+
+    /// Parse the operator's `REGISTRATION_GATE_MODE`. Anything other than a
+    /// case-insensitive `any` is the safe default (`all` — conjunction).
+    pub fn from_env_str(s: &str) -> Self {
+        if s.eq_ignore_ascii_case("any") {
+            GateMode::Any
+        } else {
+            GateMode::All
+        }
+    }
+}
+
 /// Registration gates beyond PoW — composable, operator-configured, advertised
 /// via `/capabilities`. Each is a gate the wallet must satisfy to create a NEW
 /// identity; returning wallets bypass them, and self-hosting bypasses all of
@@ -492,6 +527,9 @@ pub struct RegistrationConfig {
     /// Pay-to-register gate (settle an invoice on an external, non-custodial
     /// processor before a new wallet is granted).
     pub payment: PaymentConfig,
+    /// How enabled gates combine (`All` = every gate; `Any` = one-of). PoW is
+    /// orthogonal and applies regardless.
+    pub gate_mode: GateMode,
 }
 
 /// Pay-to-register gate. When `require_payment` is on, a NEW wallet must present
@@ -807,6 +845,7 @@ impl Config {
                     confirmations: env_parse("PAYMENT_CONFIRMATIONS", 1u32)?,
                     expires_minutes: env_parse("PAYMENT_EXPIRES_MINUTES", 60u32)?,
                 },
+                gate_mode: GateMode::from_env_str(&env_or("REGISTRATION_GATE_MODE", "all")),
             },
             messaging: MessagingConfig {
                 relay: RelayConfig {
@@ -1367,6 +1406,7 @@ mod tests {
                     confirmations: 1,
                     expires_minutes: 60,
                 },
+                gate_mode: GateMode::All,
             },
             messaging: MessagingConfig {
                 relay: RelayConfig {
