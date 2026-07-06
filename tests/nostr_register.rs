@@ -1,7 +1,9 @@
 //! L1 integration: npub-native registration (`POST /auth/nostr/register`) — the
-//! create-by-npub path (no BTC signature) and the `seed_fingerprint` MERGE dedup
-//! that must never split one wallet into two identities. Skips without
-//! `TEST_DATABASE_URL` (see `common`).
+//! create-by-npub path (no BTC signature) and the `seed_fingerprint` handling.
+//! A fingerprint match onto a pre-existing row is REFUSED: the endpoint
+//! proves only npub control, so it must not bind an npub onto an account keyed by
+//! another (on-file) credential without proof. Skips without `TEST_DATABASE_URL`
+//! (see `common`).
 
 mod common;
 
@@ -147,7 +149,14 @@ async fn register_replays_are_rejected() {
 }
 
 #[tokio::test]
-async fn register_merges_onto_existing_seed_fingerprint_row() {
+async fn register_refuses_to_bind_npub_onto_existing_seed_fingerprint_row_without_proof() {
+    // SECURITY: the npub-native register endpoint proves control of the NEW
+    // npub only, never of the key ALREADY ON FILE. seed_fingerprint is a lookup
+    // handle the client sends unauthenticated (check-restore / register), not a
+    // credential — so binding an npub onto a pre-existing BTC-anchored row on a
+    // fingerprint MATCH alone would let anyone who learns a victim's fingerprint
+    // take over that account. The endpoint must fail closed (409); the wallet
+    // links its npub through the authenticated POST /auth/nostr/link flow instead.
     let app = require_app!();
     let base = app
         .state
@@ -174,21 +183,31 @@ async fn register_merges_onto_existing_seed_fingerprint_row() {
         .unwrap();
     assert!(existing.nostr_pubkey.is_none());
 
-    // Register npub-native with the SAME seed -> MERGE onto that row, not a new one.
+    // Register npub-native with the SAME seed -> REJECTED (no unauthenticated merge).
     let sk = random_signer();
     let pk = hex::encode(sk.verifying_key().to_bytes());
     let (status, body) = register(&app, &sk, &base, Some(&fp)).await;
-    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(status, StatusCode::CONFLICT, "body={body}");
 
-    let merged = app
+    // The existing row is left UNTOUCHED and the npub binds to nothing.
+    assert!(
+        app.state
+            .db
+            .find_user_by_nostr_pubkey(&pk)
+            .await
+            .unwrap()
+            .is_none(),
+        "a rejected register must not bind the npub to any account"
+    );
+    let after = app
         .state
         .db
-        .find_user_by_nostr_pubkey(&pk)
+        .get_user(existing.id)
         .await
         .unwrap()
-        .expect("npub resolves after register");
-    assert_eq!(
-        merged.id, existing.id,
-        "npub register must MERGE onto the existing seed_fingerprint row, not split identity"
+        .expect("existing row still present");
+    assert!(
+        after.nostr_pubkey.is_none(),
+        "the victim's row must not have gained an npub"
     );
 }

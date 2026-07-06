@@ -32,6 +32,11 @@ pub enum AppError {
     Forbidden(String),
     /// Conflict: a unique resource (e.g. a username) is already taken.
     Conflict(String),
+    /// Pay-to-register invoice exists and is bound but has not settled yet. A
+    /// SAFE variant with its OWN machine-readable code (`PAYMENT_PENDING`) so a
+    /// polling client can distinguish "keep waiting" from a terminal failure
+    /// without matching on the human-readable string.
+    PaymentPending(String),
     /// Rate limit exceeded.
     RateLimited,
     /// Internal server error.
@@ -49,6 +54,7 @@ impl std::fmt::Display for AppError {
             Self::NotFound(msg) => write!(f, "Not found: {}", msg),
             Self::Forbidden(msg) => write!(f, "Forbidden: {}", msg),
             Self::Conflict(msg) => write!(f, "Conflict: {}", msg),
+            Self::PaymentPending(msg) => write!(f, "Payment pending: {}", msg),
             Self::RateLimited => write!(f, "Rate limited"),
             Self::Internal(msg) => write!(f, "Internal error: {}", msg),
         }
@@ -69,6 +75,7 @@ impl AppError {
             AppError::NotFound(_) => "NOT_FOUND",
             AppError::Forbidden(_) => "FORBIDDEN",
             AppError::Conflict(_) => "CONFLICT",
+            AppError::PaymentPending(_) => "PAYMENT_PENDING",
             AppError::RateLimited => "RATE_LIMITED",
             AppError::Internal(_) => "INTERNAL_ERROR",
         }
@@ -126,6 +133,9 @@ impl IntoResponse for AppError {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
+            // Keep 400 (not 402) so a legacy client still polling on the status +
+            // string keeps working during rollout; new clients match `code`.
+            AppError::PaymentPending(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AppError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "Rate limited".to_string()),
         };
 
@@ -253,5 +263,18 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(json["error"].as_str().unwrap(), msg);
         assert_eq!(json["code"].as_str().unwrap(), "CONFLICT");
+    }
+
+    #[tokio::test]
+    async fn payment_pending_has_stable_code_and_400() {
+        // A still-confirming pay-to-register invoice: 400 (so legacy string-poll
+        // clients keep working) but with the stable PAYMENT_PENDING code new
+        // clients match on to distinguish "keep waiting" from a terminal error.
+        let msg = "Payment not yet confirmed. Complete the payment and retry.";
+        let err = AppError::PaymentPending(msg.into());
+        let (status, json) = extract_json(err.into_response()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"].as_str().unwrap(), msg);
+        assert_eq!(json["code"].as_str().unwrap(), "PAYMENT_PENDING");
     }
 }

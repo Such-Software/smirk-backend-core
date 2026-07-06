@@ -357,27 +357,25 @@ impl Database {
                         ));
                     }
                     None => {
-                        let sql = format!(
-                            "UPDATE users SET \
-                               nostr_pubkey     = $2, \
-                               wallet_birthday  = COALESCE(wallet_birthday, $3), \
-                               xmr_start_height = COALESCE(xmr_start_height, $4), \
-                               wow_start_height = COALESCE(wow_start_height, $5), \
-                               updated_at = NOW() \
-                             WHERE id = $1 RETURNING {USER_COLS}"
-                        );
-                        let updated = sqlx::query_as::<_, User>(&sql)
-                            .bind(existing.id)
-                            .bind(nostr_pubkey)
-                            .bind(wallet_birthday)
-                            .bind(xmr_start_height)
-                            .bind(wow_start_height)
-                            .fetch_one(self.pool())
-                            .await
-                            .map_err(unique_violation_as(
-                                "This Nostr identity is already linked to another account",
-                            ))?;
-                        return Ok(updated);
+                        // SECURITY: the seed_fingerprint is a lookup handle, not
+                        // a credential — the client transmits it unauthenticated on
+                        // /auth/check-restore and register, and it is stored server-
+                        // side. Binding an npub onto a pre-existing (BTC-anchored /
+                        // link-less) row on a fingerprint MATCH ALONE would let anyone
+                        // who learns a victim's fingerprint take over that account and
+                        // be issued a session for it. The BTC rotation path guards the
+                        // identical "known fingerprint at a new key" operation behind a
+                        // signature over the ON-FILE key; this register endpoint proves
+                        // control only of the NEW npub, never the on-file key, so it
+                        // MUST NOT re-point the row. Fail closed exactly like the
+                        // different-npub arm above: the wallet links its npub through
+                        // the authenticated POST /auth/nostr/link flow (which requires
+                        // an existing session proving the on-file key) instead.
+                        return Err(AppError::Conflict(
+                            "This wallet already has an account. Sign in with your existing \
+                             credentials and link your Nostr identity from settings."
+                                .into(),
+                        ));
                     }
                 }
             }

@@ -483,6 +483,8 @@ pub async fn extension_register(
         returning_by_pubkey,
         req.altcha_solution.as_ref(),
     )?;
+    // Reject a taken username BEFORE consuming any single-use gate token.
+    ensure_username_available(&state, returning_by_pubkey, req.username.as_deref()).await?;
     // Invite + payment gates, composed per the operator's gate mode (`all` =
     // every enabled gate; `any` = one-of). PoW above is orthogonal to both.
     enforce_method_gates(
@@ -649,8 +651,16 @@ async fn enforce_method_gates(
         has_payment,
     ) {
         GatePlan::Open => Ok(()),
-        // Conjunction: run both (each self-disables when its own flag is off).
+        // Conjunction: both enabled gates must pass (each self-disables when its
+        // own flag is off). Verify the payment gate is redeemable (settled,
+        // NON-consuming) BEFORE consuming the single-use invite, so a payment that
+        // is still confirming — the common poll state — can never burn the invite.
+        // Residual: a concurrent double-spend of the invoice between this check and
+        // the consume below could still burn the invite; that window is far
+        // narrower than the "still confirming" case. Full atomicity would require
+        // consuming both tokens + the user INSERT in one shared DB transaction.
         GatePlan::All => {
+            verify_payment_settled(state, returning, pubkey_hash, payment_invoice_id).await?;
             enforce_invite(state, returning, invite_code).await?;
             enforce_payment(state, returning, pubkey_hash, payment_invoice_id).await?;
             Ok(())
@@ -782,8 +792,44 @@ async fn enforce_payment(
     pubkey_hash: &str,
     payment_invoice_id: Option<&str>,
 ) -> Result<(), AppError> {
-    if returning || !state.config.registration.payment.require_payment {
+    // Verify (non-consuming) then consume. Callers that must confirm the gate is
+    // redeemable BEFORE committing ANOTHER single-use token (the `All` gate plan
+    // pairs this with the invite) reuse `verify_payment_settled` first so a
+    // still-confirming payment can never cost the invite.
+    let Some(id) =
+        verify_payment_settled(state, returning, pubkey_hash, payment_invoice_id).await?
+    else {
         return Ok(());
+    };
+
+    // Atomic single-use consume: exactly one registration per invoice, even under
+    // a concurrent race (the loser gets the already-used literal).
+    if !state.db.consume_payment_invoice(&id, pubkey_hash).await? {
+        return Err(AppError::ValidationError(
+            "This payment invoice has already been used.".into(),
+        ));
+    }
+    info!(
+        gate = "payment",
+        "payment invoice settled + consumed (new user)"
+    );
+    Ok(())
+}
+
+/// Non-consuming half of the pay-to-register gate: confirm the invoice exists,
+/// is bound to THIS `pubkey_hash`, is unspent, and reads `Settled` from the
+/// processor. Returns `Ok(Some(id))` when ready to consume, `Ok(None)` when the
+/// gate does not apply (returning user / gate off). Splitting the check from the
+/// consume lets the `all`-mode plan verify payment is settled BEFORE it burns the
+/// single-use invite — a pending payment must never cost the invite.
+async fn verify_payment_settled(
+    state: &AppState,
+    returning: bool,
+    pubkey_hash: &str,
+    payment_invoice_id: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    if returning || !state.config.registration.payment.require_payment {
+        return Ok(None);
     }
     // Gate on but no provider built — config validation prevents this, so it is
     // an internal misconfiguration (generic 500), not a client-facing error.
@@ -837,7 +883,10 @@ async fn enforce_payment(
     // binding anchor; a foreign or underpaid invoice never reaches this point).
     let invoice = provider.get_invoice(id).await?;
     if invoice.status != crate::infra::payment::InvoiceStatus::Settled {
-        return Err(AppError::ValidationError(
+        // Distinct machine-readable code (`PAYMENT_PENDING`) so a polling client
+        // can tell "keep waiting" from a terminal failure without matching on the
+        // human string.
+        return Err(AppError::PaymentPending(
             "Payment not yet confirmed. Complete the payment and retry.".into(),
         ));
     }
@@ -851,18 +900,33 @@ async fn enforce_payment(
             ));
         }
     }
+    Ok(Some(id.to_string()))
+}
 
-    // Atomic single-use consume: exactly one registration per invoice, even under
-    // a concurrent race (the loser gets the already-used literal).
-    if !state.db.consume_payment_invoice(id, pubkey_hash).await? {
-        return Err(AppError::ValidationError(
-            "This payment invoice has already been used.".into(),
-        ));
+/// Reject a NEW registration whose requested username is already taken BEFORE any
+/// single-use gate token is consumed, so a collision can't burn a paid invoice /
+/// invite with no account created. Returning users are exempt (get-or-create
+/// only backfills NULL optionals and never re-points an existing username).
+///
+/// Not fully atomic: a concurrent claim can still race the final `create_user`
+/// INSERT between this read and the write. That narrow race is the price of not
+/// threading a shared transaction through the gate consume + user INSERT; it is
+/// far rarer than a user simply picking an already-taken name, which this closes.
+async fn ensure_username_available(
+    state: &AppState,
+    returning: bool,
+    username: Option<&str>,
+) -> Result<(), AppError> {
+    if returning {
+        return Ok(());
     }
-    info!(
-        gate = "payment",
-        "payment invoice settled + consumed (new user)"
-    );
+    if let Some(name) = username.map(str::trim).filter(|n| !n.is_empty()) {
+        if state.db.get_user_by_username(name).await?.is_some() {
+            return Err(AppError::Conflict(
+                "That username is already taken. Choose another.".into(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1646,6 +1710,8 @@ pub async fn nostr_register(
     //    invoices bind to sha256(btc pubkey), so the payment check still uses the
     //    BTC key carried in `keys` even though it is no longer the identity.
     enforce_pow(&state, &pubkey, returning, req.altcha_solution.as_ref())?;
+    // Reject a taken username BEFORE consuming any single-use gate token.
+    ensure_username_available(&state, returning, req.username.as_deref()).await?;
     let btc_hash = req
         .keys
         .iter()
@@ -1675,6 +1741,12 @@ pub async fn nostr_register(
             req.wow_start_height,
         )
         .await?;
+
+    // 5b. Persist the submitted chain keys (tip addresses + restore anchors).
+    //     The BTC path does this at registration; the npub path previously
+    //     skipped it, leaving user_keys empty so receive-by-username lookups and
+    //     restore self-verification broke for npub-native wallets. Idempotent.
+    upsert_all_keys(&state, user.id, &req.keys).await?;
 
     // 6. Session.
     let pair = issue_session(
