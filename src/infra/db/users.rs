@@ -9,9 +9,28 @@ use tracing::instrument;
 use uuid::Uuid;
 
 use crate::error::AppError;
-use crate::models::db::{NewUser, User};
+use crate::models::db::{AssetType, NewUser, User};
 
 use super::{unique_violation_as, Database};
+
+/// Map a UNIQUE violation on the registration INSERT to a clean 409 the client can
+/// act on — a taken username vs the rarer concurrent same-identity race. Any other
+/// database error passes through unchanged (a generic 500; never raw SQL).
+fn registration_conflict(e: sqlx::Error) -> AppError {
+    if let sqlx::Error::Database(ref db) = e {
+        if db.is_unique_violation() {
+            if db.constraint().unwrap_or_default().contains("username") {
+                return AppError::Conflict(
+                    "That username is already taken. Choose another.".into(),
+                );
+            }
+            return AppError::Conflict(
+                "This wallet is already being registered. Please retry.".into(),
+            );
+        }
+    }
+    AppError::from(e)
+}
 
 /// Explicit `users` columns (matches `User` field names; FromRow maps by name).
 const USER_COLS: &str = "id, username, pubkey_hash, nostr_pubkey, wallet_birthday, \
@@ -46,6 +65,118 @@ impl Database {
             .bind(input.wow_start_height)
             .fetch_one(self.pool())
             .await?;
+        Ok(user)
+    }
+
+    /// Atomically consume the gate token(s) AND create the user AND persist their
+    /// chain keys in ONE transaction. If any step fails — a raced invite / invoice,
+    /// a username collision, a concurrent same-identity insert — the WHOLE tx rolls
+    /// back, so a single-use token (a paid invoice, an invite) is never burned
+    /// without a user being created. This closes the consume-then-fail windows the
+    /// separate per-gate consumes left open.
+    ///
+    /// For genuinely-NEW users only: returning users bypass the gates and consume
+    /// nothing. `invite_code_hash` / `payment` name the single-use tokens to spend.
+    /// The payment invoice's settled-check is non-consuming and already done by the
+    /// caller; the invite has no non-consuming check, so it is claimed here and a
+    /// failed claim rolls the tx back with the caller-facing literal.
+    #[instrument(skip(self, new_user, keys))]
+    pub async fn create_user_consuming_gates(
+        &self,
+        invite_code_hash: Option<&str>,
+        payment: Option<(&str, &str)>,
+        new_user: NewUser,
+        keys: &[(AssetType, String, Option<String>)],
+    ) -> Result<User, AppError> {
+        let mut tx = self.pool().begin().await?;
+
+        // 1. Claim the invite (single-use) inside the tx.
+        if let Some(hash) = invite_code_hash {
+            let claimed = sqlx::query_scalar::<_, String>(
+                "UPDATE invite_codes SET used_at = NOW() \
+                 WHERE code_hash = $1 AND used_at IS NULL \
+                   AND (expires_at IS NULL OR expires_at > NOW()) \
+                 RETURNING code_hash",
+            )
+            .bind(hash)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if claimed.is_none() {
+                tx.rollback().await?;
+                return Err(AppError::ValidationError(
+                    "Invalid or already-used invite code.".into(),
+                ));
+            }
+        }
+
+        // 2. Consume the payment invoice (single-use) inside the tx. If this loses a
+        //    concurrent race the tx rolls back, so the invite claimed above is NOT
+        //    burned — the money-safety invariant for `all`-mode conjunction.
+        if let Some((invoice_id, pubkey_hash)) = payment {
+            let consumed = sqlx::query_scalar::<_, String>(
+                "UPDATE payment_invoices SET consumed_at = NOW() \
+                 WHERE invoice_id = $1 AND pubkey_hash = $2 AND consumed_at IS NULL \
+                 RETURNING invoice_id",
+            )
+            .bind(invoice_id)
+            .bind(pubkey_hash)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if consumed.is_none() {
+                tx.rollback().await?;
+                return Err(AppError::ValidationError(
+                    "This payment invoice has already been used.".into(),
+                ));
+            }
+        }
+
+        // 3. Create the user inside the tx. A UNIQUE violation (a taken username, or
+        //    a concurrent registration for the same identity) rolls back the token
+        //    consume(s) above, so the caller can retry without having lost a token.
+        let pubkey_hash = new_user
+            .pubkey_hash
+            .as_deref()
+            .map(|v| self.pepper("pubkey_hash", v));
+        let seed_fingerprint = new_user
+            .seed_fingerprint
+            .as_deref()
+            .map(|v| self.pepper("seed_fingerprint", v));
+        let user = sqlx::query_as::<_, User>(&format!(
+            "INSERT INTO users \
+             (username, pubkey_hash, nostr_pubkey, wallet_birthday, seed_fingerprint, \
+              xmr_start_height, wow_start_height) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING {USER_COLS}"
+        ))
+        .bind(&new_user.username)
+        .bind(&pubkey_hash)
+        .bind(&new_user.nostr_pubkey)
+        .bind(new_user.wallet_birthday)
+        .bind(&seed_fingerprint)
+        .bind(new_user.xmr_start_height)
+        .bind(new_user.wow_start_height)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(registration_conflict)?;
+
+        // 4. Persist the chain keys in the SAME tx (mirrors upsert_user_key).
+        for (asset, public_key, public_spend_key) in keys {
+            sqlx::query(
+                "INSERT INTO user_keys (user_id, asset, public_key, public_spend_key, key_type) \
+                 VALUES ($1, $2, $3, $4, 'primary') \
+                 ON CONFLICT (user_id, asset, key_type) DO UPDATE SET \
+                    public_key = EXCLUDED.public_key, \
+                    public_spend_key = EXCLUDED.public_spend_key, \
+                    updated_at = NOW()",
+            )
+            .bind(user.id)
+            .bind(asset)
+            .bind(public_key)
+            .bind(public_spend_key)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
         Ok(user)
     }
 

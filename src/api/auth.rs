@@ -56,7 +56,7 @@ use crate::core::crypto::nip98::{
 use crate::core::crypto::signatures::verify_bitcoin_signature;
 use crate::core::session::{hash_refresh_token, Platform};
 use crate::error::AppError;
-use crate::models::db::{AssetType, NewSession, NewUserKey};
+use crate::models::db::{AssetType, NewSession, NewUser, NewUserKey};
 use crate::AppState;
 
 // ── shared constants ────────────────────────────────────────────────────────
@@ -129,6 +129,14 @@ fn parse_asset(asset: &str) -> Result<AssetType, AppError> {
         "grin" => Ok(AssetType::Grin),
         other => Err(AppError::ValidationError(format!("Invalid asset: {other}"))),
     }
+}
+
+/// Parse the wire key list into the `(AssetType, public_key, public_spend_key)`
+/// tuples the atomic-registration DB path binds directly. A bad asset is a 400.
+fn parse_keys(keys: &[AssetPublicKey]) -> Result<Vec<(AssetType, String, Option<String>)>, AppError> {
+    keys.iter()
+        .map(|k| Ok((parse_asset(&k.asset)?, k.public_key.clone(), k.public_spend_key.clone())))
+        .collect()
 }
 
 /// Validate a reserved username (3-32 chars, `[a-z0-9_]`, no leading/trailing `_`).
@@ -483,24 +491,9 @@ pub async fn extension_register(
         returning_by_pubkey,
         req.altcha_solution.as_ref(),
     )?;
-    // Reject a taken username BEFORE consuming any single-use gate token.
-    ensure_username_available(&state, returning_by_pubkey, req.username.as_deref()).await?;
-    // Invite + payment gates, composed per the operator's gate mode (`all` =
-    // every enabled gate; `any` = one-of). PoW above is orthogonal to both.
-    enforce_method_gates(
-        &state,
-        returning_by_pubkey,
-        &pubkey_hash,
-        req.invite_code.as_deref(),
-        req.payment_invoice_id.as_deref(),
-    )
-    .await?;
-
-    // If we reached here after an unproven fingerprint match, do NOT attach that
-    // fingerprint to the new row — it belongs to another user, and the UNIQUE
-    // constraint would either collide or hijack the lookup. Only attach the
-    // fingerprint when it is genuinely unknown, or when this is the same pubkey
-    // (a plain returning user, where get_or_create only backfills NULLs anyway).
+    // Never attach a seed_fingerprint that already belongs to ANOTHER user (it
+    // would collide on the UNIQUE or hijack the lookup); a returning user only
+    // backfills NULLs anyway. Used as the new row's fingerprint below.
     let fingerprint_for_row = match &req.seed_fingerprint {
         Some(fp) => {
             let belongs_to_other =
@@ -514,27 +507,54 @@ pub async fn extension_register(
         None => None,
     };
 
-    let user = state
-        .db
-        .get_or_create_user_by_pubkey_hash(
+    let (user, is_new) = if returning_by_pubkey {
+        // Returning wallet: no gate token consumed. Backfill optionals + rotate keys
+        // through the ordinary path.
+        let user = state
+            .db
+            .get_or_create_user_by_pubkey_hash(
+                &pubkey_hash,
+                req.username.clone(),
+                wallet_birthday,
+                fingerprint_for_row,
+                req.xmr_start_height,
+                req.wow_start_height,
+            )
+            .await?;
+        upsert_all_keys(&state, user.id, &req.keys).await?;
+        (user, false)
+    } else {
+        // NEW wallet: reject a taken username up front (fast, friendly), then consume
+        // the gate token(s) + create the user + persist keys ATOMICALLY. A username
+        // collision or a raced token rolls the whole tx back, so a paid invoice /
+        // invite is never burned without an account being created.
+        ensure_username_available(&state, false, req.username.as_deref()).await?;
+        let gates = plan_gate_consume(
+            &state,
             &pubkey_hash,
-            req.username.clone(),
-            wallet_birthday,
-            fingerprint_for_row,
-            req.xmr_start_height,
-            req.wow_start_height,
+            req.invite_code.as_deref(),
+            req.payment_invoice_id.as_deref(),
         )
         .await?;
-
-    // Derive is_new from the resolved row, not the pre-read: a concurrent
-    // first-registration race is settled in the DB. `created_at == updated_at`
-    // on a freshly-inserted row and diverges on the COALESCE backfill update or
-    // any later write, so it is a reliable "created just now" marker.
-    let is_new = user.created_at == user.updated_at && !returning_by_pubkey;
-
-    // Upsert keys unconditionally: idempotent, and this honors asset-key rotation
-    // when a returning user re-registers with an updated key.
-    upsert_all_keys(&state, user.id, &req.keys).await?;
+        let user = state
+            .db
+            .create_user_consuming_gates(
+                gates.invite_code_hash.as_deref(),
+                gates.payment.as_ref().map(|(id, pkh)| (id.as_str(), pkh.as_str())),
+                NewUser {
+                    username: req.username.clone(),
+                    pubkey_hash: Some(pubkey_hash.clone()),
+                    nostr_pubkey: None,
+                    wallet_birthday,
+                    seed_fingerprint: fingerprint_for_row,
+                    xmr_start_height: req.xmr_start_height,
+                    wow_start_height: req.wow_start_height,
+                },
+                &parse_keys(&req.keys)?,
+            )
+            .await?;
+        (user, true)
+    };
 
     if is_new {
         info!(user_id = %user.id, num_keys = req.keys.len(), "registered new extension user");
@@ -614,74 +634,6 @@ fn enforce_pow(
     Ok(())
 }
 
-/// Compose the invite + payment gates per the operator's gate mode. PoW is
-/// enforced separately (orthogonal) and always applies on top. Returning wallets
-/// and self-hosting (both gates off) pass trivially.
-///
-/// - `All` (default): every ENABLED gate must pass, each consuming its own token
-///   — the historical conjunctive behavior (invite AND payment when both on).
-/// - `Any`: the enabled gates are ALTERNATIVES. With a single gate on it is just
-///   that gate. With BOTH on, the client presents exactly ONE method's credential
-///   and only that gate runs (and only it consumes its single-use token).
-///   Presenting BOTH is rejected outright — a one-of choice must never burn two
-///   tokens (an invite AND a paid invoice) in a single request.
-///
-/// Dispatching to a single gate's own `enforce_*` preserves its exact errors,
-/// including the payment "not yet confirmed" literal the client polls on.
-async fn enforce_method_gates(
-    state: &AppState,
-    returning: bool,
-    pubkey_hash: &str,
-    invite_code: Option<&str>,
-    payment_invoice_id: Option<&str>,
-) -> Result<(), AppError> {
-    if returning {
-        return Ok(());
-    }
-    let has_invite = invite_code.map(str::trim).is_some_and(|c| !c.is_empty());
-    let has_payment = payment_invoice_id
-        .map(str::trim)
-        .is_some_and(|s| !s.is_empty());
-
-    match plan_gates(
-        state.config.registration.gate_mode,
-        state.config.registration.require_invite,
-        state.config.registration.payment.require_payment,
-        has_invite,
-        has_payment,
-    ) {
-        GatePlan::Open => Ok(()),
-        // Conjunction: both enabled gates must pass (each self-disables when its
-        // own flag is off). Verify the payment gate is redeemable (settled,
-        // NON-consuming) BEFORE consuming the single-use invite, so a payment that
-        // is still confirming — the common poll state — can never burn the invite.
-        // Residual: a concurrent double-spend of the invoice between this check and
-        // the consume below could still burn the invite; that window is far
-        // narrower than the "still confirming" case. Full atomicity would require
-        // consuming both tokens + the user INSERT in one shared DB transaction.
-        GatePlan::All => {
-            verify_payment_settled(state, returning, pubkey_hash, payment_invoice_id).await?;
-            enforce_invite(state, returning, invite_code).await?;
-            enforce_payment(state, returning, pubkey_hash, payment_invoice_id).await?;
-            Ok(())
-        }
-        // Exactly ONE gate runs (and only it consumes its single-use token),
-        // preserving that gate's own error literals.
-        GatePlan::Invite => enforce_invite(state, returning, invite_code).await,
-        GatePlan::Payment => {
-            enforce_payment(state, returning, pubkey_hash, payment_invoice_id).await
-        }
-        GatePlan::RejectBothPresented => Err(AppError::ValidationError(
-            "Present exactly one registration method, not both.".into(),
-        )),
-        GatePlan::RequireOne => Err(AppError::ValidationError(
-            "Registration on this instance requires an invite code or a settled payment. \
-             Choose one and retry."
-                .into(),
-        )),
-    }
-}
-
 /// What to do about the invite + payment gates for a NEW wallet. The pure
 /// decision (no db / async), extracted so the fund-critical one-of dispatch is
 /// unit-testable. PoW is handled separately (orthogonal).
@@ -733,87 +685,83 @@ fn plan_gates(
     }
 }
 
-/// Invite-code registration gate. A genuinely new wallet must present a valid,
-/// unused operator-minted invite code when the instance requires one; a
-/// returning wallet (known pubkey) bypasses it, exactly like PoW, and an
-/// instance with the gate off accepts everyone. The claim is atomic and
-/// single-use (db layer), so a code is redeemable by at most one registration
-/// even under concurrent submission. Self-hosting bypasses this entirely
-/// (operators simply leave the gate off).
-async fn enforce_invite(
-    state: &AppState,
-    returning: bool,
-    invite_code: Option<&str>,
-) -> Result<(), AppError> {
-    if returning || !state.config.registration.require_invite {
-        return Ok(());
-    }
-    let code = invite_code
-        .map(str::trim)
-        .filter(|c| !c.is_empty())
-        .ok_or_else(|| {
-            warn!(
-                gate = "invite",
-                "invite required for new wallet but none supplied"
-            );
-            AppError::ValidationError(
-                "An invite code is required to register on this instance.".into(),
-            )
-        })?;
-    if !state
-        .db
-        .claim_invite_code(&crate::core::invite::hash_invite_code(code))
-        .await?
-    {
-        // One literal for "no such code", "already used", and "expired" — never
-        // an oracle that distinguishes them.
-        return Err(AppError::ValidationError(
-            "Invalid or already-used invite code.".into(),
-        ));
-    }
-    info!(gate = "invite", "invite code accepted (new user)");
-    Ok(())
+/// The single-use tokens a NEW registration must consume, resolved from the gate
+/// config WITHOUT spending anything. Feeds [`Database::create_user_consuming_gates`],
+/// which consumes these AND creates the user in one transaction — so a username
+/// collision or a raced token never burns a paid invoice / invite.
+struct GatedRegistration {
+    /// Hash of the invite code to claim, when the invite gate applies.
+    invite_code_hash: Option<String>,
+    /// `(invoice_id, pubkey_hash)` to consume, when the payment gate applies.
+    payment: Option<(String, String)>,
 }
 
-/// Pay-to-register gate (PULL model). A genuinely new wallet must present the id
-/// of a payment invoice — minted at [`payment_invoice`] and paid to the
-/// operator's own wallet via the configured processor — that THIS backend reads
-/// back as `Settled`. Returning wallets bypass it, an instance with the gate off
-/// accepts everyone, and self-hosting bypasses it (leave the gate off).
-///
-/// The grant decision reads the processor's authenticated API as the source of
-/// truth — never a client claim, never an inbound webhook. The invoice must
-/// exist HERE bound to THIS `pubkey_hash`, be unspent, and read `Settled`; it is
-/// then atomically consumed (single-use), so one invoice grants at most one
-/// registration even under concurrent completion (the race loser is rejected).
-async fn enforce_payment(
-    state: &AppState,
-    returning: bool,
-    pubkey_hash: &str,
-    payment_invoice_id: Option<&str>,
-) -> Result<(), AppError> {
-    // Verify (non-consuming) then consume. Callers that must confirm the gate is
-    // redeemable BEFORE committing ANOTHER single-use token (the `All` gate plan
-    // pairs this with the invite) reuse `verify_payment_settled` first so a
-    // still-confirming payment can never cost the invite.
-    let Some(id) =
-        verify_payment_settled(state, returning, pubkey_hash, payment_invoice_id).await?
-    else {
-        return Ok(());
-    };
+/// Require an invite code and return its hash, erroring if the gate needs one but
+/// none was supplied (the presence check + literal the old `enforce_invite` used).
+fn require_invite_hash(invite_code: Option<&str>) -> Result<String, AppError> {
+    let code = invite_code.map(str::trim).filter(|c| !c.is_empty()).ok_or_else(|| {
+        AppError::ValidationError("An invite code is required to register on this instance.".into())
+    })?;
+    Ok(crate::core::invite::hash_invite_code(code))
+}
 
-    // Atomic single-use consume: exactly one registration per invoice, even under
-    // a concurrent race (the loser gets the already-used literal).
-    if !state.db.consume_payment_invoice(&id, pubkey_hash).await? {
-        return Err(AppError::ValidationError(
-            "This payment invoice has already been used.".into(),
-        ));
+/// Plan (do NOT consume) the gate tokens for a genuinely-NEW wallet, mirroring the
+/// pure `plan_gates` decision. The payment invoice's settled-check runs here and is
+/// non-consuming, so a still-confirming payment errors BEFORE any token is spent
+/// (an invite is never burned on a pending payment — the F3 invariant, now made
+/// atomic by consuming both tokens together at creation). Returns the same
+/// caller-facing errors the per-gate enforcers did.
+async fn plan_gate_consume(
+    state: &AppState,
+    pubkey_hash: &str,
+    invite_code: Option<&str>,
+    payment_invoice_id: Option<&str>,
+) -> Result<GatedRegistration, AppError> {
+    let has_invite = invite_code.map(str::trim).is_some_and(|c| !c.is_empty());
+    let has_payment = payment_invoice_id
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+
+    match plan_gates(
+        state.config.registration.gate_mode,
+        state.config.registration.require_invite,
+        state.config.registration.payment.require_payment,
+        has_invite,
+        has_payment,
+    ) {
+        GatePlan::Open => Ok(GatedRegistration { invite_code_hash: None, payment: None }),
+        GatePlan::All => {
+            let invite_code_hash = if state.config.registration.require_invite {
+                Some(require_invite_hash(invite_code)?)
+            } else {
+                None
+            };
+            Ok(GatedRegistration {
+                invite_code_hash,
+                payment: verify_payment_settled(state, false, pubkey_hash, payment_invoice_id)
+                    .await?
+                    .map(|id| (id, pubkey_hash.to_string())),
+            })
+        }
+        GatePlan::Invite => Ok(GatedRegistration {
+            invite_code_hash: Some(require_invite_hash(invite_code)?),
+            payment: None,
+        }),
+        GatePlan::Payment => Ok(GatedRegistration {
+            invite_code_hash: None,
+            payment: verify_payment_settled(state, false, pubkey_hash, payment_invoice_id)
+                .await?
+                .map(|id| (id, pubkey_hash.to_string())),
+        }),
+        GatePlan::RejectBothPresented => Err(AppError::ValidationError(
+            "Present exactly one registration method, not both.".into(),
+        )),
+        GatePlan::RequireOne => Err(AppError::ValidationError(
+            "Registration on this instance requires an invite code or a settled payment. \
+             Choose one and retry."
+                .into(),
+        )),
     }
-    info!(
-        gate = "payment",
-        "payment invoice settled + consumed (new user)"
-    );
-    Ok(())
 }
 
 /// Non-consuming half of the pay-to-register gate: confirm the invoice exists,
@@ -1710,43 +1658,73 @@ pub async fn nostr_register(
     //    invoices bind to sha256(btc pubkey), so the payment check still uses the
     //    BTC key carried in `keys` even though it is no longer the identity.
     enforce_pow(&state, &pubkey, returning, req.altcha_solution.as_ref())?;
-    // Reject a taken username BEFORE consuming any single-use gate token.
-    ensure_username_available(&state, returning, req.username.as_deref()).await?;
-    let btc_hash = req
-        .keys
-        .iter()
-        .find(|k| k.asset.eq_ignore_ascii_case("btc"))
-        .map(|k| hash_public_key(&k.public_key));
-    enforce_method_gates(
-        &state,
-        returning,
-        btc_hash.as_deref().unwrap_or(&pubkey),
-        req.invite_code.as_deref(),
-        req.payment_invoice_id.as_deref(),
-    )
-    .await?;
-
-    // 5. Get-or-create by npub (seed_fingerprint MERGE dedup inside).
+    // 5. Resolve the user. Returning npub: backfill optionals + rotate keys. New
+    //    npub: consume the gate token(s) + create the user + persist keys (tip
+    //    addresses / restore anchors) ATOMICALLY, so a username collision or a raced
+    //    token never burns a paid invoice / invite without an account.
     let wallet_birthday = req
         .wallet_birthday
         .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
-    let user = state
-        .db
-        .get_or_create_user_by_nostr_pubkey(
-            &pubkey,
-            req.username.clone(),
-            wallet_birthday,
-            req.seed_fingerprint.clone(),
-            req.xmr_start_height,
-            req.wow_start_height,
+    let user = if returning {
+        let user = state
+            .db
+            .get_or_create_user_by_nostr_pubkey(
+                &pubkey,
+                req.username.clone(),
+                wallet_birthday,
+                req.seed_fingerprint.clone(),
+                req.xmr_start_height,
+                req.wow_start_height,
+            )
+            .await?;
+        upsert_all_keys(&state, user.id, &req.keys).await?;
+        user
+    } else {
+        // Fail closed: never bind an npub onto a pre-existing wallet on a
+        // seed_fingerprint match alone (this endpoint proves only npub control) —
+        // link via the authenticated /auth/nostr/link flow instead.
+        if let Some(ref fp) = req.seed_fingerprint {
+            if state.db.get_user_by_seed_fingerprint(fp).await?.is_some() {
+                return Err(AppError::Conflict(
+                    "This wallet already has an account. Sign in with your existing \
+                     credentials and link your Nostr identity from settings."
+                        .into(),
+                ));
+            }
+        }
+        ensure_username_available(&state, false, req.username.as_deref()).await?;
+        // Pay-to-register invoices bind to sha256(btc pubkey), so the payment gate
+        // keys on the carried BTC key even though the npub is the identity.
+        let btc_hash = req
+            .keys
+            .iter()
+            .find(|k| k.asset.eq_ignore_ascii_case("btc"))
+            .map(|k| hash_public_key(&k.public_key));
+        let gates = plan_gate_consume(
+            &state,
+            btc_hash.as_deref().unwrap_or(&pubkey),
+            req.invite_code.as_deref(),
+            req.payment_invoice_id.as_deref(),
         )
         .await?;
-
-    // 5b. Persist the submitted chain keys (tip addresses + restore anchors).
-    //     The BTC path does this at registration; the npub path previously
-    //     skipped it, leaving user_keys empty so receive-by-username lookups and
-    //     restore self-verification broke for npub-native wallets. Idempotent.
-    upsert_all_keys(&state, user.id, &req.keys).await?;
+        state
+            .db
+            .create_user_consuming_gates(
+                gates.invite_code_hash.as_deref(),
+                gates.payment.as_ref().map(|(id, pkh)| (id.as_str(), pkh.as_str())),
+                NewUser {
+                    username: req.username.clone(),
+                    pubkey_hash: None,
+                    nostr_pubkey: Some(pubkey.clone()),
+                    wallet_birthday,
+                    seed_fingerprint: req.seed_fingerprint.clone(),
+                    xmr_start_height: req.xmr_start_height,
+                    wow_start_height: req.wow_start_height,
+                },
+                &parse_keys(&req.keys)?,
+            )
+            .await?
+    };
 
     // 6. Session.
     let pair = issue_session(
