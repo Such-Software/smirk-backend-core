@@ -981,9 +981,9 @@ impl Config {
         // booting a feed that can never populate (which would still advertise
         // prices:true and silently serve nothing).
         if self.features.prices {
-            if !matches!(self.features.prices_provider.as_str(), "coingecko") {
+            if !matches!(self.features.prices_provider.as_str(), "coingecko" | "kraken") {
                 return Err(cfg_err(format!(
-                    "PRICES_PROVIDER {:?} is not supported; supported: coingecko",
+                    "PRICES_PROVIDER {:?} is not supported; supported: coingecko, kraken",
                     self.features.prices_provider
                 )));
             }

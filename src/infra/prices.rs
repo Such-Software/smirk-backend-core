@@ -10,13 +10,24 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use serde::Deserialize;
 
 use crate::error::AppError;
 
 /// Per-request timeout for the upstream price API.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// Browser-like User-Agent. Public price APIs (CoinGecko, Kraken) 403 requests
+/// that carry no UA — reqwest sends none by default. Mirrors the v0.2.x feed.
+const USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) smirk-backend";
 /// CoinGecko simple-price endpoint (fixed, trusted host).
 const COINGECKO_URL: &str = "https://api.coingecko.com/api/v3/simple/price";
+/// Kraken public ticker — the majors (BTC/LTC/XMR) in USD, one multi-pair call.
+const KRAKEN_URL: &str = "https://api.kraken.com/0/public/Ticker";
+/// Nonlogs markets — WOW/GRIN, which Kraken doesn't list (priced via BTC/USDT).
+const NONLOGS_URL: &str = "https://api.nonlogs.io/api/markets";
+/// Our majors → Kraken USD pair. WOW/GRIN come from nonlogs instead.
+const KRAKEN_PAIRS: &[(&str, &str)] = &[("btc", "XXBTZUSD"), ("ltc", "XLTCZUSD"), ("xmr", "XXMRZUSD")];
 /// Lower bound on the refresh interval, to stay within free-tier rate limits.
 const MIN_INTERVAL_SECS: u64 = 60;
 /// Upper bound on the price response body. The real payload is a handful of
@@ -71,6 +82,7 @@ impl PriceClient {
     pub fn new(provider: &str, currency: &str, assets: &[String]) -> Result<Self, AppError> {
         let http = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
+            .user_agent(USER_AGENT)
             .build()
             .map_err(|_| AppError::ConfigError("failed to build price HTTP client".into()))?;
         let feeds = assets
@@ -112,10 +124,96 @@ impl PriceClient {
         }
         match self.provider.as_str() {
             "coingecko" => self.fetch_coingecko().await,
+            "kraken" => self.fetch_kraken_nonlogs().await,
             other => Err(AppError::ConfigError(format!(
                 "unsupported prices provider: {other}"
             ))),
         }
+    }
+
+    /// The v0.2.x feed: Kraken for the majors (BTC/LTC/XMR, USD) + nonlogs.io for
+    /// WOW/GRIN (which Kraken doesn't list), priced via BTC. A per-source failure
+    /// drops that asset rather than blanking the whole feed. USD only — the Kraken
+    /// pairs are USD (config currency is `usd`).
+    async fn fetch_kraken_nonlogs(&self) -> Result<HashMap<String, f64>, AppError> {
+        let mut out = HashMap::new();
+
+        // Majors from Kraken, in one multi-pair call.
+        let pairs: Vec<(&str, &str)> = self
+            .feeds
+            .iter()
+            .filter_map(|(sym, _)| KRAKEN_PAIRS.iter().find(|(s, _)| s == sym).copied())
+            .collect();
+        if !pairs.is_empty() {
+            let joined = pairs.iter().map(|(_, p)| *p).collect::<Vec<_>>().join(",");
+            if let Ok(resp) = self.http.get(KRAKEN_URL).query(&[("pair", joined.as_str())]).send().await
+            {
+                if resp.status().is_success() {
+                    let body = read_capped(resp, MAX_PRICE_BODY_BYTES).await?;
+                    #[derive(Deserialize)]
+                    struct KrakenResp {
+                        #[serde(default)]
+                        error: Vec<String>,
+                        result: Option<HashMap<String, KrakenTicker>>,
+                    }
+                    #[derive(Deserialize)]
+                    struct KrakenTicker {
+                        c: Vec<String>, // [last-trade price, lot volume]
+                    }
+                    if let Ok(data) = serde_json::from_slice::<KrakenResp>(&body) {
+                        if let (true, Some(result)) = (data.error.is_empty(), data.result) {
+                            for (sym, pair) in &pairs {
+                                if let Some(price) = result
+                                    .get(*pair)
+                                    .and_then(|t| t.c.first())
+                                    .and_then(|s| s.parse::<f64>().ok())
+                                    .filter(|p| p.is_finite() && *p > 0.0)
+                                {
+                                    out.insert(sym.to_string(), price);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // WOW/GRIN from nonlogs, converted through BTC/USD.
+        if self.feeds.iter().any(|(s, _)| s == "wow" || s == "grin") {
+            if let Some(np) = self.fetch_nonlogs(out.get("btc").copied()).await {
+                for (sym, price) in np {
+                    if self.feeds.iter().any(|(s, _)| *s == sym) {
+                        out.insert(sym, price);
+                    }
+                }
+            }
+        }
+
+        Ok(out)
+    }
+
+    /// WOW/GRIN prices from nonlogs.io, each averaged over its `-BTC` (×BTC/USD)
+    /// and `-USDT` markets. Returns `None` on any transport/parse failure (the
+    /// caller keeps the last good snapshot). Needs BTC/USD to convert the BTC pair.
+    async fn fetch_nonlogs(&self, btc_usd: Option<f64>) -> Option<HashMap<String, f64>> {
+        let btc_usd = btc_usd?;
+        let resp = self.http.get(NONLOGS_URL).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let body = read_capped(resp, MAX_PRICE_BODY_BYTES).await.ok()?;
+        #[derive(Deserialize)]
+        struct NonlogsResp {
+            markets: HashMap<String, NonlogsMarket>,
+        }
+        let data: NonlogsResp = serde_json::from_slice(&body).ok()?;
+        let mut out = HashMap::new();
+        for sym in ["wow", "grin"] {
+            if let Some(p) = nonlogs_usd_price(&data.markets, sym, btc_usd) {
+                out.insert(sym.to_string(), p);
+            }
+        }
+        Some(out)
     }
 
     async fn fetch_coingecko(&self) -> Result<HashMap<String, f64>, AppError> {
@@ -158,6 +256,44 @@ impl PriceClient {
         }
         Ok(out)
     }
+}
+
+/// A nonlogs.io market row (only the last trade price is used; other fields
+/// ignored).
+#[derive(Deserialize)]
+struct NonlogsMarket {
+    last_price: Option<String>,
+}
+
+/// USD price for `sym` (lowercase) from nonlogs markets: average of its `-BTC`
+/// quote (×`btc_usd`) and its `-USDT` quote, whichever are present. `None` if
+/// neither is. Mirrors the v0.2.x conversion.
+fn nonlogs_usd_price(
+    markets: &HashMap<String, NonlogsMarket>,
+    sym: &str,
+    btc_usd: f64,
+) -> Option<f64> {
+    let up = sym.to_uppercase();
+    let parse = |pair: &str| -> Option<f64> {
+        markets
+            .get(pair)?
+            .last_price
+            .as_deref()?
+            .parse::<f64>()
+            .ok()
+            .filter(|p| *p > 0.0)
+    };
+    let mut sources = Vec::new();
+    if let Some(btc) = parse(&format!("{up}-BTC")) {
+        sources.push(btc * btc_usd);
+    }
+    if let Some(usdt) = parse(&format!("{up}-USDT")) {
+        sources.push(usdt);
+    }
+    if sources.is_empty() {
+        return None;
+    }
+    Some(sources.iter().sum::<f64>() / sources.len() as f64)
 }
 
 /// Clamp the configured refresh interval to a provider-friendly minimum.
