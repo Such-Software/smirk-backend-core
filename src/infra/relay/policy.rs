@@ -119,8 +119,10 @@ fn giftwrap_inbox(meta: &EventMeta, inbound_pow_bits: u8, recipient_registered: 
 /// `author_registered` = the author pubkey is a registered Smirk npub.
 /// `recipient_registered` = at least one `p` tag is a registered Smirk npub.
 /// `author_premium` = the author holds an active premium subscription (only the
-/// `premium-post` policy consults it). The caller resolves all three against the
-/// DB before calling.
+/// `premium-post` policy consults it).
+/// `author_allowlisted` = the author is on the operator's write-allowlist
+/// (`RELAY_WRITE_ALLOWLIST_NPUBS`) — e.g. the announcements / feed-owner account.
+/// The caller resolves all of these before calling.
 pub fn decide(
     meta: &EventMeta,
     policy: WritePolicy,
@@ -128,7 +130,14 @@ pub fn decide(
     author_registered: bool,
     recipient_registered: bool,
     author_premium: bool,
+    author_allowlisted: bool,
 ) -> Admit {
+    // Operator write-allowlist: an owner/announcements npub may publish ANY kind
+    // regardless of policy or premium. Checked first so the owner can seed a
+    // premium-post feed (and post announcements) without a subscription.
+    if author_allowlisted {
+        return Admit::Permit;
+    }
     match policy {
         WritePolicy::Open => Admit::Permit,
         WritePolicy::AuthorAllowlist => {
@@ -204,38 +213,38 @@ mod tests {
     #[test]
     fn open_permits_everything() {
         let m = meta(A, 1, FF);
-        assert!(decide(&m, WritePolicy::Open, 0, false, false, false).is_permit());
+        assert!(decide(&m, WritePolicy::Open, 0, false, false, false, false).is_permit());
     }
 
     #[test]
     fn author_allowlist_gates_on_author() {
         let m = meta(A, 1, FF);
-        assert!(decide(&m, WritePolicy::AuthorAllowlist, 0, true, false, false).is_permit());
-        assert!(!decide(&m, WritePolicy::AuthorAllowlist, 0, false, false, false).is_permit());
+        assert!(decide(&m, WritePolicy::AuthorAllowlist, 0, true, false, false, false).is_permit());
+        assert!(!decide(&m, WritePolicy::AuthorAllowlist, 0, false, false, false, false).is_permit());
     }
 
     #[test]
     fn inbox_outbox_permits_registered_author_outbox() {
         let m = meta(A, 1, FF); // any kind, registered author
-        assert!(decide(&m, WritePolicy::InboxOutbox, 0, true, false, false).is_permit());
+        assert!(decide(&m, WritePolicy::InboxOutbox, 0, true, false, false, false).is_permit());
     }
 
     #[test]
     fn inbox_outbox_permits_giftwrap_to_registered_recipient() {
         let m = meta(A, GIFT_WRAP_KIND, FF);
-        assert!(decide(&m, WritePolicy::InboxOutbox, 0, false, true, false).is_permit());
+        assert!(decide(&m, WritePolicy::InboxOutbox, 0, false, true, false, false).is_permit());
     }
 
     #[test]
     fn inbox_outbox_rejects_external_non_giftwrap() {
         let m = meta(A, 1, FF); // external author, non-gift-wrap
-        assert!(!decide(&m, WritePolicy::InboxOutbox, 0, false, true, false).is_permit());
+        assert!(!decide(&m, WritePolicy::InboxOutbox, 0, false, true, false, false).is_permit());
     }
 
     #[test]
     fn inbox_outbox_rejects_giftwrap_to_unregistered_recipient() {
         let m = meta(A, GIFT_WRAP_KIND, FF);
-        assert!(!decide(&m, WritePolicy::InboxOutbox, 0, false, false, false).is_permit());
+        assert!(!decide(&m, WritePolicy::InboxOutbox, 0, false, false, false, false).is_permit());
     }
 
     #[test]
@@ -252,8 +261,8 @@ mod tests {
         let id = format!("0000{}", "ff".repeat(30));
         let m = meta(A, GIFT_WRAP_KIND, &id);
         // require 8 bits → permit; require 20 → deny.
-        assert!(decide(&m, WritePolicy::InboxOutbox, 8, false, true, false).is_permit());
-        assert!(!decide(&m, WritePolicy::InboxOutbox, 20, false, true, false).is_permit());
+        assert!(decide(&m, WritePolicy::InboxOutbox, 8, false, true, false, false).is_permit());
+        assert!(!decide(&m, WritePolicy::InboxOutbox, 20, false, true, false, false).is_permit());
     }
 
     #[test]
@@ -261,7 +270,7 @@ mod tests {
         // A registered author's low-PoW event is still fine (PoW is inbound-only).
         let id = "ff".repeat(32); // 0 leading zero bits
         let m = meta(A, 1, &id);
-        assert!(decide(&m, WritePolicy::InboxOutbox, 20, true, false, false).is_permit());
+        assert!(decide(&m, WritePolicy::InboxOutbox, 20, true, false, false, false).is_permit());
     }
 
     // ── premium-post ─────────────────────────────────────────────────────────
@@ -270,7 +279,7 @@ mod tests {
     fn premium_post_premium_author_posts_anything() {
         let m = meta(A, 1, FF); // a general kind-1 note
                                 // premium → permit even a non-wallet kind.
-        assert!(decide(&m, WritePolicy::PremiumPost, 0, true, false, true).is_permit());
+        assert!(decide(&m, WritePolicy::PremiumPost, 0, true, false, true, false).is_permit());
     }
 
     #[test]
@@ -279,7 +288,7 @@ mod tests {
             let m = meta(A, *k, FF);
             // registered, NOT premium → wallet kinds still permitted.
             assert!(
-                decide(&m, WritePolicy::PremiumPost, 0, true, false, false).is_permit(),
+                decide(&m, WritePolicy::PremiumPost, 0, true, false, false, false).is_permit(),
                 "wallet kind {k} should be free for registered users"
             );
         }
@@ -288,19 +297,57 @@ mod tests {
     #[test]
     fn premium_post_registered_needs_premium_for_general() {
         let m = meta(A, 1, FF); // general kind-1, registered but not premium
-        assert!(!decide(&m, WritePolicy::PremiumPost, 0, true, false, false).is_permit());
+        assert!(!decide(&m, WritePolicy::PremiumPost, 0, true, false, false, false).is_permit());
     }
 
     #[test]
     fn premium_post_allows_external_giftwrap_inbox() {
         let m = meta(A, GIFT_WRAP_KIND, FF);
         // external (unregistered) author delivering a DM to a registered user.
-        assert!(decide(&m, WritePolicy::PremiumPost, 0, false, true, false).is_permit());
+        assert!(decide(&m, WritePolicy::PremiumPost, 0, false, true, false, false).is_permit());
     }
 
     #[test]
     fn premium_post_rejects_external_general() {
         let m = meta(A, 1, FF); // external author, non-gift-wrap
-        assert!(!decide(&m, WritePolicy::PremiumPost, 0, false, true, false).is_permit());
+        assert!(!decide(&m, WritePolicy::PremiumPost, 0, false, true, false, false).is_permit());
+    }
+
+    // ── write-allowlist (owner/announcements exemption) ──────────────────────
+
+    #[test]
+    fn allowlisted_author_posts_general_note_under_premium_post() {
+        // The owner npub is NOT premium and NOT otherwise registered, but is on
+        // the write-allowlist → may post a general kind-1 note to a premium relay.
+        let m = meta(A, 1, FF);
+        assert!(
+            decide(&m, WritePolicy::PremiumPost, 0, false, false, false, true).is_permit(),
+            "an allowlisted owner must be able to seed a premium-post feed"
+        );
+    }
+
+    #[test]
+    fn allowlist_bypasses_every_policy_and_kind() {
+        for policy in [
+            WritePolicy::Open,
+            WritePolicy::AuthorAllowlist,
+            WritePolicy::InboxOutbox,
+            WritePolicy::PremiumPost,
+        ] {
+            for kind in [1u64, GIFT_WRAP_KIND, 30023] {
+                let m = meta(A, kind, FF);
+                assert!(
+                    decide(&m, policy, 8, false, false, false, true).is_permit(),
+                    "allowlisted author should be permitted under {policy:?} for kind {kind}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn non_allowlisted_still_gated() {
+        // Sanity: with allowlisted=false the premium gate still bites.
+        let m = meta(A, 1, FF);
+        assert!(!decide(&m, WritePolicy::PremiumPost, 0, true, false, false, false).is_permit());
     }
 }

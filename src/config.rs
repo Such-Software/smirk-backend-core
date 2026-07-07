@@ -639,6 +639,12 @@ pub struct RelayConfig {
     pub max_event_bytes: usize,
     /// Event retention (days) — advisory for operator housekeeping/advertising.
     pub retention_days: u32,
+    /// Write-exempt npubs (hex or `npub1…`): may publish ANY kind regardless of
+    /// the write policy or premium status. The operator's use case is an
+    /// announcements / feed-owner account that seeds a `premium-post` feed without
+    /// itself holding a subscription. Empty by default. Configured via
+    /// `RELAY_WRITE_ALLOWLIST_NPUBS` (comma-separated).
+    pub write_allowlist: Vec<String>,
 }
 
 /// Public curated feed (`feed.<domain>`) — an operator knob for what the
@@ -858,6 +864,7 @@ impl Config {
                     admission_allow_public: env_bool("RELAY_ADMISSION_ALLOW_PUBLIC", false),
                     max_event_bytes: env_parse("RELAY_MAX_EVENT_BYTES", 65536usize)?,
                     retention_days: env_parse("RELAY_RETENTION_DAYS", 30u32)?,
+                    write_allowlist: env_list("RELAY_WRITE_ALLOWLIST_NPUBS"),
                 },
             },
             premium: PremiumConfig {
@@ -1419,6 +1426,7 @@ mod tests {
                     admission_allow_public: false,
                     max_event_bytes: 65536,
                     retention_days: 30,
+                    write_allowlist: Vec::new(),
                 },
             },
             premium: PremiumConfig {
@@ -1738,6 +1746,7 @@ mod tests {
             admission_allow_public: false,
             max_event_bytes: 65536,
             retention_days: 30,
+            write_allowlist: Vec::new(),
         }
     }
 

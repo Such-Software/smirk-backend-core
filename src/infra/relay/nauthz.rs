@@ -73,26 +73,37 @@ impl Authorization for AdmissionService {
         let author_hex = hex::encode(&event.pubkey);
         let id_hex = hex::encode(&event.id);
 
+        // Operator write-allowlist (owner/announcements) — a pure in-memory set
+        // check, no DB. If exempt, `decide` permits any kind immediately, so we
+        // can skip the registration/premium/recipient lookups below.
+        let author_allowlisted = self.relay.is_write_allowlisted(&author_hex);
+
         // Author registration.
-        let author_registered = self
-            .db
-            .is_registered_npub(&author_hex)
-            .await
-            .unwrap_or(false);
+        let author_registered = if author_allowlisted {
+            false
+        } else {
+            self.db
+                .is_registered_npub(&author_hex)
+                .await
+                .unwrap_or(false)
+        };
 
         // Premium membership — only the `premium-post` policy consults it, so skip
-        // the (cheap, indexed) lookup entirely under the other policies.
-        let author_premium = if self.relay.write_policy() == WritePolicy::PremiumPost {
+        // the (cheap, indexed) lookup entirely under the other policies (and when
+        // the author is already write-allowlisted).
+        let author_premium = if !author_allowlisted
+            && self.relay.write_policy() == WritePolicy::PremiumPost
+        {
             self.db.is_premium_npub(&author_hex).await.unwrap_or(false)
         } else {
             false
         };
 
-        // Recipient registration (only when the author isn't already registered):
-        // collect up to MAX_P_TAGS distinct `p` tags and resolve them in ONE
-        // batched query — bounds the work so a crafted event stuffed with `p` tags
-        // can't trigger an unbounded per-tag query storm.
-        let recipient_registered = if author_registered {
+        // Recipient registration (only when the author isn't already registered /
+        // allowlisted): collect up to MAX_P_TAGS distinct `p` tags and resolve them
+        // in ONE batched query — bounds the work so a crafted event stuffed with
+        // `p` tags can't trigger an unbounded per-tag query storm.
+        let recipient_registered = if author_registered || author_allowlisted {
             false
         } else {
             const MAX_P_TAGS: usize = 20;
@@ -123,6 +134,7 @@ impl Authorization for AdmissionService {
             author_registered,
             recipient_registered,
             author_premium,
+            author_allowlisted,
         ) {
             Admit::Permit => permit(),
             Admit::Deny(msg) => deny(msg),
