@@ -117,19 +117,33 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 .layer(normal),
         );
 
-    Router::new()
+    // The NIP-05 directory (+ health / landing) is PUBLIC, read-only, unauth'd
+    // data that MUST be cross-origin fetchable for federation to work — any Nostr
+    // client on any domain resolves `user@this-instance` by fetching the
+    // well-known. So it ALWAYS serves `Access-Control-Allow-Origin: *`, regardless
+    // of the operator's API CORS restriction (`CORS_ALLOWED_ORIGINS`). We apply the
+    // two policies to two route groups rather than one outer layer, so a restrictive
+    // API policy can't silently break NIP-05 resolution.
+    let public_cors = CorsLayer::new()
+        .allow_methods([Method::GET])
+        .allow_origin(Any);
+    let public = Router::new()
         .route("/health", get(api::health::health))
         .route("/", get(api::landing::root))
         .merge(api::nip05::routes())
-        .nest("/api/v1", api_v1)
+        .layer(public_cors);
+
+    Router::new()
+        .merge(public)
+        .nest("/api/v1", api_v1.layer(cors))
         .with_state(state)
         // Layers apply outside-in (last added = outermost). Body cap + timeout
-        // sit closest to the handlers; CORS + compression wrap them; tracing is
-        // outermost so it observes every request (incl. rejected ones).
+        // sit closest to the handlers; compression wraps them; tracing is
+        // outermost so it observes every request (incl. rejected ones). CORS is
+        // applied PER GROUP above (public → `*`, API → operator policy).
         // Per-IP rate limiting is layered separately (it needs ConnectInfo).
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(TimeoutLayer::new(REQUEST_TIMEOUT))
-        .layer(cors)
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
 }
