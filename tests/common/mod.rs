@@ -49,9 +49,16 @@ fn init_test_env(database_url: &str) {
 
 /// The router + state under test, or `None` if no `TEST_DATABASE_URL` is set.
 pub async fn try_app() -> Option<TestApp> {
+    try_app_with(|_| {}).await
+}
+
+/// Like [`try_app`], but lets a test tweak the validated `Config` before the router
+/// is built — e.g. restrict `cors_allowed_origins` to assert per-route CORS policy.
+pub async fn try_app_with(mutate: impl FnOnce(&mut Config)) -> Option<TestApp> {
     let url = std::env::var("TEST_DATABASE_URL").ok()?;
     init_test_env(&url);
-    let config = Config::from_env().expect("valid test config");
+    let mut config = Config::from_env().expect("valid test config");
+    mutate(&mut config);
 
     let pool = PgPoolOptions::new()
         .max_connections(5)
@@ -176,6 +183,45 @@ impl TestApp {
             serde_json::from_slice(&bytes).unwrap_or(Value::Null)
         };
         (status, json)
+    }
+
+    /// Issue a request with arbitrary extra request headers (e.g. an `Origin` for
+    /// CORS assertions) and return the response STATUS + HEADERS + body. The plain
+    /// `request` helper drops headers, which hid CORS/security-header regressions.
+    pub async fn request_full(
+        &self,
+        method: &str,
+        uri: &str,
+        extra_headers: &[(&str, &str)],
+        body: Option<Value>,
+    ) -> (StatusCode, axum::http::HeaderMap, Value) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                0,
+            ))));
+        for (k, v) in extra_headers {
+            builder = builder.header(*k, *v);
+        }
+        let req = match body {
+            Some(b) => builder
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&b).unwrap()))
+                .unwrap(),
+            None => builder.body(Body::empty()).unwrap(),
+        };
+        let resp = self.router.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let json = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+        };
+        (status, headers, json)
     }
 
     /// Create a fresh user with a random identity. Returns the user id.
