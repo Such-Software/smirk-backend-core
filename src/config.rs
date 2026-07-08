@@ -257,6 +257,12 @@ pub struct UtxoConfig {
     pub network: String,
     pub electrum_primary: Option<String>,
     pub electrum_fallbacks: Vec<String>,
+    /// Require CA-verified TLS (webpki + hostname) for ssl:// electrum servers.
+    /// Default false: electrum servers are self-signed by convention and their
+    /// data is treated as hostile regardless (see electrum.rs), so accepting any
+    /// cert keeps the public fallbacks usable. Operators who run their own
+    /// CA-cert'd Fulcrum can set `ELECTRUM_STRICT_TLS=1` to harden.
+    pub electrum_strict_tls: bool,
 }
 
 /// Monero/Wownero daemon + light-wallet-server configuration.
@@ -740,11 +746,13 @@ impl Config {
                     network: env_or("BTC_NETWORK", "mainnet"),
                     electrum_primary: env_opt("BTC_ELECTRUM_URL"),
                     electrum_fallbacks: env_list("BTC_ELECTRUM_FALLBACKS"),
+                    electrum_strict_tls: env_bool("ELECTRUM_STRICT_TLS", false),
                 },
                 ltc: UtxoConfig {
                     network: env_or("LTC_NETWORK", "mainnet"),
                     electrum_primary: env_opt("LTC_ELECTRUM_URL"),
                     electrum_fallbacks: env_list("LTC_ELECTRUM_FALLBACKS"),
+                    electrum_strict_tls: env_bool("ELECTRUM_STRICT_TLS", false),
                 },
                 xmr: LwsConfig {
                     lws_url: env_or("XMR_LWS_URL", "http://127.0.0.1:8443"),
@@ -1295,6 +1303,7 @@ mod tests {
             network: "mainnet".into(),
             electrum_primary: None,
             electrum_fallbacks: vec![],
+            electrum_strict_tls: false,
         };
         let lws = || LwsConfig {
             lws_url: String::new(),

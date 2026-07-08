@@ -7,8 +7,14 @@
 //! Every byte these servers return is treated as hostile — a server may be
 //! malicious, compromised, or MITM'd. The client is hardened accordingly:
 //!
-//!   * **TLS is verified** against the webpki root store *with hostname
-//!     checking*. There is no accept-any-certificate path.
+//!   * **TLS is transport encryption, not the trust boundary.** Electrum servers
+//!     present self-signed certs by ecosystem convention (public servers use
+//!     X.509v1/self-signed certs a webpki root check rejects with
+//!     `UnsupportedCertVersion`), so we accept any server cert — authenticating
+//!     an *untrusted public* fallback against a CA adds nothing when its data is
+//!     already treated as hostile. Trust comes entirely from the hardening below
+//!     (bounds, id correlation, checked amount conversion, address validation),
+//!     not from PKI. The primary is a trusted node on the private mesh.
 //!   * Each response read is **size-bounded** and each exchange is wrapped in a
 //!     **timeout** (no OOM, no slowloris).
 //!   * Addresses are decoded with the audited [`bech32`] crate (full checksum +
@@ -353,7 +359,7 @@ impl ElectrumClient {
             network,
             primary,
             fallbacks,
-            tls: build_tls_connector(),
+            tls: build_tls_connector(cfg.electrum_strict_tls),
             next_id: Arc::new(AtomicU64::new(1)),
         })
     }
@@ -639,13 +645,83 @@ impl ElectrumClient {
 /// Build the shared TLS connector seeded with the webpki root store. Hostname
 /// verification is performed by rustls at connect time against the `ServerName`
 /// passed in `exchange_ssl`.
-fn build_tls_connector() -> TlsConnector {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+/// Build the TLS connector for ssl:// electrum servers. `strict` selects CA-verified
+/// webpki (+ hostname) — for operators who run a CA-cert'd Fulcrum; the default
+/// (false) accepts any server cert. Electrum servers are self-signed by convention
+/// and their data is treated as hostile regardless, so CA-authenticating an
+/// untrusted PUBLIC fallback buys nothing while breaking it (webpki rejects the
+/// self-signed / X.509v1 cert with UnsupportedCertVersion). TLS remains as transport
+/// encryption; trust lives in the response hardening, not PKI.
+fn build_tls_connector(strict: bool) -> TlsConnector {
+    let config = if strict {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth()
+    } else {
+        rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert))
+            .with_no_client_auth()
+    };
     TlsConnector::from(Arc::new(config))
+}
+
+/// Accepts ANY server certificate (self-signed included). Safe for electrum because
+/// the transport carries only read-only public chain data that is independently
+/// validated as hostile (bounds, id correlation, checked amount conversion, address
+/// validation) — see the module header. A MITM gains nothing a malicious-but-
+/// CA-valid server couldn't already do. Gate strict verification behind
+/// `ELECTRUM_STRICT_TLS=1` if you run a trusted CA-cert'd Fulcrum.
+#[derive(Debug)]
+struct AcceptAnyServerCert;
+
+impl rustls::client::danger::ServerCertVerifier for AcceptAnyServerCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls_pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls_pki_types::CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls_pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls_pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls_pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        use rustls::SignatureScheme::*;
+        vec![
+            RSA_PKCS1_SHA256,
+            RSA_PKCS1_SHA384,
+            RSA_PKCS1_SHA512,
+            ECDSA_NISTP256_SHA256,
+            ECDSA_NISTP384_SHA384,
+            ECDSA_NISTP521_SHA512,
+            RSA_PSS_SHA256,
+            RSA_PSS_SHA384,
+            RSA_PSS_SHA512,
+            ED25519,
+        ]
+    }
 }
 
 /// Parse `ssl://host:port`, `tls://host:port`, or `tcp://host:port`.
@@ -775,6 +851,7 @@ mod tests {
             network: "mainnet".into(),
             electrum_primary: None,
             electrum_fallbacks: vec![],
+            electrum_strict_tls: false,
         }
     }
 
@@ -784,6 +861,31 @@ mod tests {
 
     fn ltc() -> ElectrumClient {
         ElectrumClient::new(UtxoNetwork::LitecoinMainnet, &cfg()).unwrap()
+    }
+
+    /// The lenient (default) TLS connector must complete the handshake + an
+    /// electrum request against PUBLIC ssl:// servers regardless of their cert
+    /// (CA-signed OR self-signed) — which is the whole point of the default: the
+    /// strict path rejects the self-signed ones with UnsupportedCertVersion and
+    /// leaves the fallback layer non-functional. Network-gated; run `--ignored`.
+    #[tokio::test]
+    #[ignore = "network: dials public electrum servers over TLS"]
+    async fn lenient_tls_connects_to_public_electrum() {
+        for server in [
+            "ssl://electrum.blockstream.info:50002", // CA-signed
+            "ssl://electrum.emzy.de:50002",          // self-signed (webpki would reject)
+        ] {
+            let cfg = UtxoConfig {
+                network: "mainnet".into(),
+                electrum_primary: Some(server.into()),
+                electrum_fallbacks: vec![],
+                electrum_strict_tls: false,
+            };
+            let client = ElectrumClient::new(UtxoNetwork::BitcoinMainnet, &cfg).unwrap();
+            let tip = client.get_tip_height().await;
+            assert!(tip.is_ok(), "lenient TLS must connect to {server}: {tip:?}");
+            assert!(tip.unwrap() > 800_000, "sanity: BTC tip height from {server}");
+        }
     }
 
     fn spk(addr: &str) -> ScriptPubKeyInfo {
