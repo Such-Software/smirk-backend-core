@@ -41,6 +41,9 @@ pub struct ChainCapabilities {
 pub struct FeatureCapabilities {
     /// Grin async slatepack relay mailbox.
     pub grin_relay: bool,
+    /// Grin light-wallet-server (grin-lws) scan path is available — fast balance
+    /// scans via grin-lws, with the authoritative grin-wallet scan as fallback.
+    pub grin_lws: bool,
     /// Fiat price feed.
     pub prices: bool,
     /// Nostr-native identity (NIP-98 login/link, NIP-05 directory).
@@ -198,6 +201,13 @@ pub(crate) fn chain_serviceable(config: &Config, asset: &str) -> bool {
     }
 }
 
+/// Whether the grin-lws scan path is serviceable: the Grin chain is serviceable
+/// AND a grin-lws URL is configured. grin-lws is an add-on to the Grin chain, so
+/// it can never be advertised for an unserviceable Grin.
+pub(crate) fn grin_lws_serviceable(config: &Config) -> bool {
+    chain_serviceable(config, "grin") && !config.chains.grin_lws.url.trim().is_empty()
+}
+
 /// Build the public capabilities projection with the secret-presence downgrade.
 pub fn effective_capabilities(config: &Config) -> CapabilitiesResponse {
     let utxo_net = |on: bool, net: &str| ChainCapability {
@@ -227,6 +237,7 @@ pub fn effective_capabilities(config: &Config) -> CapabilitiesResponse {
             // The relay is a non-custodial mailbox (the wallet broadcasts
             // locally), so it is NOT coupled to this backend's Grin chain access.
             grin_relay: config.features.grin_relay,
+            grin_lws: grin_lws_serviceable(config),
             prices: config.features.prices,
             // Nostr identity needs the canonical PUBLIC_API_URL.
             nostr_identity: config.features.nostr_identity

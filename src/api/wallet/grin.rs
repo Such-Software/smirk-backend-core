@@ -29,7 +29,13 @@ use super::validate_hex64;
 use crate::api::middleware::extract_user_id_from_token;
 use crate::error::AppError;
 use crate::infra::grin::{GrinClient, ViewWalletOutputResult};
+use crate::infra::grin_lws::{GrinLwsClient, GrinLwsUnspentOut};
 use crate::AppState;
+
+/// Blocks grin-lws's per-account scan may lag the chain tip and still be trusted.
+/// Beyond this margin the account is treated as not-yet-synced and the scan falls
+/// back to the authoritative grin-wallet scan — the money-safety seam.
+const SYNC_MARGIN: u64 = 2;
 
 /// Resolve the Grin client, or a 400 if Grin support is disabled.
 fn grin_client(state: &AppState) -> Result<&GrinClient, AppError> {
@@ -64,6 +70,15 @@ pub struct GrinOutput {
     pub mmr_index: u64,
     pub is_coinbase: bool,
     pub lock_height: u64,
+    /// Recovered derivation key id — populated only on the grin-lws path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+    /// Recovered child index — populated only on the grin-lws path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub n_child: Option<u32>,
+    /// Spendable at the current tip — populated only on the grin-lws path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spendable: Option<bool>,
 }
 
 /// Result of a view-only scan: recognized outputs, total, and the resume index.
@@ -73,6 +88,14 @@ pub struct GrinScanResponse {
     pub total_balance: u64,
     /// Resume point (`last_pmmr_index`) for the next incremental scan.
     pub last_pmmr_index: u64,
+    /// How far grin-lws has scanned this account — present only on the grin-lws
+    /// path (the authoritative grin-wallet path leaves it null).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scanned_height: Option<u64>,
+    /// Chain tip observed by grin-lws at scan time — present only on the grin-lws
+    /// path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blockchain_height: Option<u64>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -126,6 +149,26 @@ fn output_dto(o: ViewWalletOutputResult) -> GrinOutput {
         mmr_index: o.mmr_index,
         is_coinbase: o.is_coinbase,
         lock_height: o.lock_height,
+        // The grin-wallet scan does not surface derivation paths / spendability.
+        key_id: None,
+        n_child: None,
+        spendable: None,
+    }
+}
+
+/// Map a grin-lws unspent output (which carries the recovered derivation path and
+/// spendability) into the wire DTO.
+fn output_dto_lws(o: GrinLwsUnspentOut) -> GrinOutput {
+    GrinOutput {
+        commit: o.commit,
+        value: o.value,
+        height: o.height,
+        mmr_index: o.mmr_index,
+        is_coinbase: o.is_coinbase,
+        lock_height: o.lock_height,
+        key_id: o.key_id,
+        n_child: o.n_child,
+        spendable: Some(o.spendable),
     }
 }
 
@@ -154,10 +197,11 @@ pub async fn scan(
     extract_user_id_from_token(&state, &headers).await?;
     validate_hex64(&req.rewind_hash, "rewind_hash")?;
 
-    let client = grin_client(&state)?;
+    // Restore-depth + PoW gate runs ONCE, before path selection, and is TERMINAL:
+    // a policy rejection returns 400 directly. It must never be masked by the
+    // grin-wallet fallback, so it is enforced before either scan path is chosen.
     if let Some(h) = req.start_height {
-        // Restore: gate the scan depth against this instance's policy.
-        let tip = client.get_height().await?;
+        let tip = grin_tip(&state).await?;
         state.config.restore.enforce("grin", h, tip)?;
         state.config.restore.enforce_restore_pow(
             "grin",
@@ -167,6 +211,23 @@ pub async fn scan(
             req.restore_pow_nonce,
         )?;
     }
+
+    // Default to grin-lws when configured. It is trusted ONLY when provably synced
+    // to the tip; otherwise (and on any transport error) the scan falls back to
+    // the authoritative grin-wallet scan below.
+    if let Some(lws) = state.chains.grin_lws.as_ref() {
+        match scan_via_grin_lws(lws, &req).await {
+            Ok(Some(resp)) => return Ok(Json(resp)),
+            Ok(None) => {} // still backfilling — fall through to grin-wallet
+            Err(e) => {
+                tracing::warn!(error = %e, "grin-lws scan failed; falling back to grin-wallet")
+            }
+        }
+    }
+
+    // Authoritative grin-wallet scan. Its error propagates as-is (503) — we never
+    // synthesize an empty/zero success.
+    let client = grin_client(&state)?;
     let view = client
         .scan_rewind_hash(&req.rewind_hash, req.start_height)
         .await?;
@@ -174,6 +235,54 @@ pub async fn scan(
         outputs: view.output_result.into_iter().map(output_dto).collect(),
         total_balance: view.total_balance,
         last_pmmr_index: view.last_pmmr_index,
+        scanned_height: None,
+        blockchain_height: None,
+    }))
+}
+
+/// Current Grin chain tip for the restore gate: grin-lws's `/height` when
+/// configured, else the authoritative grin-wallet node. A grin-lws height error
+/// falls back to grin-wallet's tip so the gate can always be enforced.
+async fn grin_tip(state: &AppState) -> Result<u64, AppError> {
+    if let Some(lws) = state.chains.grin_lws.as_ref() {
+        match lws.get_height().await {
+            Ok(h) => return Ok(h),
+            Err(e) => {
+                tracing::warn!(error = %e, "grin-lws height failed; falling back to grin-wallet tip")
+            }
+        }
+    }
+    grin_client(state)?.get_height().await
+}
+
+/// Attempt the scan via grin-lws.
+///
+/// Returns `Ok(Some(resp))` only when the account is provably synced to the tip
+/// (`scanned_height + SYNC_MARGIN >= blockchain_height`) — the money-safety seam.
+/// `Ok(None)` means grin-lws is still backfilling this account, so the caller
+/// must fall back to the authoritative grin-wallet scan. A transport error
+/// propagates (the caller treats it as a fallback signal, never a 0/empty scan).
+async fn scan_via_grin_lws(
+    lws: &GrinLwsClient,
+    req: &GrinScanRequest,
+) -> Result<Option<GrinScanResponse>, AppError> {
+    lws.register(&req.rewind_hash, req.start_height).await?;
+    let bal = lws.get_balance(&req.rewind_hash).await?;
+    // Trust grin-lws only when its scan has effectively reached the tip.
+    // `saturating_add` so a hostile/garbled `scanned_height` can never overflow
+    // into a spurious "synced" — the worst case just falls back to grin-wallet.
+    if bal.scanned_height.saturating_add(SYNC_MARGIN) < bal.blockchain_height {
+        return Ok(None);
+    }
+    let outs = lws.get_unspent_outs(&req.rewind_hash).await?;
+    let max_mmr = outs.outputs.iter().map(|o| o.mmr_index).max().unwrap_or(0);
+    let outputs = outs.outputs.into_iter().map(output_dto_lws).collect();
+    Ok(Some(GrinScanResponse {
+        outputs,
+        total_balance: bal.total,
+        last_pmmr_index: max_mmr,
+        scanned_height: Some(bal.scanned_height),
+        blockchain_height: Some(bal.blockchain_height),
     }))
 }
 

@@ -5,6 +5,7 @@ pub mod chains;
 pub mod db;
 pub mod electrum;
 pub mod grin;
+pub mod grin_lws;
 pub mod lws;
 pub mod payment;
 pub mod prices;

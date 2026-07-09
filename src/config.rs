@@ -245,6 +245,7 @@ pub struct ChainConfig {
     pub xmr: LwsConfig,
     pub wow: LwsConfig,
     pub grin: GrinConfig,
+    pub grin_lws: GrinLwsConfig,
 }
 
 /// Bitcoin/Litecoin chain access via Electrum/Fulcrum. The backend runs no
@@ -285,6 +286,17 @@ pub struct GrinConfig {
     pub node_api_pass: String,
     pub node_foreign_api_url: String,
     pub node_foreign_api_secret: String,
+}
+
+/// grin-lws (Grin light-wallet-server) configuration. An optional add-on to the
+/// Grin chain: when `url` is set (and `FEATURE_GRIN` is on) the backend's Grin
+/// scan proxies to grin-lws first, falling back to the authoritative
+/// grin-wallet scan. Unset = "use grin-wallet only".
+#[derive(Clone)]
+pub struct GrinLwsConfig {
+    pub url: String,
+    pub admin_url: Option<String>,
+    pub admin_key: String,
 }
 
 /// Proof-of-work signup gate (ALTCHA). Feature-gated; when enabled the HMAC key
@@ -782,6 +794,11 @@ impl Config {
                         "http://127.0.0.1:3413/v2/foreign",
                     ),
                     node_foreign_api_secret: env_or("GRIN_NODE_FOREIGN_API_SECRET", ""),
+                },
+                grin_lws: GrinLwsConfig {
+                    url: env_or("GRIN_LWS_URL", ""),
+                    admin_url: env_opt("GRIN_LWS_ADMIN_URL"),
+                    admin_key: env_or("GRIN_LWS_ADMIN_KEY", ""),
                 },
             },
             pow: PowConfig {
@@ -1363,6 +1380,11 @@ mod tests {
                     node_api_pass: String::new(),
                     node_foreign_api_url: String::new(),
                     node_foreign_api_secret: String::new(),
+                },
+                grin_lws: GrinLwsConfig {
+                    url: String::new(),
+                    admin_url: None,
+                    admin_key: String::new(),
                 },
             },
             pow: PowConfig {

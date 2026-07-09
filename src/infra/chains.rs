@@ -10,6 +10,7 @@ use crate::config::Config;
 use crate::error::AppError;
 use crate::infra::electrum::ElectrumClient;
 use crate::infra::grin::GrinClient;
+use crate::infra::grin_lws::GrinLwsClient;
 use crate::infra::lws::LwsClient;
 
 /// The enabled chains' data-source clients. Cloneable (the heavyweight grin
@@ -21,6 +22,9 @@ pub struct ChainClients {
     pub xmr: Option<LwsClient>,
     pub wow: Option<LwsClient>,
     pub grin: Option<Arc<GrinClient>>,
+    /// Optional grin-lws add-on to the Grin chain: present only when Grin is
+    /// enabled AND a grin-lws URL is configured. Cheap-clone (no `Arc`).
+    pub grin_lws: Option<GrinLwsClient>,
 }
 
 impl ChainClients {
@@ -47,6 +51,9 @@ impl ChainClients {
             grin: flags
                 .grin
                 .then(|| GrinClient::new(&cfg.chains.grin).map(Arc::new))
+                .transpose()?,
+            grin_lws: (flags.grin && !cfg.chains.grin_lws.url.trim().is_empty())
+                .then(|| GrinLwsClient::new(&cfg.chains.grin_lws))
                 .transpose()?,
         })
     }
