@@ -19,6 +19,23 @@
 //! must be a registered user (no blind spam to arbitrary addresses); slatepack
 //! sizes are capped; entries expire; and the whole feature is behind
 //! `FEATURE_GRIN_RELAY` so an operator can disable the mailbox.
+//!
+//! ## Federation: this relay is a SAME-INSTANCE CONVENIENCE, not the default
+//!
+//! The relay only connects two users **registered on the same backend**: the
+//! sender is the JWT caller and the recipient is addressed by a
+//! `recipient_user_id` that must already exist in *this* instance's `users`
+//! table (there is deliberately no cross-instance address lookup here). A wallet
+//! on another backend cannot be a relay counterparty.
+//!
+//! It is therefore NOT the federated transport. The **default, federated**
+//! transport for interactive Grin transfers is Nostr gift-wrap (npub / NIP-05),
+//! which works across instances; **manual clipboard** is the universal fallback.
+//! Prefer those. This mailbox is offered only as an ergonomic shortcut when both
+//! parties happen to live on the same instance — treat it as an optimization,
+//! never as something a second backend can rely on. See the address→npub bridge
+//! in [`super::grin`] (`/wallet/grin/address/{addr}/user`), which lets a
+//! same-instance address be upgraded to federated Nostr routing.
 
 use std::sync::Arc;
 

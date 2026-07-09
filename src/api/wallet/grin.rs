@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::HeaderMap,
     routing::{get, post},
     Json, Router,
@@ -91,6 +91,31 @@ pub struct GrinBroadcastRequest {
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct GrinBroadcastResponse {
     pub ok: bool,
+}
+
+/// Resolution of a bare Grin address to its owning user's routing identity.
+///
+/// The address→npub **bridge**: given a `grin1…` slatepack address, report
+/// whether it belongs to a user registered on *this* backend and, if so, that
+/// user's linked Nostr pubkey so a bare-address send can be upgraded to a
+/// federated Nostr gift-wrap instead of the same-instance relay.
+///
+/// NOTE (federation): this is a **same-instance convenience**. It can only
+/// resolve addresses whose owner registered their Grin key here (via `POST
+/// /keys`). It is *not* a federated directory — a wallet on another backend
+/// won't be found. `registered: false` (a constant-shape miss, mirroring
+/// `GET /users/by-username`) means "unknown to this instance", at which point
+/// the sender falls back to manual clipboard / the backend relay.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct GrinAddressUserResponse {
+    /// Whether the address resolved to a user on this backend.
+    pub registered: bool,
+    /// The owning user's id (UUID), when `registered`.
+    pub user_id: Option<String>,
+    /// The owning user's linked Nostr pubkey (x-only hex), when they have one.
+    /// This is what the sender feeds the Nostr gift-wrap channel to route the
+    /// slate over Nostr. `None` when the user registered no Nostr identity.
+    pub npub: Option<String>,
 }
 
 fn output_dto(o: ViewWalletOutputResult) -> GrinOutput {
@@ -200,6 +225,46 @@ pub async fn broadcast(
     Ok(Json(GrinBroadcastResponse { ok: true }))
 }
 
+/// Resolve a bare Grin address to its owning user's Nostr routing identity.
+///
+/// The address→npub bridge (see [`GrinAddressUserResponse`]). JWT-gated: only
+/// authenticated senders resolve routing. An address unknown to this backend
+/// returns the constant-shape `registered: false` response — the caller then
+/// falls back to manual clipboard or the same-instance relay.
+#[utoipa::path(
+    security(("bearer_auth" = [])),
+    get,
+    path = "/wallet/grin/address/{addr}/user",
+    params(("addr" = String, Path, description = "Grin address (registered public key)")),
+    responses(
+        (status = 200, description = "Address resolution result", body = GrinAddressUserResponse),
+        (status = 401, description = "Missing or invalid token")
+    ),
+    tag = "grin"
+)]
+#[instrument(skip(state, headers))]
+pub async fn address_user(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(addr): Path<String>,
+) -> Result<Json<GrinAddressUserResponse>, AppError> {
+    extract_user_id_from_token(&state, &headers).await?;
+
+    let Some(user) = state.db.find_user_by_grin_address(&addr).await? else {
+        return Ok(Json(GrinAddressUserResponse {
+            registered: false,
+            user_id: None,
+            npub: None,
+        }));
+    };
+
+    Ok(Json(GrinAddressUserResponse {
+        registered: true,
+        user_id: Some(user.id.to_string()),
+        npub: user.nostr_pubkey,
+    }))
+}
+
 // ── router ────────────────────────────────────────────────────────────────────
 
 /// Grin routes, RELATIVE to the `/api/v1` mount point.
@@ -208,4 +273,5 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/wallet/grin/scan", post(scan))
         .route("/wallet/grin/height", get(height))
         .route("/wallet/grin/broadcast", post(broadcast))
+        .route("/wallet/grin/address/:addr/user", get(address_user))
 }

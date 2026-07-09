@@ -222,6 +222,29 @@ impl Database {
             .await?)
     }
 
+    /// Resolve a registered Grin address to its owning user.
+    ///
+    /// The `address` is matched verbatim against `user_keys.public_key` for the
+    /// `grin` asset (the canonical form the wallet registered via `POST /keys`).
+    /// This is a **same-instance** bridge: it only resolves addresses whose owner
+    /// registered on *this* backend. Used to look up a recipient's linked Nostr
+    /// pubkey so a bare-`grin1…`-addressed send can route over Nostr gift-wrap.
+    #[instrument(skip(self, address))]
+    pub async fn find_user_by_grin_address(
+        &self,
+        address: &str,
+    ) -> Result<Option<User>, AppError> {
+        let sql = format!(
+            "SELECT {USER_COLS} FROM users u \
+             JOIN user_keys k ON k.user_id = u.id \
+             WHERE k.asset = 'grin' AND k.public_key = $1"
+        );
+        Ok(sqlx::query_as::<_, User>(&sql)
+            .bind(address)
+            .fetch_optional(self.pool())
+            .await?)
+    }
+
     #[instrument(skip(self))]
     pub async fn get_user_by_username(&self, username: &str) -> Result<Option<User>, AppError> {
         let sql = format!("SELECT {USER_COLS} FROM users WHERE username = $1");
