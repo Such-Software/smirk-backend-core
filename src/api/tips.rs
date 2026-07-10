@@ -118,6 +118,13 @@ pub struct CancelTipResponse {
     pub ok: bool,
 }
 
+/// Attach a broadcast funding transaction to a draft tip.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct AttachFundingRequest {
+    /// The on-chain funding transaction id (XMR/WOW txid, BTC/LTC txid).
+    pub funding_txid: String,
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /// Reject when tips are not enabled on this instance.
@@ -408,10 +415,75 @@ pub async fn cancel_social_tip(
     }
 }
 
+/// Attach a broadcast funding tx to a draft tip, advancing it into the funding
+/// lifecycle (`pending_confirmation`; the funding worker later flips it to
+/// `pending` once the on-chain receipt is confirmed AND covers `amount`).
+///
+/// Idempotent: re-attaching the SAME txid is a no-op that returns the row; a
+/// DIFFERENT txid on a tip that already has one (or a non-draft tip) is a 400;
+/// an unknown / not-owned tip is a 404. Response mirrors create: the same
+/// `CreateSocialTipResponse { tip_id, status, share_url }`.
+#[utoipa::path(
+    security(("bearer_auth" = [])),
+    post,
+    path = "/tips/social/{tip_id}/attach-funding",
+    params(("tip_id" = String, Path, description = "Tip id")),
+    request_body = AttachFundingRequest,
+    responses(
+        (status = 200, description = "Funding attached", body = CreateSocialTipResponse),
+        (status = 400, description = "Tips off, empty/oversized txid, or a conflicting funding tx"),
+        (status = 401, description = "Missing or invalid token"),
+        (status = 404, description = "No such tip owned by the caller")
+    ),
+    tag = "tips"
+)]
+#[instrument(skip(state, headers, req))]
+pub async fn attach_funding(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(tip_id): Path<Uuid>,
+    Json(req): Json<AttachFundingRequest>,
+) -> Result<Json<CreateSocialTipResponse>, AppError> {
+    let user_id = extract_user_id_from_token(&state, &headers).await?;
+    ensure_tips_enabled(&state)?;
+
+    // Validate the txid shape so a malformed value is a clean 400 rather than a
+    // DB length-overflow 500 (funding_txid is VARCHAR(128)).
+    let funding_txid = req.funding_txid.trim();
+    if funding_txid.is_empty() {
+        return Err(AppError::ValidationError("funding_txid is required.".into()));
+    }
+    if funding_txid.len() > 128 {
+        return Err(AppError::ValidationError("funding_txid is too long.".into()));
+    }
+
+    // The DB fn returns Ok(row) / NotFound / ValidationError; just surface it.
+    let tip = state
+        .db
+        .attach_funding_to_tip(tip_id, user_id, funding_txid)
+        .await?;
+
+    let share_url = state
+        .config
+        .tip_share_base
+        .as_ref()
+        .map(|base| format!("{}/{}", base.trim_end_matches('/'), tip.id));
+
+    Ok(Json(CreateSocialTipResponse {
+        tip_id: tip.id.to_string(),
+        status: tip.status,
+        share_url,
+    }))
+}
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/tips/social", post(create_social_tip))
         .route("/tips/social/sent", get(get_sent_social_tips))
         .route("/tips/social/:tip_id/public", get(get_public_social_tip))
         .route("/tips/social/:tip_id/cancel", post(cancel_social_tip))
+        .route(
+            "/tips/social/:tip_id/attach-funding",
+            post(attach_funding),
+        )
 }

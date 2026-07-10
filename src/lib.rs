@@ -14,6 +14,7 @@ pub mod core;
 pub mod error;
 pub mod infra;
 pub mod models;
+pub mod tips;
 
 use std::collections::HashMap;
 use std::sync::Arc;

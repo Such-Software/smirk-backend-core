@@ -262,6 +262,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Public-tips "money-in" worker: one funding pass per 60s (confirmation
+    // counting for XMR/WOW, then the amount verifier across all
+    // pending_confirmation tips). Only runs when tips are enabled. A panic in a
+    // single pass is caught + backed off so the loop survives (visible in logs)
+    // rather than silently dying and stranding every pending tip.
+    if state.config.features.tips {
+        use futures::FutureExt;
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                let cycle = std::panic::AssertUnwindSafe(
+                    smirk_backend_core::tips::run_tip_confirmation_cycle(state.clone()),
+                );
+                if cycle.catch_unwind().await.is_err() {
+                    tracing::error!("tip confirmation cycle panicked; continuing after backoff");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            }
+        });
+    }
+
     let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;

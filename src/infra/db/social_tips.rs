@@ -184,4 +184,246 @@ impl Database {
         .await?;
         Ok(cancelled)
     }
+
+    // ── Stage 3: money-in (attach funding + confirmation/amount verifier) ──────
+    //
+    // Every method below is a single guarded `UPDATE ... WHERE ... RETURNING`
+    // (or a filtered SELECT for the worker). The WHERE guards are the
+    // money-safety surface: the amount verifier only ever transitions a row it
+    // still finds in `pending_confirmation` with `funding_amount_verified =
+    // FALSE`, so an LWS/Electrum outage that re-drives the verifier can never
+    // double-fire or clobber a claimed/clawed-back row.
+
+    /// Attach a broadcast funding tx to a `draft` tip, advancing it into the
+    /// funding lifecycle. Idempotent: attaching the SAME txid again is a no-op
+    /// that returns the row; a DIFFERENT txid (or a non-draft row) is a
+    /// [`AppError::ValidationError`]; an unknown / not-owned id is
+    /// [`AppError::NotFound`].
+    ///
+    /// One atomic guarded UPDATE encodes all three legitimate outcomes:
+    ///   1. `draft` + `funding_txid IS NULL` → attach and flip to
+    ///      `pending_confirmation`.
+    ///   2. row already carries the same `funding_txid` → the `funding_txid =
+    ///      $3` arm matches, `COALESCE` keeps it, status stays (no-op).
+    ///   3. anything else → no row, disambiguated by the follow-up SELECT.
+    ///
+    /// ALL non-draft tips land in `pending_confirmation` (never `pending`), so
+    /// the funding-amount verifier — never the caller — owns the transition to
+    /// claimable. `COALESCE(funding_txid, $3)` can never overwrite an existing
+    /// txid, which is what makes the same-txid retry a true no-op.
+    #[instrument(skip(self))]
+    pub async fn attach_funding_to_tip(
+        &self,
+        tip_id: Uuid,
+        sender_user_id: Uuid,
+        funding_txid: &str,
+    ) -> Result<SocialTipRow, AppError> {
+        let target_status = TipStatus::PendingConfirmation.as_str();
+        let result = sqlx::query_as::<_, SocialTipRow>(&format!(
+            "UPDATE social_tips \
+             SET funding_txid = COALESCE(funding_txid, $3), \
+                 status = CASE \
+                     WHEN status = 'draft' AND funding_txid IS NULL THEN $4 \
+                     ELSE status END, \
+                 updated_at = CASE \
+                     WHEN status = 'draft' AND funding_txid IS NULL THEN NOW() \
+                     ELSE updated_at END \
+             WHERE id = $1 \
+               AND sender_user_id = $2 \
+               AND ((status = 'draft' AND funding_txid IS NULL) OR funding_txid = $3) \
+             RETURNING {TIP_COLS}"
+        ))
+        .bind(tip_id)
+        .bind(sender_user_id)
+        .bind(funding_txid)
+        .bind(target_status)
+        .fetch_optional(self.pool())
+        .await?;
+
+        if let Some(tip) = result {
+            return Ok(tip);
+        }
+
+        // The guarded UPDATE matched nothing. A single follow-up SELECT (error
+        // path only) distinguishes "not your tip / doesn't exist" from "already
+        // has a different funding_txid" from "wrong status".
+        let current = sqlx::query_as::<_, SocialTipRow>(&format!(
+            "SELECT {TIP_COLS} FROM social_tips WHERE id = $1 AND sender_user_id = $2"
+        ))
+        .bind(tip_id)
+        .bind(sender_user_id)
+        .fetch_optional(self.pool())
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Tip {tip_id} not found or not yours")))?;
+
+        if let Some(existing_txid) = current.funding_txid.as_ref() {
+            if existing_txid != funding_txid {
+                return Err(AppError::ValidationError(format!(
+                    "Tip {tip_id} already has a different funding_txid attached"
+                )));
+            }
+            // Same txid — a race where the UPDATE matched but a concurrent write
+            // modified the row between statements. Return the current row as-is.
+            return Ok(current);
+        }
+
+        Err(AppError::ValidationError(format!(
+            "Tip {tip_id} is in status {} — funding can only be attached to drafts",
+            current.status
+        )))
+    }
+
+    /// Tips of `asset` that still need on-chain confirmation counting: in
+    /// `pending`/`pending_confirmation`, with a non-zero threshold not yet
+    /// reached, a funding txid attached, and not checked in the last 30s (per-row
+    /// rate limit). XMR/WOW only in practice — BTC/LTC have
+    /// `confirmations_required = 0` and are excluded by the `> 0` guard.
+    #[instrument(skip(self))]
+    pub async fn get_tips_pending_confirmation(
+        &self,
+        asset: &str,
+    ) -> Result<Vec<SocialTipRow>, AppError> {
+        let rows = sqlx::query_as::<_, SocialTipRow>(&format!(
+            "SELECT {TIP_COLS} FROM social_tips \
+             WHERE status IN ('pending', 'pending_confirmation') \
+               AND asset = $1 \
+               AND confirmations_required > 0 \
+               AND funding_confirmations < confirmations_required \
+               AND funding_txid IS NOT NULL \
+               AND (last_confirmation_check IS NULL \
+                    OR last_confirmation_check < NOW() - INTERVAL '30 seconds') \
+             ORDER BY created_at ASC \
+             LIMIT 50"
+        ))
+        .bind(asset)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// Record the latest `funding_confirmations` and stamp `funding_confirmed_at`
+    /// the first time the threshold is met. Deliberately does NOT flip status:
+    /// the `pending_confirmation` → `pending` transition is owned by the
+    /// funding-AMOUNT verifier (a tip with enough confirmations but a short
+    /// receipt must land in `funding_mismatch`, never become claimable).
+    #[instrument(skip(self))]
+    pub async fn update_tip_confirmations(
+        &self,
+        tip_id: Uuid,
+        confirmations: i32,
+    ) -> Result<Option<SocialTipRow>, AppError> {
+        let row = sqlx::query_as::<_, SocialTipRow>(&format!(
+            "UPDATE social_tips \
+             SET funding_confirmations = $2, \
+                 last_confirmation_check = NOW(), \
+                 funding_confirmed_at = CASE \
+                     WHEN $2 >= confirmations_required AND funding_confirmed_at IS NULL \
+                     THEN NOW() ELSE funding_confirmed_at END, \
+                 updated_at = NOW() \
+             WHERE id = $1 \
+             RETURNING {TIP_COLS}"
+        ))
+        .bind(tip_id)
+        .bind(confirmations)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(row)
+    }
+
+    /// Stamp `last_confirmation_check = NOW()` only, touching nothing else. The
+    /// verifier calls this on its non-mutating branches (Unfunded / Drained /
+    /// LwsError) so the 30s per-row rate-limit predicate actually starves a
+    /// re-polled row during an outage instead of re-hitting it every cycle.
+    #[instrument(skip(self))]
+    pub async fn touch_tip_last_check(&self, tip_id: Uuid) -> Result<(), AppError> {
+        sqlx::query("UPDATE social_tips SET last_confirmation_check = NOW() WHERE id = $1")
+            .bind(tip_id)
+            .execute(self.pool())
+            .await?;
+        Ok(())
+    }
+
+    /// Tips that have reached their confirmation threshold and await
+    /// funding-amount verification: still `pending_confirmation`, not yet
+    /// amount-verified, `funding_confirmations >= confirmations_required`, and
+    /// past the 30s per-row rate limit. (BTC/LTC with threshold 0 qualify
+    /// immediately.)
+    #[instrument(skip(self))]
+    pub async fn get_tips_awaiting_amount_verification(
+        &self,
+    ) -> Result<Vec<SocialTipRow>, AppError> {
+        let rows = sqlx::query_as::<_, SocialTipRow>(&format!(
+            "SELECT {TIP_COLS} FROM social_tips \
+             WHERE status = 'pending_confirmation' \
+               AND funding_amount_verified = FALSE \
+               AND funding_confirmations >= confirmations_required \
+               AND (last_confirmation_check IS NULL \
+                    OR last_confirmation_check < NOW() - INTERVAL '30 seconds') \
+             ORDER BY created_at ASC \
+             LIMIT 50"
+        ))
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// Mark funding amount-verified and flip `pending_confirmation` → `pending`
+    /// (claimable). The `status = 'pending_confirmation' AND
+    /// funding_amount_verified = FALSE` guard makes this idempotent: a second
+    /// call (or a row clawed back mid-poll) returns `None` and the caller skips
+    /// its side effects. `observed_amount` is the on-chain receipt total (>=
+    /// `amount`), in atomic units.
+    #[instrument(skip(self))]
+    pub async fn mark_tip_funding_verified(
+        &self,
+        tip_id: Uuid,
+        observed_amount: i64,
+    ) -> Result<Option<SocialTipRow>, AppError> {
+        let row = sqlx::query_as::<_, SocialTipRow>(&format!(
+            "UPDATE social_tips \
+             SET status = 'pending', \
+                 funding_amount_verified = TRUE, \
+                 funding_amount_observed = $2, \
+                 funding_amount_verified_at = NOW(), \
+                 updated_at = NOW() \
+             WHERE id = $1 \
+               AND status = 'pending_confirmation' \
+               AND funding_amount_verified = FALSE \
+             RETURNING {TIP_COLS}"
+        ))
+        .bind(tip_id)
+        .bind(observed_amount)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(row)
+    }
+
+    /// Mark a short-funded tip: flip `pending_confirmation` → `funding_mismatch`
+    /// (never claimable; the sender can claw it back). Same idempotency guard as
+    /// [`mark_tip_funding_verified`]. `observed_amount` is the on-chain receipt
+    /// total (< `amount`), in atomic units.
+    #[instrument(skip(self))]
+    pub async fn mark_tip_funding_mismatch(
+        &self,
+        tip_id: Uuid,
+        observed_amount: i64,
+    ) -> Result<Option<SocialTipRow>, AppError> {
+        let row = sqlx::query_as::<_, SocialTipRow>(&format!(
+            "UPDATE social_tips \
+             SET status = 'funding_mismatch', \
+                 funding_amount_verified = TRUE, \
+                 funding_amount_observed = $2, \
+                 funding_amount_verified_at = NOW(), \
+                 updated_at = NOW() \
+             WHERE id = $1 \
+               AND status = 'pending_confirmation' \
+               AND funding_amount_verified = FALSE \
+             RETURNING {TIP_COLS}"
+        ))
+        .bind(tip_id)
+        .bind(observed_amount)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(row)
+    }
 }

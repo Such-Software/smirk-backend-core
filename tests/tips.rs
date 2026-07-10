@@ -168,3 +168,234 @@ async fn tips_disabled_returns_400() {
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "tips off must 400");
 }
+
+// ── Stage 3: money-in (attach-funding + funding verifier) DB-level tests ──────
+
+use smirk_backend_core::error::AppError;
+use smirk_backend_core::infra::db::NewSocialTip;
+
+/// Create a draft tip for `uid` and return its id. `conf` = confirmations_required.
+async fn make_draft(
+    app: &common::TestApp,
+    uid: uuid::Uuid,
+    asset: &str,
+    amount: i64,
+    conf: i32,
+    view_key: Option<&str>,
+) -> uuid::Uuid {
+    let new = NewSocialTip {
+        sender_user_id: uid,
+        asset,
+        amount,
+        claim_key_hash: Some(CLAIM_HASH),
+        encrypted_key: None,
+        tip_address: Some(BTC_ADDR),
+        funding_txid: None,
+        tip_view_key: view_key,
+        confirmations_required: conf,
+    };
+    app.state
+        .db
+        .create_draft_social_tip(new)
+        .await
+        .expect("create draft")
+        .id
+}
+
+#[tokio::test]
+async fn attach_funding_is_idempotent_and_advances_draft() {
+    let Some(app) = tips_app().await else { return };
+    let uid = app.create_user().await;
+    let tip_id = make_draft(&app, uid, "btc", 100_000, 0, None).await;
+
+    // First attach: draft -> pending_confirmation, funding_txid recorded.
+    let r1 = app
+        .state
+        .db
+        .attach_funding_to_tip(tip_id, uid, "txid-aaa")
+        .await
+        .expect("attach");
+    assert_eq!(r1.id, tip_id);
+    assert_eq!(r1.status, "pending_confirmation");
+    assert_eq!(r1.funding_txid.as_deref(), Some("txid-aaa"));
+    assert!(!r1.funding_amount_verified);
+
+    // Second attach, SAME txid: idempotent no-op returning the same row.
+    let r2 = app
+        .state
+        .db
+        .attach_funding_to_tip(tip_id, uid, "txid-aaa")
+        .await
+        .expect("attach idempotent");
+    assert_eq!(r2.id, tip_id);
+    assert_eq!(r2.status, "pending_confirmation");
+    assert_eq!(r2.funding_txid.as_deref(), Some("txid-aaa"));
+}
+
+#[tokio::test]
+async fn attach_funding_conflicting_txid_is_validation_error() {
+    let Some(app) = tips_app().await else { return };
+    let uid = app.create_user().await;
+    let tip_id = make_draft(&app, uid, "btc", 100_000, 0, None).await;
+    app.state
+        .db
+        .attach_funding_to_tip(tip_id, uid, "txid-first")
+        .await
+        .expect("attach");
+
+    // A DIFFERENT txid on the same tip -> ValidationError (400).
+    let err = app
+        .state
+        .db
+        .attach_funding_to_tip(tip_id, uid, "txid-DIFFERENT")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AppError::ValidationError(_)), "expected ValidationError, got {err:?}");
+
+    // Not-owned / unknown tip -> NotFound (404).
+    let other = app.create_user().await;
+    let err = app
+        .state
+        .db
+        .attach_funding_to_tip(tip_id, other, "txid-x")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AppError::NotFound(_)), "expected NotFound, got {err:?}");
+}
+
+#[tokio::test]
+async fn mark_verified_only_from_pending_confirmation() {
+    let Some(app) = tips_app().await else { return };
+    let uid = app.create_user().await;
+
+    // A draft is NOT pending_confirmation -> mark returns None (guard misses).
+    let draft_id = make_draft(&app, uid, "btc", 100_000, 0, None).await;
+    let none = app
+        .state
+        .db
+        .mark_tip_funding_verified(draft_id, 100_000)
+        .await
+        .expect("mark on draft");
+    assert!(none.is_none(), "mark_verified on a draft must return None");
+
+    // Attach -> pending_confirmation; verify flips it to pending + records observed.
+    app.state
+        .db
+        .attach_funding_to_tip(draft_id, uid, "txid-v")
+        .await
+        .expect("attach");
+    let verified = app
+        .state
+        .db
+        .mark_tip_funding_verified(draft_id, 250_000)
+        .await
+        .expect("verify")
+        .expect("verify returns row");
+    assert_eq!(verified.status, "pending");
+    assert!(verified.funding_amount_verified);
+    assert_eq!(verified.funding_amount_observed, Some(250_000));
+
+    // Re-verify -> None (funding_amount_verified guard no longer matches).
+    let again = app
+        .state
+        .db
+        .mark_tip_funding_verified(draft_id, 250_000)
+        .await
+        .expect("verify idempotent");
+    assert!(again.is_none(), "re-verify must return None");
+}
+
+#[tokio::test]
+async fn mark_mismatch_transitions_to_funding_mismatch() {
+    let Some(app) = tips_app().await else { return };
+    let uid = app.create_user().await;
+    let tip_id = make_draft(&app, uid, "btc", 1_000_000, 0, None).await;
+    app.state
+        .db
+        .attach_funding_to_tip(tip_id, uid, "txid-m")
+        .await
+        .expect("attach");
+
+    let mismatch = app
+        .state
+        .db
+        .mark_tip_funding_mismatch(tip_id, 10)
+        .await
+        .expect("mismatch")
+        .expect("mismatch returns row");
+    assert_eq!(mismatch.status, "funding_mismatch");
+    assert!(mismatch.funding_amount_verified);
+    assert_eq!(mismatch.funding_amount_observed, Some(10));
+
+    // Idempotent, and a funding_mismatch row can never be flipped claimable.
+    let again = app
+        .state
+        .db
+        .mark_tip_funding_mismatch(tip_id, 10)
+        .await
+        .expect("mismatch idempotent");
+    assert!(again.is_none());
+    let verify_after = app
+        .state
+        .db
+        .mark_tip_funding_verified(tip_id, 10)
+        .await
+        .expect("verify after mismatch");
+    assert!(verify_after.is_none(), "a funding_mismatch row must not become claimable");
+}
+
+#[tokio::test]
+async fn get_tips_pending_confirmation_filters() {
+    let Some(app) = tips_app().await else { return };
+    // Deterministic: this is the only test that creates xmr rows. Clear leftovers
+    // so the query's LIMIT 50 / ORDER BY created_at window can't hide our row.
+    sqlx::query("DELETE FROM social_tips WHERE asset = 'xmr'")
+        .execute(app.state.db.pool())
+        .await
+        .expect("clear xmr rows");
+
+    let uid = app.create_user().await;
+    let vk = "0".repeat(64);
+
+    // XMR tip: threshold 10 + funding attached -> INCLUDED.
+    let xmr_id = make_draft(&app, uid, "xmr", 500, 10, Some(vk.as_str())).await;
+    app.state
+        .db
+        .attach_funding_to_tip(xmr_id, uid, "xmrtxid")
+        .await
+        .expect("attach xmr");
+
+    // XMR draft with NO funding -> EXCLUDED (funding_txid IS NULL, status draft).
+    let xmr_draft = make_draft(&app, uid, "xmr", 500, 10, Some(vk.as_str())).await;
+
+    // BTC tip: threshold 0 -> EXCLUDED (confirmations_required > 0 guard).
+    let btc_id = make_draft(&app, uid, "btc", 100_000, 0, None).await;
+    app.state
+        .db
+        .attach_funding_to_tip(btc_id, uid, "btctxid")
+        .await
+        .expect("attach btc");
+
+    let xmr_pending = app
+        .state
+        .db
+        .get_tips_pending_confirmation("xmr")
+        .await
+        .expect("xmr pending");
+    assert!(xmr_pending.iter().any(|t| t.id == xmr_id), "funded xmr tip must be returned");
+    assert!(
+        !xmr_pending.iter().any(|t| t.id == xmr_draft),
+        "unfunded xmr draft must be excluded"
+    );
+
+    let btc_pending = app
+        .state
+        .db
+        .get_tips_pending_confirmation("btc")
+        .await
+        .expect("btc pending");
+    assert!(
+        !btc_pending.iter().any(|t| t.id == btc_id),
+        "btc tip (threshold 0) must be excluded from the confirmation query"
+    );
+}
