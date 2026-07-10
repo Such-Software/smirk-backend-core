@@ -3,3 +3,4 @@
 //! Request/response DTOs are added alongside the handlers that use them.
 
 pub mod db;
+pub mod tip_status;

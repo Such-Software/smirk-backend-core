@@ -20,6 +20,7 @@ mod premium_invoices;
 mod restore_attempts;
 mod server_config;
 mod sessions;
+mod social_tips;
 mod user_keys;
 mod users;
 
@@ -29,6 +30,7 @@ pub use login_events::LoginStats;
 pub use payment_invoices::PaymentInvoiceRow;
 pub use premium_invoices::PremiumInvoiceRow;
 pub use server_config::SetupState;
+pub use social_tips::SocialTipRow;
 
 use sqlx::PgPool;
 
