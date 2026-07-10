@@ -73,6 +73,9 @@ use utoipa::OpenApi;
         crate::api::tips::get_public_social_tip,
         crate::api::tips::cancel_social_tip,
         crate::api::tips::attach_funding,
+        crate::api::tips::claim_social_tip,
+        crate::api::tips::confirm_sweep,
+        crate::api::tips::clawback_social_tip,
     ),
     components(schemas(
         crate::api::health::HealthResponse,
@@ -170,6 +173,10 @@ use utoipa::OpenApi;
         crate::api::tips::PublicTipInfo,
         crate::api::tips::CancelTipResponse,
         crate::api::tips::AttachFundingRequest,
+        crate::api::tips::ClaimTipResponse,
+        crate::api::tips::ConfirmSweepRequest,
+        crate::api::tips::ConfirmSweepResponse,
+        crate::api::tips::ClawbackTipResponse,
     )),
     tags(
         (name = "system", description = "Service health and metadata."),

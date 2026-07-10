@@ -29,10 +29,8 @@ pub(crate) const TIP_COLS: &str = "\
     lws_deactivated_at, created_at, updated_at";
 
 /// A persisted public social tip. Field names/order match [`TIP_COLS`] (sqlx
-/// `FromRow` maps by name). Fields not read until later port stages are held
-/// behind `allow(dead_code)`.
+/// `FromRow` maps by name).
 #[derive(Debug, Clone, FromRow)]
-#[allow(dead_code)]
 pub struct SocialTipRow {
     pub id: Uuid,
     pub sender_user_id: Uuid,
@@ -425,5 +423,359 @@ impl Database {
         .fetch_optional(self.pool())
         .await?;
         Ok(row)
+    }
+
+    // ── Stage 4: money-out (claim / confirm-sweep / clawback + reconciler) ──────
+    //
+    // The HIGHEST money-safety surface. Every method below is a single guarded
+    // `UPDATE ... WHERE ... RETURNING` and the WHERE guards are non-negotiable —
+    // a wrong conjunct loses funds. Guards ported VERBATIM from the audited
+    // legacy `smirk-backend/src/infra/db/social_tips.rs` (public subset: the
+    // targeted/recipient branches are dropped, `is_public = TRUE` is kept).
+
+    /// Lock a claimable tip into `claiming` and hand the claimer the encrypted
+    /// key + tip address. THE DOUBLE-CLAIM GUARD — every conjunct is
+    /// non-negotiable:
+    ///   - `status IN ('pending', 'claiming')` (audit T1): without it a
+    ///     `funding_mismatch` / `clawed_back` row would re-pass the UPDATE
+    ///     because it still satisfies the confirmation/amount/sweep predicates —
+    ///     a URL holder could curl `/claim` on an underfunded tip and sweep the
+    ///     short amount before the sender's clawback wins.
+    ///   - `funding_confirmations >= confirmations_required AND
+    ///     funding_amount_verified = TRUE`: only a fully-funded, amount-verified
+    ///     tip is claimable.
+    ///   - `sweep_confirmed_at IS NULL`: never re-hand the key on a settled tip.
+    ///   - `is_public = TRUE`: public-only port; a public tip's claim state is a
+    ///     UX signal, not a cryptographic lock (whoever wins the on-chain sweep
+    ///     race wins the tip). `claimed_by_user_id` is recorded for DM routing
+    ///     only, carrying no exclusive rights.
+    ///
+    /// Returns `None` (not claimable) for a missing / non-claimable / already-
+    /// swept row.
+    #[instrument(skip(self))]
+    pub async fn mark_tip_claiming(
+        &self,
+        tip_id: Uuid,
+        claimed_by_user_id: Uuid,
+    ) -> Result<Option<SocialTipRow>, AppError> {
+        let tip = sqlx::query_as::<_, SocialTipRow>(&format!(
+            "UPDATE social_tips \
+             SET status = 'claiming', \
+                 claimed_at = NOW(), \
+                 claimed_by_user_id = $2, \
+                 updated_at = NOW() \
+             WHERE id = $1 \
+               AND status IN ('pending', 'claiming') \
+               AND funding_confirmations >= confirmations_required \
+               AND funding_amount_verified = TRUE \
+               AND sweep_confirmed_at IS NULL \
+               AND is_public = TRUE \
+             RETURNING {TIP_COLS}"
+        ))
+        .bind(tip_id)
+        .bind(claimed_by_user_id)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(tip)
+    }
+
+    /// RECORD (not settle) the claimer's broadcast sweep txid, leaving the row in
+    /// `claiming`. The reconciler — never this call — owns `claiming -> claimed`,
+    /// and only once the sweep CONFIRMS on-chain. This closes the RBF-steal
+    /// false-"claimed" vector: a URL holder who RBFs the recorded sweep can't
+    /// trigger a premature settlement.
+    ///
+    /// First-recorder-wins + idempotent: the guard
+    /// `(sweep_txid IS NULL OR sweep_txid = $3)` records the first txid and makes
+    /// a second call with the SAME txid a no-op; a second call with a DIFFERENT
+    /// txid does NOT overwrite (the UPDATE matches nothing) — junk-txid poisoning
+    /// stays blocked. In that case the fallthrough SELECT returns the current
+    /// row (with the WINNING first txid) so the caller renders live state; both
+    /// the first and the different-second call therefore return `Some`.
+    ///
+    /// Returns `None` only when the tip doesn't exist or isn't in
+    /// `claiming`/`claimed` (e.g. `/confirm-sweep` on a never-claimed tip).
+    #[instrument(skip(self))]
+    pub async fn confirm_tip_sweep(
+        &self,
+        tip_id: Uuid,
+        claimer_user_id: Uuid,
+        sweep_txid: &str,
+    ) -> Result<Option<SocialTipRow>, AppError> {
+        let recorded = sqlx::query_as::<_, SocialTipRow>(&format!(
+            "UPDATE social_tips \
+             SET sweep_txid = COALESCE(sweep_txid, $3), \
+                 claimed_by_user_id = COALESCE(claimed_by_user_id, $2), \
+                 claimed_at = COALESCE(claimed_at, NOW()), \
+                 updated_at = NOW() \
+             WHERE id = $1 \
+               AND status = 'claiming' \
+               AND sweep_confirmed_at IS NULL \
+               AND is_public = TRUE \
+               AND (sweep_txid IS NULL OR sweep_txid = $3) \
+             RETURNING {TIP_COLS}"
+        ))
+        .bind(tip_id)
+        .bind(claimer_user_id)
+        .bind(sweep_txid)
+        .fetch_optional(self.pool())
+        .await?;
+
+        if let Some(tip) = recorded {
+            return Ok(Some(tip));
+        }
+
+        // Did not record (already settled, a DIFFERENT txid already recorded, or
+        // not a claiming/claimed row): return the current row so the caller can
+        // render live state — first-recorder's txid wins.
+        let existing = sqlx::query_as::<_, SocialTipRow>(&format!(
+            "SELECT {TIP_COLS} FROM social_tips \
+             WHERE id = $1 AND status IN ('claiming', 'claimed')"
+        ))
+        .bind(tip_id)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(existing)
+    }
+
+    /// Sender reclaims the funds. Guard ported verbatim (evolved across two
+    /// audits):
+    ///   - `sender_user_id = $2`: only the sender can claw back.
+    ///   - `status IN ('pending', 'pending_confirmation', 'claiming',
+    ///     'funding_mismatch', 'cancelled')`: the 5-status set lets a sender
+    ///     recover a tip racing a claimer (`claiming`), an underfunded tip
+    ///     (`funding_mismatch`), and a GC-cancelled-but-still-funded draft
+    ///     (`cancelled`).
+    ///   - `sweep_confirmed_at IS NULL`: never roll back a settled `claimed` row.
+    ///
+    /// Returns `None` when no such clawable row (wrong owner, wrong status, or
+    /// already settled).
+    #[instrument(skip(self))]
+    pub async fn clawback_social_tip(
+        &self,
+        tip_id: Uuid,
+        sender_user_id: Uuid,
+    ) -> Result<Option<SocialTipRow>, AppError> {
+        let tip = sqlx::query_as::<_, SocialTipRow>(&format!(
+            "UPDATE social_tips \
+             SET status = 'clawed_back', \
+                 clawed_back_at = NOW(), \
+                 updated_at = NOW() \
+             WHERE id = $1 \
+               AND sender_user_id = $2 \
+               AND status IN ( \
+                 'pending', \
+                 'pending_confirmation', \
+                 'claiming', \
+                 'funding_mismatch', \
+                 'cancelled' \
+               ) \
+               AND sweep_confirmed_at IS NULL \
+             RETURNING {TIP_COLS}"
+        ))
+        .bind(tip_id)
+        .bind(sender_user_id)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(tip)
+    }
+
+    /// The SOLE new writer of `status = 'claimed'`. Settle a tip on-chain after
+    /// its sweep confirmed to the per-asset depth.
+    ///
+    /// One-way lock: the `status = 'claiming' AND sweep_confirmed_at IS NULL`
+    /// guard means the FIRST reconciler tick to observe the on-chain winner wins
+    /// the transition; any later tick (or an instance that lost the advisory-lock
+    /// race) gets `None` and fires no side effects.
+    ///
+    /// `claimed_by`: `Some` overwrites `claimed_by_user_id`; `None` PRESERVES it
+    /// (the `CASE WHEN $5 IS NOT NULL` guard). This method can only set-or-keep,
+    /// never clear — to NULL the attribution use `clear_claimed_by_on_settle`.
+    #[instrument(skip(self))]
+    pub async fn confirm_sweep_onchain(
+        &self,
+        tip_id: Uuid,
+        winner_txid: &str,
+        block_height: i32,
+        block_hash: Option<&str>,
+        claimed_by: Option<Uuid>,
+    ) -> Result<Option<SocialTipRow>, AppError> {
+        let tip = sqlx::query_as::<_, SocialTipRow>(&format!(
+            "UPDATE social_tips \
+             SET status = 'claimed', \
+                 sweep_confirmed_at = NOW(), \
+                 sweep_txid = $2, \
+                 sweep_block_height = $3, \
+                 sweep_block_hash = $4, \
+                 claimed_by_user_id = CASE \
+                     WHEN $5::uuid IS NOT NULL THEN $5 \
+                     ELSE claimed_by_user_id END, \
+                 updated_at = NOW() \
+             WHERE id = $1 \
+               AND status = 'claiming' \
+               AND sweep_confirmed_at IS NULL \
+             RETURNING {TIP_COLS}"
+        ))
+        .bind(tip_id)
+        .bind(winner_txid)
+        .bind(block_height)
+        .bind(block_hash)
+        .bind(claimed_by)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(tip)
+    }
+
+    /// Settle to `claimed` AND NULL `claimed_by_user_id`. Used when the on-chain
+    /// winner's txid doesn't match the recorded `sweep_txid` (RBF / unknown
+    /// sweeper) or none was recorded — a public tip swept by a URL holder who
+    /// isn't the recorded claimer. Same one-way `claiming -> claimed` lock as
+    /// `confirm_sweep_onchain`; `None` if already settled.
+    #[instrument(skip(self))]
+    pub async fn clear_claimed_by_on_settle(
+        &self,
+        tip_id: Uuid,
+        winner_txid: &str,
+        block_height: i32,
+        block_hash: Option<&str>,
+    ) -> Result<Option<SocialTipRow>, AppError> {
+        let tip = sqlx::query_as::<_, SocialTipRow>(&format!(
+            "UPDATE social_tips \
+             SET status = 'claimed', \
+                 sweep_confirmed_at = NOW(), \
+                 sweep_txid = $2, \
+                 sweep_block_height = $3, \
+                 sweep_block_hash = $4, \
+                 claimed_by_user_id = NULL, \
+                 updated_at = NOW() \
+             WHERE id = $1 \
+               AND status = 'claiming' \
+               AND sweep_confirmed_at IS NULL \
+             RETURNING {TIP_COLS}"
+        ))
+        .bind(tip_id)
+        .bind(winner_txid)
+        .bind(block_height)
+        .bind(block_hash)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(tip)
+    }
+
+    /// Revert a settled (`claimed`) tip back to `claiming` after a reorg orphaned
+    /// its recorded sweep. Clearing `sweep_txid` is LOAD-BEARING: the next
+    /// confirm cycle re-scans the address and records the NEW on-chain winner,
+    /// not the orphaned one. Also clears `sweep_confirmed_dm_sent_at` so a fresh
+    /// "claimed" notify can fire once re-confirmation lands. The
+    /// `status = 'claimed' AND sweep_confirmed_at IS NOT NULL` guard is the only
+    /// path off `claimed`; `None` if the row isn't settled.
+    #[instrument(skip(self))]
+    pub async fn revert_sweep_on_reorg(
+        &self,
+        tip_id: Uuid,
+    ) -> Result<Option<SocialTipRow>, AppError> {
+        let tip = sqlx::query_as::<_, SocialTipRow>(&format!(
+            "UPDATE social_tips \
+             SET status = 'claiming', \
+                 sweep_confirmed_at = NULL, \
+                 sweep_txid = NULL, \
+                 sweep_block_height = NULL, \
+                 sweep_block_hash = NULL, \
+                 sweep_confirmed_dm_sent_at = NULL, \
+                 updated_at = NOW() \
+             WHERE id = $1 \
+               AND status = 'claimed' \
+               AND sweep_confirmed_at IS NOT NULL \
+             RETURNING {TIP_COLS}"
+        ))
+        .bind(tip_id)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(tip)
+    }
+
+    /// Reconciler poll: `claiming` tips whose sweep hasn't confirmed yet. Includes
+    /// rows with `sweep_txid IS NULL` — the reconciler scans the ADDRESS, not any
+    /// recorded txid, since a public tip's recorded sweep may not be the on-chain
+    /// winner (RBF / race). `funding_amount_verified = TRUE` keeps a
+    /// `funding_mismatch`-adjacent row out. Rate-limited on `last_confirmation_check`
+    /// (30s) so an outage doesn't burn one probe per row per cycle.
+    #[instrument(skip(self))]
+    pub async fn get_tips_awaiting_sweep_confirmation(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<SocialTipRow>, AppError> {
+        let tips = sqlx::query_as::<_, SocialTipRow>(&format!(
+            "SELECT {TIP_COLS} FROM social_tips \
+             WHERE status = 'claiming' \
+               AND sweep_confirmed_at IS NULL \
+               AND funding_amount_verified = TRUE \
+               AND (last_confirmation_check IS NULL \
+                    OR last_confirmation_check < NOW() - INTERVAL '30 seconds') \
+             ORDER BY claimed_at ASC \
+             LIMIT $1"
+        ))
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(tips)
+    }
+
+    /// Reorg-check poll: settled tips the reconciler settled ITSELF (they carry a
+    /// `sweep_block_height` witness) and hasn't re-probed in the last 30s. Rows
+    /// with `sweep_block_height IS NULL` are excluded on purpose (no recorded
+    /// height to reorg-check against).
+    #[instrument(skip(self))]
+    pub async fn get_settled_tips_for_reorg_check(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<SocialTipRow>, AppError> {
+        let tips = sqlx::query_as::<_, SocialTipRow>(&format!(
+            "SELECT {TIP_COLS} FROM social_tips \
+             WHERE status = 'claimed' \
+               AND sweep_confirmed_at IS NOT NULL \
+               AND sweep_block_height IS NOT NULL \
+               AND (last_confirmation_check IS NULL \
+                    OR last_confirmation_check < NOW() - INTERVAL '30 seconds') \
+             ORDER BY sweep_confirmed_at ASC \
+             LIMIT $1"
+        ))
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(tips)
+    }
+
+    /// Exactly-once stamp for the reconciler-owned "tip claimed" notify. The
+    /// `WHERE ... IS NULL` guard makes it idempotent so a retried cycle never
+    /// re-stamps. (The notify itself is stubbed to a no-op in this port, but the
+    /// stamp is preserved so re-enabling notifications stays exactly-once.)
+    #[instrument(skip(self))]
+    pub async fn stamp_sweep_confirmed_dm_sent(&self, tip_id: Uuid) -> Result<(), AppError> {
+        sqlx::query(
+            "UPDATE social_tips \
+             SET sweep_confirmed_dm_sent_at = NOW(), updated_at = NOW() \
+             WHERE id = $1 AND sweep_confirmed_dm_sent_at IS NULL",
+        )
+        .bind(tip_id)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Exactly-once stamp for the reconciler-owned "claim reversed by reorg"
+    /// notify. Same `WHERE ... IS NULL` idempotency as
+    /// `stamp_sweep_confirmed_dm_sent`.
+    #[instrument(skip(self))]
+    pub async fn stamp_reorg_notified(&self, tip_id: Uuid) -> Result<(), AppError> {
+        sqlx::query(
+            "UPDATE social_tips \
+             SET reorg_notified_at = NOW(), updated_at = NOW() \
+             WHERE id = $1 AND reorg_notified_at IS NULL",
+        )
+        .bind(tip_id)
+        .execute(self.pool())
+        .await?;
+        Ok(())
     }
 }

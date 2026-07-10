@@ -399,3 +399,304 @@ async fn get_tips_pending_confirmation_filters() {
         "btc tip (threshold 0) must be excluded from the confirmation query"
     );
 }
+
+// ── Stage 4: money-out (claim / confirm-sweep / clawback + reconciler) DB tests ──
+//
+// Exercises the audited money-safety guards directly on the DB layer. BTC tips
+// (confirmations_required = 0) manufacture a claimable row with no chain access.
+
+/// Manufacture a claimable (pending, amount-verified) BTC tip owned by `uid`.
+async fn make_pending(app: &common::TestApp, uid: uuid::Uuid, txid: &str) -> uuid::Uuid {
+    let id = make_draft(app, uid, "btc", 100_000, 0, None).await;
+    app.state
+        .db
+        .attach_funding_to_tip(id, uid, txid)
+        .await
+        .expect("attach funding");
+    let row = app
+        .state
+        .db
+        .mark_tip_funding_verified(id, 100_000)
+        .await
+        .expect("verify")
+        .expect("verify returns row");
+    assert_eq!(row.status, "pending", "make_pending must land in 'pending'");
+    id
+}
+
+/// Manufacture a `claiming` tip (pending -> claiming) locked by `claimant`.
+async fn make_claiming(
+    app: &common::TestApp,
+    uid: uuid::Uuid,
+    claimant: uuid::Uuid,
+    txid: &str,
+) -> uuid::Uuid {
+    let id = make_pending(app, uid, txid).await;
+    let row = app
+        .state
+        .db
+        .mark_tip_claiming(id, claimant)
+        .await
+        .expect("claim")
+        .expect("claiming row");
+    assert_eq!(row.status, "claiming");
+    id
+}
+
+/// Manufacture a settled `claimed` tip (with a sweep_block_height witness).
+async fn make_claimed(
+    app: &common::TestApp,
+    uid: uuid::Uuid,
+    claimant: uuid::Uuid,
+    txid: &str,
+) -> uuid::Uuid {
+    let id = make_claiming(app, uid, claimant, txid).await;
+    let row = app
+        .state
+        .db
+        .confirm_sweep_onchain(id, "onchain-swp", 100, None, None)
+        .await
+        .expect("settle")
+        .expect("claimed row");
+    assert_eq!(row.status, "claimed");
+    id
+}
+
+/// (a) THE DOUBLE-CLAIM GUARD: a fresh claimable tip claims once; a
+/// funding_mismatch / unverified / clawed_back / already-swept row is never
+/// claimable. Re-claiming a `claiming` row IS intentionally allowed (verbatim
+/// `status IN ('pending','claiming')` — public-tip retry semantics).
+#[tokio::test]
+async fn mark_tip_claiming_double_claim_guard() {
+    let Some(app) = tips_app().await else { return };
+    let sender = app.create_user().await;
+    let claimant = app.create_user().await;
+
+    // Fresh claimable tip: first claim locks it into 'claiming'.
+    let id = make_pending(&app, sender, "fund-claim-1").await;
+    let first = app.state.db.mark_tip_claiming(id, claimant).await.expect("claim");
+    assert!(first.is_some(), "first claim on a pending tip must succeed");
+    assert_eq!(first.unwrap().status, "claiming");
+
+    // Re-claim on a 'claiming' public tip is INTENTIONALLY allowed: the claim
+    // state is a UX signal, not a lock — the reconciler resolves the on-chain
+    // sweep-race winner. (Verbatim audit-T1 retry semantics.)
+    let reclaim = app.state.db.mark_tip_claiming(id, claimant).await.expect("reclaim");
+    assert!(reclaim.is_some(), "re-claim on a claiming public tip is allowed");
+
+    // None on funding_mismatch (audit-T1 fund-loss guard).
+    let mm = make_draft(&app, sender, "btc", 1_000_000, 0, None).await;
+    app.state.db.attach_funding_to_tip(mm, sender, "fund-mm").await.expect("attach");
+    app.state.db.mark_tip_funding_mismatch(mm, 10).await.expect("mismatch").expect("row");
+    assert!(
+        app.state.db.mark_tip_claiming(mm, claimant).await.expect("claim mm").is_none(),
+        "a funding_mismatch tip must never be claimable"
+    );
+
+    // None on an unverified (pending_confirmation) tip.
+    let pc = make_draft(&app, sender, "btc", 100_000, 0, None).await;
+    app.state.db.attach_funding_to_tip(pc, sender, "fund-pc").await.expect("attach");
+    assert!(
+        app.state.db.mark_tip_claiming(pc, claimant).await.expect("claim pc").is_none(),
+        "an unverified tip must not be claimable"
+    );
+
+    // None on a clawed_back tip.
+    let cb = make_pending(&app, sender, "fund-cb").await;
+    app.state.db.clawback_social_tip(cb, sender).await.expect("clawback").expect("row");
+    assert!(
+        app.state.db.mark_tip_claiming(cb, claimant).await.expect("claim cb").is_none(),
+        "a clawed_back tip must not be claimable"
+    );
+
+    // None on an already-swept (settled) tip.
+    let swept = make_claimed(&app, sender, claimant, "fund-swept").await;
+    assert!(
+        app.state.db.mark_tip_claiming(swept, claimant).await.expect("claim swept").is_none(),
+        "a settled tip must not be re-claimable"
+    );
+}
+
+/// (b) confirm_tip_sweep is first-recorder-wins: a second, DIFFERENT txid must
+/// NOT overwrite the recorded winner (both calls return the live row with the
+/// FIRST txid). A never-claimed tip returns None.
+#[tokio::test]
+async fn confirm_tip_sweep_first_recorder_wins() {
+    let Some(app) = tips_app().await else { return };
+    let sender = app.create_user().await;
+    let claimant = app.create_user().await;
+    let id = make_claiming(&app, sender, claimant, "fund-sweep").await;
+
+    // First recorder writes txid-A; the row STAYS 'claiming' (record, not settle).
+    let r1 = app.state.db.confirm_tip_sweep(id, claimant, "txid-A").await.expect("record").expect("row");
+    assert_eq!(r1.sweep_txid.as_deref(), Some("txid-A"));
+    assert_eq!(r1.status, "claiming", "confirm_tip_sweep records, never settles");
+
+    // A DIFFERENT txid does not overwrite; fallthrough returns the live row (A).
+    let r2 = app.state.db.confirm_tip_sweep(id, claimant, "txid-B").await.expect("second").expect("live row");
+    assert_eq!(
+        r2.sweep_txid.as_deref(),
+        Some("txid-A"),
+        "first-recorder wins: a different txid must not overwrite"
+    );
+    assert_eq!(r2.status, "claiming");
+
+    // Same txid again is an idempotent no-op returning A.
+    let r3 = app.state.db.confirm_tip_sweep(id, claimant, "txid-A").await.expect("idem").expect("row");
+    assert_eq!(r3.sweep_txid.as_deref(), Some("txid-A"));
+
+    // A never-claimed (pending) tip → None.
+    let pending = make_pending(&app, sender, "fund-cs-pending").await;
+    assert!(
+        app.state.db.confirm_tip_sweep(pending, claimant, "txid-x").await.expect("cs pending").is_none(),
+        "confirm-sweep on a non-claiming tip returns None"
+    );
+}
+
+/// (c) confirm_sweep_onchain settles 'claiming' -> 'claimed' ONLY, and it is the
+/// only path to 'claimed'. It records the height witness and preserves
+/// claimed_by when passed None; a second call is a no-op.
+#[tokio::test]
+async fn confirm_sweep_onchain_settles_claiming_only() {
+    let Some(app) = tips_app().await else { return };
+    let sender = app.create_user().await;
+    let claimant = app.create_user().await;
+
+    let id = make_claiming(&app, sender, claimant, "fund-settle").await;
+    let settled = app
+        .state
+        .db
+        .confirm_sweep_onchain(id, "swp-1", 500, Some("blockhash"), None)
+        .await
+        .expect("settle")
+        .expect("claimed row");
+    assert_eq!(settled.status, "claimed");
+    assert!(settled.sweep_confirmed_at.is_some());
+    assert_eq!(settled.sweep_block_height, Some(500));
+    assert_eq!(settled.sweep_txid.as_deref(), Some("swp-1"));
+    assert_eq!(
+        settled.claimed_by_user_id,
+        Some(claimant),
+        "claimed_by is preserved when claimed_by=None"
+    );
+
+    // Second settle is a no-op (one-way lock).
+    assert!(
+        app.state.db.confirm_sweep_onchain(id, "swp-2", 501, None, None).await.expect("resettle").is_none(),
+        "an already-claimed row cannot be re-settled"
+    );
+
+    // A pending (non-claiming) tip cannot be settled — 'claiming' is the only
+    // entry into 'claimed'.
+    let pending = make_pending(&app, sender, "fund-settle-pending").await;
+    assert!(
+        app.state.db.confirm_sweep_onchain(pending, "swp", 1, None, None).await.expect("settle pending").is_none(),
+        "confirm_sweep_onchain requires status='claiming'"
+    );
+    let still = app.state.db.get_social_tip(pending).await.expect("get").expect("row");
+    assert_eq!(still.status, "pending", "a pending tip must not be flipped to claimed");
+}
+
+/// (d) revert_sweep_on_reorg reverts 'claimed' -> 'claiming' ONLY, clearing the
+/// sweep witness (incl. sweep_txid so the next cycle records the new winner).
+#[tokio::test]
+async fn revert_sweep_on_reorg_only_from_claimed() {
+    let Some(app) = tips_app().await else { return };
+    let sender = app.create_user().await;
+    let claimant = app.create_user().await;
+
+    let id = make_claimed(&app, sender, claimant, "fund-reorg").await;
+    let reverted = app.state.db.revert_sweep_on_reorg(id).await.expect("revert").expect("reverted row");
+    assert_eq!(reverted.status, "claiming");
+    assert!(reverted.sweep_confirmed_at.is_none());
+    assert!(
+        reverted.sweep_txid.is_none(),
+        "reorg clears sweep_txid so the next confirm cycle records the new on-chain winner"
+    );
+    assert!(reverted.sweep_block_height.is_none());
+
+    // Second revert is a no-op (now 'claiming', not 'claimed').
+    assert!(
+        app.state.db.revert_sweep_on_reorg(id).await.expect("re-revert").is_none(),
+        "revert requires status='claimed'"
+    );
+
+    // Revert on a plain pending tip → None.
+    let pending = make_pending(&app, sender, "fund-reorg-pending").await;
+    assert!(
+        app.state.db.revert_sweep_on_reorg(pending).await.expect("revert pending").is_none(),
+        "a pending tip cannot be reorg-reverted"
+    );
+}
+
+/// (e) clawback succeeds for the SENDER on pending / pending_confirmation /
+/// claiming / funding_mismatch / cancelled while sweep_confirmed_at IS NULL,
+/// is owner-scoped, and is BLOCKED once the sweep confirmed.
+#[tokio::test]
+async fn clawback_status_matrix_and_settled_block() {
+    let Some(app) = tips_app().await else { return };
+    let sender = app.create_user().await;
+    let claimant = app.create_user().await;
+
+    // pending → clawable.
+    let pending = make_pending(&app, sender, "cb-pending").await;
+    assert!(app.state.db.clawback_social_tip(pending, sender).await.expect("cb").is_some());
+
+    // pending_confirmation → clawable.
+    let pc = make_draft(&app, sender, "btc", 100_000, 0, None).await;
+    app.state.db.attach_funding_to_tip(pc, sender, "cb-pc").await.expect("attach");
+    assert!(app.state.db.clawback_social_tip(pc, sender).await.expect("cb").is_some());
+
+    // claiming → clawable (sender racing a claimer).
+    let claiming = make_claiming(&app, sender, claimant, "cb-claiming").await;
+    assert!(app.state.db.clawback_social_tip(claiming, sender).await.expect("cb").is_some());
+
+    // funding_mismatch → clawable.
+    let mm = make_draft(&app, sender, "btc", 1_000_000, 0, None).await;
+    app.state.db.attach_funding_to_tip(mm, sender, "cb-mm").await.expect("attach");
+    app.state.db.mark_tip_funding_mismatch(mm, 10).await.expect("mismatch").expect("row");
+    assert!(app.state.db.clawback_social_tip(mm, sender).await.expect("cb").is_some());
+
+    // cancelled (GC'd but still-funded draft) → clawable.
+    let cancelled = make_draft(&app, sender, "btc", 100_000, 0, None).await;
+    app.state.db.cancel_draft_social_tip(cancelled, sender).await.expect("cancel").expect("id");
+    assert!(app.state.db.clawback_social_tip(cancelled, sender).await.expect("cb").is_some());
+
+    // Owner-scoped: a stranger cannot claw back; the real sender can.
+    let owned = make_pending(&app, sender, "cb-owner").await;
+    let stranger = app.create_user().await;
+    assert!(
+        app.state.db.clawback_social_tip(owned, stranger).await.expect("cb stranger").is_none(),
+        "only the sender can claw back"
+    );
+    assert!(app.state.db.clawback_social_tip(owned, sender).await.expect("cb owner").is_some());
+
+    // BLOCKED once the sweep confirmed (sweep_confirmed_at IS NOT NULL).
+    let swept = make_claimed(&app, sender, claimant, "cb-swept").await;
+    assert!(
+        app.state.db.clawback_social_tip(swept, sender).await.expect("cb swept").is_none(),
+        "a settled tip must not be clawed back"
+    );
+}
+
+/// Reconciler poll queries select the right rows. A huge limit avoids the
+/// ordering / rate-limit windows hiding our rows amid other tests' rows.
+#[tokio::test]
+async fn reconciler_poll_queries_select_the_right_rows() {
+    let Some(app) = tips_app().await else { return };
+    let sender = app.create_user().await;
+    let claimant = app.create_user().await;
+
+    let claiming = make_claiming(&app, sender, claimant, "poll-claiming").await;
+    let pending = make_pending(&app, sender, "poll-pending").await;
+    let claimed = make_claimed(&app, sender, claimant, "poll-claimed").await;
+
+    let awaiting = app.state.db.get_tips_awaiting_sweep_confirmation(1_000_000).await.expect("awaiting");
+    assert!(awaiting.iter().any(|t| t.id == claiming), "a claiming tip awaits sweep confirmation");
+    assert!(!awaiting.iter().any(|t| t.id == pending), "a pending tip does not await sweep confirmation");
+    assert!(!awaiting.iter().any(|t| t.id == claimed), "a settled tip does not await sweep confirmation");
+
+    let reorg = app.state.db.get_settled_tips_for_reorg_check(1_000_000).await.expect("reorg");
+    assert!(reorg.iter().any(|t| t.id == claimed), "a settled tip with a height witness is reorg-checked");
+    assert!(!reorg.iter().any(|t| t.id == claiming), "a claiming tip is not reorg-checked");
+}

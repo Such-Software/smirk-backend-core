@@ -16,5 +16,7 @@
 //! outage can therefore never mass-flip pending tips to `funding_mismatch`.
 
 pub mod confirmation;
+pub mod sweep_reconciler;
 
 pub use confirmation::run_tip_confirmation_cycle;
+pub use sweep_reconciler::{run_sweep_reconcile_cycle, run_sweep_reorg_cycle};

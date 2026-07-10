@@ -125,6 +125,37 @@ pub struct AttachFundingRequest {
     pub funding_txid: String,
 }
 
+/// Claim a tip: lock it into `claiming` and receive the encrypted claim key +
+/// tip address to sweep. Load-bearing INCONSISTENT key: `success` (not `ok`).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ClaimTipResponse {
+    pub success: bool,
+    /// Hex-encoded AES-GCM ciphertext of the claim secret; `null` if the tip
+    /// stored none. Useless without the URL-fragment key.
+    pub encrypted_key: Option<String>,
+    pub tip_address: Option<String>,
+}
+
+/// Record the claimer's broadcast sweep transaction (first-recorder-wins).
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct ConfirmSweepRequest {
+    /// The broadcast sweep transaction id.
+    pub sweep_txid: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ConfirmSweepResponse {
+    /// The WINNING (first-recorded) sweep txid, or `null` if none is recorded.
+    pub sweep_txid: Option<String>,
+    pub status: String,
+}
+
+/// Sender clawback of a tip. Load-bearing INCONSISTENT key: `success` (not `ok`).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ClawbackTipResponse {
+    pub success: bool,
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /// Reject when tips are not enabled on this instance.
@@ -476,6 +507,129 @@ pub async fn attach_funding(
     }))
 }
 
+/// Claim a public tip: lock it into `claiming` and return the encrypted claim
+/// key + tip address so the caller can sweep the funds to their own wallet.
+///
+/// AUTHED, no body. The `claiming` state is a UX signal, not a cryptographic
+/// lock — any URL holder may claim while the sweep hasn't confirmed (whoever
+/// wins the on-chain sweep race wins the tip; the reconciler resolves the
+/// winner). A non-claimable tip (missing, underfunded, clawed back, already
+/// swept) is a 400.
+#[utoipa::path(
+    security(("bearer_auth" = [])),
+    post,
+    path = "/tips/social/{tip_id}/claim",
+    params(("tip_id" = String, Path, description = "Tip id")),
+    responses(
+        (status = 200, description = "Tip locked into claiming", body = ClaimTipResponse),
+        (status = 400, description = "Tips off or tip not claimable"),
+        (status = 401, description = "Missing or invalid token")
+    ),
+    tag = "tips"
+)]
+#[instrument(skip(state, headers))]
+pub async fn claim_social_tip(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(tip_id): Path<Uuid>,
+) -> Result<Json<ClaimTipResponse>, AppError> {
+    let user_id = extract_user_id_from_token(&state, &headers).await?;
+    ensure_tips_enabled(&state)?;
+
+    let row = state
+        .db
+        .mark_tip_claiming(tip_id, user_id)
+        .await?
+        .ok_or_else(|| AppError::ValidationError("tip not claimable".into()))?;
+
+    Ok(Json(ClaimTipResponse {
+        success: true,
+        encrypted_key: row.encrypted_key.map(hex::encode),
+        tip_address: row.tip_address,
+    }))
+}
+
+/// Record the claimer's broadcast sweep txid (first-recorder-wins). RECORD not
+/// settle: the tip stays `claiming` and the reconciler owns the settle to
+/// `claimed` once the sweep confirms on-chain. Idempotent; a second, different
+/// txid does NOT overwrite the recorded winner. A tip that was never claimed is
+/// a 400.
+#[utoipa::path(
+    security(("bearer_auth" = [])),
+    post,
+    path = "/tips/social/{tip_id}/confirm-sweep",
+    params(("tip_id" = String, Path, description = "Tip id")),
+    request_body = ConfirmSweepRequest,
+    responses(
+        (status = 200, description = "Sweep txid recorded", body = ConfirmSweepResponse),
+        (status = 400, description = "Tips off, empty/oversized txid, or tip not claiming"),
+        (status = 401, description = "Missing or invalid token")
+    ),
+    tag = "tips"
+)]
+#[instrument(skip(state, headers, req))]
+pub async fn confirm_sweep(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(tip_id): Path<Uuid>,
+    Json(req): Json<ConfirmSweepRequest>,
+) -> Result<Json<ConfirmSweepResponse>, AppError> {
+    let user_id = extract_user_id_from_token(&state, &headers).await?;
+    ensure_tips_enabled(&state)?;
+
+    let sweep_txid = req.sweep_txid.trim();
+    if sweep_txid.is_empty() {
+        return Err(AppError::ValidationError("sweep_txid is required.".into()));
+    }
+    if sweep_txid.len() > 128 {
+        return Err(AppError::ValidationError("sweep_txid is too long.".into()));
+    }
+
+    let row = state
+        .db
+        .confirm_tip_sweep(tip_id, user_id, sweep_txid)
+        .await?
+        .ok_or_else(|| AppError::ValidationError("tip not claiming".into()))?;
+
+    Ok(Json(ConfirmSweepResponse {
+        sweep_txid: row.sweep_txid,
+        status: row.status,
+    }))
+}
+
+/// Sender reclaims a tip's funds. AUTHED, no body. Succeeds for the sender on a
+/// pending / pending_confirmation / claiming / funding_mismatch / cancelled tip
+/// while its sweep hasn't confirmed; a settled or non-clawable tip is a 400.
+#[utoipa::path(
+    security(("bearer_auth" = [])),
+    post,
+    path = "/tips/social/{tip_id}/clawback",
+    params(("tip_id" = String, Path, description = "Tip id")),
+    responses(
+        (status = 200, description = "Tip clawed back", body = ClawbackTipResponse),
+        (status = 400, description = "Tips off or tip not clawable"),
+        (status = 401, description = "Missing or invalid token")
+    ),
+    tag = "tips"
+)]
+#[instrument(skip(state, headers))]
+pub async fn clawback_social_tip(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(tip_id): Path<Uuid>,
+) -> Result<Json<ClawbackTipResponse>, AppError> {
+    let user_id = extract_user_id_from_token(&state, &headers).await?;
+    ensure_tips_enabled(&state)?;
+
+    state
+        .db
+        .clawback_social_tip(tip_id, user_id)
+        .await?
+        .ok_or_else(|| AppError::ValidationError("tip not clawable".into()))?;
+
+    Ok(Json(ClawbackTipResponse { success: true }))
+}
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/tips/social", post(create_social_tip))
@@ -486,4 +640,7 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/tips/social/:tip_id/attach-funding",
             post(attach_funding),
         )
+        .route("/tips/social/:tip_id/claim", post(claim_social_tip))
+        .route("/tips/social/:tip_id/confirm-sweep", post(confirm_sweep))
+        .route("/tips/social/:tip_id/clawback", post(clawback_social_tip))
 }

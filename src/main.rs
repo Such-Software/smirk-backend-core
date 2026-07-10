@@ -285,6 +285,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Public-tips "money-out" reconciler: the settle-on-sweep-confirmation pass
+    // (probe each claiming tip's ADDRESS, settle claiming -> claimed once the
+    // sweep confirms to the per-asset depth). Sole new writer of 'claimed'. Runs
+    // an immediate startup pass (so a restart doesn't wait a full interval before
+    // settling anything that confirmed while we were down) then every 60s. Same
+    // catch_unwind guard as the money-in worker.
+    if state.config.features.tips {
+        use futures::FutureExt;
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                let cycle = std::panic::AssertUnwindSafe(
+                    smirk_backend_core::tips::run_sweep_reconcile_cycle(state.clone()),
+                );
+                if cycle.catch_unwind().await.is_err() {
+                    tracing::error!("sweep reconcile cycle panicked; continuing after backoff");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            }
+        });
+    }
+
+    // Public-tips reorg-check pass: re-probe settled tips and revert any whose
+    // recorded sweep was orphaned by a chain reorg. Lowest-frequency, novel, and
+    // recoverable, so it runs on a slower cadence (300s) than the confirm pass.
+    if state.config.features.tips {
+        use futures::FutureExt;
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                tick.tick().await;
+                let cycle = std::panic::AssertUnwindSafe(
+                    smirk_backend_core::tips::run_sweep_reorg_cycle(state.clone()),
+                );
+                if cycle.catch_unwind().await.is_err() {
+                    tracing::error!("sweep reorg cycle panicked; continuing after backoff");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            }
+        });
+    }
+
     let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
