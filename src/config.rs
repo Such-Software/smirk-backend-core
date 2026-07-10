@@ -144,6 +144,11 @@ pub struct Config {
 
     pub database_url: String,
 
+    /// Base URL for public-tip share links: a tip's share URL is
+    /// `{tip_share_base}/{tip_id}`. Required when `FEATURE_TIPS` is on (checked
+    /// in `validate`); never hardcode a host (federation).
+    pub tip_share_base: Option<String>,
+
     pub auth: AuthConfig,
     pub identity: IdentityConfig,
     pub secrets: SecretConfig,
@@ -704,6 +709,8 @@ impl Config {
 
             database_url: env_opt("DATABASE_URL")
                 .ok_or_else(|| cfg_err("DATABASE_URL is required"))?,
+
+            tip_share_base: env_opt("TIP_SHARE_BASE_URL"),
 
             auth: AuthConfig {
                 jwt_secret: env_or("JWT_SECRET", ""),
@@ -1334,6 +1341,7 @@ mod tests {
             deployment_mode: DeploymentMode::Single,
             environment: "development".into(),
             database_url: "postgres://localhost/smirk".into(),
+            tip_share_base: None,
             auth: AuthConfig {
                 jwt_secret: "a".repeat(32),
                 jwt_expiry_hours: 24,

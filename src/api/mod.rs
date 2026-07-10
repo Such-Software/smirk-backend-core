@@ -11,6 +11,7 @@ pub mod nip05;
 pub mod openapi;
 pub mod premium;
 pub mod prices;
+pub mod tips;
 pub mod users;
 pub mod wallet;
 pub mod website;

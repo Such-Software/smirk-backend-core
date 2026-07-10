@@ -68,6 +68,10 @@ use utoipa::OpenApi;
         crate::api::premium::invoice,
         crate::api::premium::activate,
         crate::api::premium::status,
+        crate::api::tips::create_social_tip,
+        crate::api::tips::get_sent_social_tips,
+        crate::api::tips::get_public_social_tip,
+        crate::api::tips::cancel_social_tip,
     ),
     components(schemas(
         crate::api::health::HealthResponse,
@@ -158,6 +162,12 @@ use utoipa::OpenApi;
         crate::api::premium::InvoiceResp,
         crate::api::premium::ActivateReq,
         crate::api::premium::StatusResp,
+        crate::api::tips::CreateSocialTipRequest,
+        crate::api::tips::CreateSocialTipResponse,
+        crate::api::tips::SentTip,
+        crate::api::tips::SocialTipsResponse,
+        crate::api::tips::PublicTipInfo,
+        crate::api::tips::CancelTipResponse,
     )),
     tags(
         (name = "system", description = "Service health and metadata."),
@@ -167,7 +177,8 @@ use utoipa::OpenApi;
         (name = "xmr_wow", description = "Monero/Wownero chain access via LWS (register, balance, history, unspent/random outs, submit, height, confirmations)."),
         (name = "grin", description = "Grin view-only chain access (rewind_hash scan, tip height, broadcast)."),
         (name = "grin_relay", description = "Grin slatepack relay: async non-custodial mailbox for interactive Grin transfers (feature-flagged)."),
-        (name = "premium", description = "Premium subscription: mint a tier invoice, activate on settlement, read status (feature-flagged).")
+        (name = "premium", description = "Premium subscription: mint a tier invoice, activate on settlement, read status (feature-flagged)."),
+        (name = "tips", description = "Public social tips: create/fund/claim/clawback share-URL tips (feature-flagged).")
     )
 )]
 pub struct ApiDoc;

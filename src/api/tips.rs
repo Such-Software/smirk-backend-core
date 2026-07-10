@@ -1,0 +1,417 @@
+//! Public social-tips endpoints.
+//!
+//! A sender funds a per-tip address and shares a claim URL whose fragment
+//! carries the claim key; anyone with the URL claims by sweeping the address to
+//! their own wallet. Non-custodial: the backend stores only the encrypted claim
+//! blob and a hash of the claim key — never the key or the funds.
+//!
+//! PUBLIC tips only. Targeted (@username) tips and the socials/bot surface are
+//! out of scope for this port: an `is_public = false` request is rejected.
+
+use std::sync::Arc;
+
+use axum::{
+    extract::{Path, State},
+    http::HeaderMap,
+    routing::{get, post},
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
+use tracing::instrument;
+use uuid::Uuid;
+
+use crate::api::middleware::extract_user_id_from_token;
+use crate::api::wallet::validate_cn_address;
+use crate::error::AppError;
+use crate::infra::db::{NewSocialTip, SocialTipRow};
+use crate::models::tip_status::{confirmations_for_asset, TipStatus};
+use crate::AppState;
+
+/// Max `encrypted_key` size on the wire: 4096 hex chars = 2048 bytes.
+const MAX_ENCRYPTED_KEY_HEX: usize = 4096;
+
+// ── DTOs (match packages/core/src/api/social.ts verbatim) ────────────────────
+
+/// Create a public tip. Targeted-only fields (`platform`, `username`,
+/// `grin_commitment`, `sender_anonymous`) are accepted for wire-compat but
+/// ignored in this port.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateSocialTipRequest {
+    #[serde(default)]
+    pub platform: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
+    pub asset: String,
+    pub amount: i64,
+    /// Hex-encoded AES-GCM ciphertext of the claim secret; the backend cannot
+    /// decrypt it.
+    #[serde(default)]
+    pub encrypted_key: Option<String>,
+    pub is_public: bool,
+    /// SHA256 of the claim key (hex); the key itself never touches the server.
+    #[serde(default)]
+    pub claim_key_hash: Option<String>,
+    #[serde(default)]
+    pub tip_address: Option<String>,
+    #[serde(default)]
+    pub funding_txid: Option<String>,
+    /// Private view key for the tip address (XMR/WOW), so the backend can scan
+    /// it for funding + sweep.
+    #[serde(default)]
+    pub tip_view_key: Option<String>,
+    #[serde(default)]
+    pub grin_commitment: Option<String>,
+    #[serde(default)]
+    pub sender_anonymous: bool,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct CreateSocialTipResponse {
+    pub tip_id: String,
+    pub status: String,
+    /// `{TIP_SHARE_BASE_URL}/{tip_id}` for a public tip, else null.
+    pub share_url: Option<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct SentTip {
+    pub id: String,
+    pub sender_user_id: String,
+    /// Always null in the public-only port (no targeted recipients).
+    pub recipient_platform: Option<String>,
+    pub recipient_username: Option<String>,
+    pub asset: String,
+    pub amount: i64,
+    pub is_public: bool,
+    pub status: String,
+    pub created_at: String,
+    pub claimed_at: Option<String>,
+    pub clawed_back_at: Option<String>,
+    pub funding_confirmations: i32,
+    pub confirmations_required: i32,
+    pub is_claimable: bool,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct SocialTipsResponse {
+    pub tips: Vec<SentTip>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct PublicTipInfo {
+    pub id: String,
+    pub asset: String,
+    pub amount: i64,
+    pub status: String,
+    pub created_at: String,
+    pub is_public: bool,
+    /// Hex-encoded AES-GCM ciphertext; useless without the URL-fragment key.
+    pub encrypted_key: Option<String>,
+    pub tip_address: Option<String>,
+    pub funding_confirmations: i32,
+    pub confirmations_required: i32,
+    pub is_claimable: bool,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct CancelTipResponse {
+    pub ok: bool,
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+/// Reject when tips are not enabled on this instance.
+fn ensure_tips_enabled(state: &AppState) -> Result<(), AppError> {
+    if state.config.features.tips {
+        Ok(())
+    } else {
+        Err(AppError::ValidationError(
+            "Tips are not available on this instance.".into(),
+        ))
+    }
+}
+
+/// Whether `asset` is a tip-capable chain enabled on this instance. Grin is not
+/// supported by the tips port yet.
+fn supported_tip_asset(state: &AppState, asset: &str) -> bool {
+    let c = &state.config.features.chains;
+    match asset {
+        "btc" => c.btc,
+        "ltc" => c.ltc,
+        "xmr" => c.xmr,
+        "wow" => c.wow,
+        _ => false,
+    }
+}
+
+/// Basic tip-address validation. XMR/WOW reuse the CryptoNote validator; BTC/LTC
+/// get a light sanity check (the sender funds and later sweeps THEIR OWN
+/// address, so a malformed one merely fails funding verification — it can't
+/// misdirect funds to a third party).
+fn validate_tip_address(asset: &str, address: &str) -> Result<(), AppError> {
+    if address.is_empty() || address.len() > 255 {
+        return Err(AppError::ValidationError("tip_address is invalid.".into()));
+    }
+    match asset {
+        "xmr" | "wow" => validate_cn_address(address),
+        "btc" | "ltc" => {
+            if address.len() >= 14 && address.chars().all(|c| c.is_ascii_alphanumeric()) {
+                Ok(())
+            } else {
+                Err(AppError::ValidationError("tip_address is invalid.".into()))
+            }
+        }
+        _ => Err(AppError::ValidationError("unsupported tip asset.".into())),
+    }
+}
+
+/// A tip is claimable iff funding is confirmed AND amount-verified AND it hasn't
+/// left the claimable window.
+fn is_claimable(row: &SocialTipRow) -> bool {
+    matches!(
+        TipStatus::from_db(&row.status),
+        Some(TipStatus::Pending | TipStatus::Claiming)
+    ) && row.funding_confirmations >= row.confirmations_required
+        && row.funding_amount_verified
+}
+
+fn to_sent_tip(row: SocialTipRow) -> SentTip {
+    let claimable = is_claimable(&row);
+    SentTip {
+        id: row.id.to_string(),
+        sender_user_id: row.sender_user_id.to_string(),
+        recipient_platform: None,
+        recipient_username: None,
+        asset: row.asset,
+        amount: row.amount,
+        is_public: row.is_public,
+        status: row.status,
+        created_at: row.created_at.to_rfc3339(),
+        claimed_at: row.claimed_at.map(|t| t.to_rfc3339()),
+        clawed_back_at: row.clawed_back_at.map(|t| t.to_rfc3339()),
+        funding_confirmations: row.funding_confirmations,
+        confirmations_required: row.confirmations_required,
+        is_claimable: claimable,
+    }
+}
+
+fn to_public_info(row: SocialTipRow) -> PublicTipInfo {
+    let claimable = is_claimable(&row);
+    PublicTipInfo {
+        id: row.id.to_string(),
+        asset: row.asset,
+        amount: row.amount,
+        status: row.status,
+        created_at: row.created_at.to_rfc3339(),
+        is_public: row.is_public,
+        encrypted_key: row.encrypted_key.map(hex::encode),
+        tip_address: row.tip_address,
+        funding_confirmations: row.funding_confirmations,
+        confirmations_required: row.confirmations_required,
+        is_claimable: claimable,
+    }
+}
+
+// ── handlers ─────────────────────────────────────────────────────────────────
+
+/// Create a public tip (optionally as a two-phase draft).
+#[utoipa::path(
+    security(("bearer_auth" = [])),
+    post,
+    path = "/tips/social",
+    request_body = CreateSocialTipRequest,
+    responses(
+        (status = 200, description = "Tip created", body = CreateSocialTipResponse),
+        (status = 400, description = "Tips off, targeted tip, or invalid input"),
+        (status = 401, description = "Missing or invalid token")
+    ),
+    tag = "tips"
+)]
+#[instrument(skip(state, headers, req))]
+pub async fn create_social_tip(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<CreateSocialTipRequest>,
+) -> Result<Json<CreateSocialTipResponse>, AppError> {
+    let user_id = extract_user_id_from_token(&state, &headers).await?;
+    ensure_tips_enabled(&state)?;
+
+    // Public-only port: targeted tips are rejected outright.
+    if !req.is_public {
+        return Err(AppError::ValidationError(
+            "Targeted tips are not supported on this instance; set is_public = true.".into(),
+        ));
+    }
+    if req.amount <= 0 {
+        return Err(AppError::ValidationError("amount must be positive.".into()));
+    }
+    let asset = req.asset.to_lowercase();
+    if !supported_tip_asset(&state, &asset) {
+        return Err(AppError::ValidationError(format!(
+            "asset '{asset}' is not enabled for tips on this instance."
+        )));
+    }
+
+    // Public tips require the claim-key hash (mirrors the public_tip_has_hash CHECK).
+    let claim_key_hash = req
+        .claim_key_hash
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            AppError::ValidationError("claim_key_hash is required for a public tip.".into())
+        })?;
+    // A claim-key hash is SHA256(claim key) = exactly 64 hex chars. Validate the
+    // shape so malformed input is a clean 400, not a DB length-overflow 500.
+    if claim_key_hash.len() != 64 || hex::decode(claim_key_hash).is_err() {
+        return Err(AppError::ValidationError(
+            "claim_key_hash must be a 64-character hex SHA256.".into(),
+        ));
+    }
+
+    // encrypted_key: hex, capped at 4096 hex chars.
+    let encrypted_key: Option<Vec<u8>> = match req.encrypted_key.as_deref() {
+        Some(h) if !h.is_empty() => {
+            if h.len() > MAX_ENCRYPTED_KEY_HEX {
+                return Err(AppError::ValidationError("encrypted_key is too large.".into()));
+            }
+            Some(
+                hex::decode(h)
+                    .map_err(|_| AppError::ValidationError("encrypted_key must be hex.".into()))?,
+            )
+        }
+        _ => None,
+    };
+
+    let tip_address = req.tip_address.as_deref().filter(|s| !s.is_empty());
+    let funding_txid = req.funding_txid.as_deref().filter(|s| !s.is_empty());
+    let is_draft = funding_txid.is_none();
+    // A draft (no funding yet) must carry the address the sender will fund.
+    if is_draft && tip_address.is_none() {
+        return Err(AppError::ValidationError(
+            "tip_address is required to create a tip draft.".into(),
+        ));
+    }
+    if let Some(addr) = tip_address {
+        validate_tip_address(&asset, addr)?;
+    }
+
+    let new = NewSocialTip {
+        sender_user_id: user_id,
+        asset: &asset,
+        amount: req.amount,
+        claim_key_hash: Some(claim_key_hash),
+        encrypted_key: encrypted_key.as_deref(),
+        tip_address,
+        funding_txid,
+        tip_view_key: req.tip_view_key.as_deref().filter(|s| !s.is_empty()),
+        confirmations_required: confirmations_for_asset(&asset),
+    };
+
+    let tip = if is_draft {
+        state.db.create_draft_social_tip(new).await?
+    } else {
+        state.db.create_social_tip(new).await?
+    };
+
+    let share_url = state
+        .config
+        .tip_share_base
+        .as_ref()
+        .map(|base| format!("{}/{}", base.trim_end_matches('/'), tip.id));
+
+    Ok(Json(CreateSocialTipResponse {
+        tip_id: tip.id.to_string(),
+        status: tip.status,
+        share_url,
+    }))
+}
+
+/// All tips the caller has sent, newest first.
+#[utoipa::path(
+    security(("bearer_auth" = [])),
+    get,
+    path = "/tips/social/sent",
+    responses(
+        (status = 200, description = "Sent tips", body = SocialTipsResponse),
+        (status = 400, description = "Tips off"),
+        (status = 401, description = "Missing or invalid token")
+    ),
+    tag = "tips"
+)]
+#[instrument(skip(state, headers))]
+pub async fn get_sent_social_tips(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<SocialTipsResponse>, AppError> {
+    let user_id = extract_user_id_from_token(&state, &headers).await?;
+    ensure_tips_enabled(&state)?;
+    let rows = state.db.get_sent_social_tips(user_id).await?;
+    Ok(Json(SocialTipsResponse {
+        tips: rows.into_iter().map(to_sent_tip).collect(),
+    }))
+}
+
+/// Public tip metadata for a share-URL holder. UNAUTHENTICATED: the tip id (a
+/// UUID) is the bearer token. 404s for an unknown or non-public tip.
+#[utoipa::path(
+    get,
+    path = "/tips/social/{tip_id}/public",
+    params(("tip_id" = String, Path, description = "Tip id")),
+    responses(
+        (status = 200, description = "Public tip info", body = PublicTipInfo),
+        (status = 400, description = "Tips off"),
+        (status = 404, description = "No such public tip")
+    ),
+    tag = "tips"
+)]
+#[instrument(skip(state))]
+pub async fn get_public_social_tip(
+    State(state): State<Arc<AppState>>,
+    Path(tip_id): Path<Uuid>,
+) -> Result<Json<PublicTipInfo>, AppError> {
+    ensure_tips_enabled(&state)?;
+    let row = state
+        .db
+        .get_social_tip(tip_id)
+        .await?
+        .filter(|r| r.is_public)
+        .ok_or_else(|| AppError::NotFound("tip not found".into()))?;
+    Ok(Json(to_public_info(row)))
+}
+
+/// Cancel a still-unfunded draft (owner-only, draft-only). A funded/claimed tip
+/// is recovered via clawback, not cancel.
+#[utoipa::path(
+    security(("bearer_auth" = [])),
+    post,
+    path = "/tips/social/{tip_id}/cancel",
+    params(("tip_id" = String, Path, description = "Tip id")),
+    responses(
+        (status = 200, description = "Draft cancelled", body = CancelTipResponse),
+        (status = 400, description = "Tips off"),
+        (status = 401, description = "Missing or invalid token"),
+        (status = 404, description = "No cancellable draft")
+    ),
+    tag = "tips"
+)]
+#[instrument(skip(state, headers))]
+pub async fn cancel_social_tip(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(tip_id): Path<Uuid>,
+) -> Result<Json<CancelTipResponse>, AppError> {
+    let user_id = extract_user_id_from_token(&state, &headers).await?;
+    ensure_tips_enabled(&state)?;
+    match state.db.cancel_draft_social_tip(tip_id, user_id).await? {
+        Some(_) => Ok(Json(CancelTipResponse { ok: true })),
+        None => Err(AppError::NotFound("no cancellable draft tip".into())),
+    }
+}
+
+pub fn routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/tips/social", post(create_social_tip))
+        .route("/tips/social/sent", get(get_sent_social_tips))
+        .route("/tips/social/:tip_id/public", get(get_public_social_tip))
+        .route("/tips/social/:tip_id/cancel", post(cancel_social_tip))
+}

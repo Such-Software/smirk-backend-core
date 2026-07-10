@@ -12,6 +12,7 @@ use tracing::instrument;
 use uuid::Uuid;
 
 use crate::error::AppError;
+use crate::models::tip_status::TipStatus;
 
 use super::Database;
 
@@ -66,11 +67,25 @@ pub struct SocialTipRow {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Values for a fresh public tip. `status` is set by the caller
+/// (`draft` for the two-phase flow, `pending_confirmation` when funding is
+/// attached at create time).
+pub struct NewSocialTip<'a> {
+    pub sender_user_id: Uuid,
+    pub asset: &'a str,
+    pub amount: i64,
+    pub claim_key_hash: Option<&'a str>,
+    pub encrypted_key: Option<&'a [u8]>,
+    pub tip_address: Option<&'a str>,
+    pub funding_txid: Option<&'a str>,
+    pub tip_view_key: Option<&'a str>,
+    pub confirmations_required: i32,
+}
+
 impl Database {
     /// Fetch a tip by id, or `None`. The UUID is the public bearer token behind
     /// a share URL, so this read is intentionally not owner-scoped.
     #[instrument(skip(self))]
-    #[allow(dead_code)] // consumed by the tips routes in the next stage
     pub async fn get_social_tip(&self, id: Uuid) -> Result<Option<SocialTipRow>, AppError> {
         let row = sqlx::query_as::<_, SocialTipRow>(&format!(
             "SELECT {TIP_COLS} FROM social_tips WHERE id = $1"
@@ -79,5 +94,94 @@ impl Database {
         .fetch_optional(self.pool())
         .await?;
         Ok(row)
+    }
+
+    /// Insert a public tip in `status`. Always `is_public = TRUE`.
+    #[instrument(skip(self, new))]
+    async fn insert_social_tip(
+        &self,
+        new: NewSocialTip<'_>,
+        status: TipStatus,
+    ) -> Result<SocialTipRow, AppError> {
+        let row = sqlx::query_as::<_, SocialTipRow>(&format!(
+            "INSERT INTO social_tips \
+             (sender_user_id, asset, amount, is_public, claim_key_hash, encrypted_key, \
+              tip_address, funding_txid, status, confirmations_required, tip_view_key) \
+             VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $8, $9, $10) \
+             RETURNING {TIP_COLS}"
+        ))
+        .bind(new.sender_user_id)
+        .bind(new.asset)
+        .bind(new.amount)
+        .bind(new.claim_key_hash)
+        .bind(new.encrypted_key)
+        .bind(new.tip_address)
+        .bind(new.funding_txid)
+        .bind(status.as_str())
+        .bind(new.confirmations_required)
+        .bind(new.tip_view_key)
+        .fetch_one(self.pool())
+        .await?;
+        Ok(row)
+    }
+
+    /// Two-phase create: a `draft` tip with no funding attached yet. The sender
+    /// funds `tip_address` off-band, then calls attach-funding to advance it.
+    #[instrument(skip(self, new))]
+    pub async fn create_draft_social_tip(
+        &self,
+        new: NewSocialTip<'_>,
+    ) -> Result<SocialTipRow, AppError> {
+        debug_assert!(new.funding_txid.is_none(), "a draft has no funding_txid");
+        self.insert_social_tip(new, TipStatus::Draft).await
+    }
+
+    /// Single-call create with funding already attached: lands in
+    /// `pending_confirmation` so the funding verifier (not the caller) owns the
+    /// transition to `pending`.
+    #[instrument(skip(self, new))]
+    pub async fn create_social_tip(
+        &self,
+        new: NewSocialTip<'_>,
+    ) -> Result<SocialTipRow, AppError> {
+        self.insert_social_tip(new, TipStatus::PendingConfirmation).await
+    }
+
+    /// All tips this user has sent, newest first (every status).
+    #[instrument(skip(self))]
+    pub async fn get_sent_social_tips(
+        &self,
+        sender_user_id: Uuid,
+    ) -> Result<Vec<SocialTipRow>, AppError> {
+        let rows = sqlx::query_as::<_, SocialTipRow>(&format!(
+            "SELECT {TIP_COLS} FROM social_tips \
+             WHERE sender_user_id = $1 ORDER BY created_at DESC"
+        ))
+        .bind(sender_user_id)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// Cancel a still-unfunded draft. Owner-scoped and `draft`-only, so it can
+    /// never cancel a funded/claimed tip (that path is clawback). Returns the id
+    /// if this call cancelled it; `None` if no such draft (wrong owner, wrong
+    /// status, or unknown id).
+    #[instrument(skip(self))]
+    pub async fn cancel_draft_social_tip(
+        &self,
+        id: Uuid,
+        sender_user_id: Uuid,
+    ) -> Result<Option<Uuid>, AppError> {
+        let cancelled = sqlx::query_scalar::<_, Uuid>(
+            "UPDATE social_tips SET status = 'cancelled' \
+             WHERE id = $1 AND sender_user_id = $2 AND status = 'draft' \
+             RETURNING id",
+        )
+        .bind(id)
+        .bind(sender_user_id)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(cancelled)
     }
 }
