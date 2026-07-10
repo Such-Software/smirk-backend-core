@@ -330,6 +330,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Public-tips draft GC: hourly, cancel `draft` rows abandoned mid-flow (> 7
+    // days, never funded-attached) and warn per cancelled row. Same catch_unwind
+    // guard as the money-in/out workers.
+    if state.config.features.tips {
+        use futures::FutureExt;
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                let cycle = std::panic::AssertUnwindSafe(
+                    smirk_backend_core::tips::run_tip_draft_gc_cycle(state.clone()),
+                );
+                if cycle.catch_unwind().await.is_err() {
+                    tracing::error!("tip draft GC cycle panicked; continuing after backoff");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            }
+        });
+    }
+
+    // Public-tips lifecycle GC: every 5 min, cancel stuck `pending_confirmation`
+    // rows (> 7 days) and warn-only-scan stuck `claiming` rows (> 15 min). Same
+    // catch_unwind guard.
+    if state.config.features.tips {
+        use futures::FutureExt;
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                tick.tick().await;
+                let cycle = std::panic::AssertUnwindSafe(
+                    smirk_backend_core::tips::run_tip_lifecycle_gc_cycle(state.clone()),
+                );
+                if cycle.catch_unwind().await.is_err() {
+                    tracing::error!("tip lifecycle GC cycle panicked; continuing after backoff");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            }
+        });
+    }
+
     let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;

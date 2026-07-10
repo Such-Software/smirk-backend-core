@@ -700,3 +700,103 @@ async fn reconciler_poll_queries_select_the_right_rows() {
     assert!(reorg.iter().any(|t| t.id == claimed), "a settled tip with a height witness is reorg-checked");
     assert!(!reorg.iter().any(|t| t.id == claiming), "a claiming tip is not reorg-checked");
 }
+
+// ── Stage 5: lifecycle + draft garbage-collection DB tests ────────────────────
+//
+// The GC cancel passes filter on `created_at < NOW() - INTERVAL '7 days'` (and
+// the claiming scan on `claimed_at < NOW() - INTERVAL '15 minutes'`). The normal
+// insert stamps NOW(), so a test back-dates the timestamp with a raw UPDATE to
+// exercise the age filter.
+
+/// Back-date a tip's `created_at` by `interval` (e.g. "8 days") via a raw UPDATE.
+async fn backdate_created_at(app: &common::TestApp, id: uuid::Uuid, interval: &str) {
+    sqlx::query(&format!(
+        "UPDATE social_tips SET created_at = NOW() - INTERVAL '{interval}' WHERE id = $1"
+    ))
+    .bind(id)
+    .execute(app.state.db.pool())
+    .await
+    .expect("backdate created_at");
+}
+
+/// cancel_old_drafts flips a > 7d `draft` to `cancelled` and leaves a fresh draft
+/// (and non-draft rows) untouched.
+#[tokio::test]
+async fn cancel_old_drafts_flips_stale_draft_only() {
+    let Some(app) = tips_app().await else { return };
+    let uid = app.create_user().await;
+
+    let stale = make_draft(&app, uid, "btc", 100_000, 0, None).await;
+    backdate_created_at(&app, stale, "8 days").await;
+    let fresh = make_draft(&app, uid, "btc", 100_000, 0, None).await;
+
+    let cancelled = app.state.db.cancel_old_drafts().await.expect("cancel_old_drafts");
+    assert!(cancelled.iter().any(|r| r.id == stale), "a > 7d draft must be cancelled");
+    assert!(!cancelled.iter().any(|r| r.id == fresh), "a fresh draft must NOT be cancelled");
+
+    let stale_row = app.state.db.get_social_tip(stale).await.expect("get").expect("row");
+    assert_eq!(stale_row.status, "cancelled");
+    let fresh_row = app.state.db.get_social_tip(fresh).await.expect("get").expect("row");
+    assert_eq!(fresh_row.status, "draft", "a fresh draft stays draft");
+}
+
+/// cancel_stuck_pending_confirmation flips a > 7d `pending_confirmation` row to
+/// `cancelled` and leaves a fresh one untouched.
+#[tokio::test]
+async fn cancel_stuck_pending_confirmation_flips_stale_only() {
+    let Some(app) = tips_app().await else { return };
+    let uid = app.create_user().await;
+
+    let stale = make_draft(&app, uid, "btc", 100_000, 0, None).await;
+    app.state.db.attach_funding_to_tip(stale, uid, "gc-stale-pc").await.expect("attach");
+    backdate_created_at(&app, stale, "8 days").await;
+
+    let fresh = make_draft(&app, uid, "btc", 100_000, 0, None).await;
+    app.state.db.attach_funding_to_tip(fresh, uid, "gc-fresh-pc").await.expect("attach");
+
+    let cancelled = app
+        .state
+        .db
+        .cancel_stuck_pending_confirmation()
+        .await
+        .expect("cancel_stuck_pending_confirmation");
+    assert!(
+        cancelled.iter().any(|r| r.id == stale),
+        "a > 7d pending_confirmation must be cancelled"
+    );
+    assert!(
+        !cancelled.iter().any(|r| r.id == fresh),
+        "a fresh pending_confirmation must NOT be cancelled"
+    );
+
+    let stale_row = app.state.db.get_social_tip(stale).await.expect("get").expect("row");
+    assert_eq!(stale_row.status, "cancelled");
+    let fresh_row = app.state.db.get_social_tip(fresh).await.expect("get").expect("row");
+    assert_eq!(fresh_row.status, "pending_confirmation");
+}
+
+/// log_stuck_claiming returns a > 15m back-dated `claiming` row, excludes a fresh
+/// one, and mutates NOTHING (read-only scan).
+#[tokio::test]
+async fn log_stuck_claiming_returns_backdated_and_mutates_nothing() {
+    let Some(app) = tips_app().await else { return };
+    let sender = app.create_user().await;
+    let claimant = app.create_user().await;
+
+    let stale = make_claiming(&app, sender, claimant, "gc-stale-claiming").await;
+    sqlx::query("UPDATE social_tips SET claimed_at = NOW() - INTERVAL '16 minutes' WHERE id = $1")
+        .bind(stale)
+        .execute(app.state.db.pool())
+        .await
+        .expect("backdate claimed_at");
+    let fresh = make_claiming(&app, sender, claimant, "gc-fresh-claiming").await;
+
+    let stuck = app.state.db.log_stuck_claiming().await.expect("log_stuck_claiming");
+    assert!(stuck.iter().any(|r| r.id == stale), "a > 15m claiming row must be surfaced");
+    assert!(!stuck.iter().any(|r| r.id == fresh), "a fresh claiming row must NOT be surfaced");
+
+    // READ-ONLY: the surfaced row is untouched — still 'claiming', no sweep confirm.
+    let row = app.state.db.get_social_tip(stale).await.expect("get").expect("row");
+    assert_eq!(row.status, "claiming", "log_stuck_claiming must not mutate status");
+    assert!(row.sweep_confirmed_at.is_none(), "log_stuck_claiming must not settle the sweep");
+}

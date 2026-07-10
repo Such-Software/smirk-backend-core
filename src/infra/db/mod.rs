@@ -30,7 +30,7 @@ pub use login_events::LoginStats;
 pub use payment_invoices::PaymentInvoiceRow;
 pub use premium_invoices::PremiumInvoiceRow;
 pub use server_config::SetupState;
-pub use social_tips::{NewSocialTip, SocialTipRow};
+pub use social_tips::{GcCancelledTip, NewSocialTip, SocialTipRow, StuckClaimingTip};
 
 use sqlx::PgPool;
 

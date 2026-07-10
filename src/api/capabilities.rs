@@ -250,7 +250,7 @@ pub fn effective_capabilities(config: &Config) -> CapabilitiesResponse {
             nostr_relay: relay_advertised(config),
             premium_relay: premium_advertised(config),
             feed: feed_advertised(config),
-            tips: config.features.tips,
+            tips: tips_advertised(config),
         },
         restore: RestoreCapability {
             policy: config.restore.policy.as_str().to_string(),
@@ -331,6 +331,19 @@ fn premium_advertised(config: &Config) -> bool {
 /// Whether the public feed is enabled AND the relay it reads is advertised.
 fn feed_advertised(config: &Config) -> bool {
     config.feed.enabled && relay_advertised(config)
+}
+
+/// Whether public tips are actually serveable: the feature is on, a share-URL
+/// base is configured, AND at least one supported tip chain (btc/ltc/xmr/wow)
+/// is serviceable. Mirrors the chain/relay presence-downgrade — never advertise
+/// tips an instance can't escrow on or build share links for. (Grin is out of
+/// the tips port, so it is not a supported tip chain here.)
+fn tips_advertised(config: &Config) -> bool {
+    config.features.tips
+        && config.tip_share_base.is_some()
+        && ["btc", "ltc", "xmr", "wow"]
+            .iter()
+            .any(|asset| chain_serviceable(config, asset))
 }
 
 /// Describe this instance's enabled chains and features.

@@ -80,6 +80,29 @@ pub struct NewSocialTip<'a> {
     pub confirmations_required: i32,
 }
 
+/// A `social_tips` row cancelled by a GC pass, distilled to the fields the
+/// worker logs. NOT the full [`SocialTipRow`] — the GC only needs enough to
+/// `warn!` per row (the audit trail for the funded-but-not-attached case).
+#[derive(Debug, Clone, FromRow)]
+pub struct GcCancelledTip {
+    pub id: Uuid,
+    pub asset: String,
+    pub tip_address: Option<String>,
+    pub funding_txid: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A stuck `claiming` row surfaced (never mutated) by the lifecycle GC's
+/// read-only scan. Fields are exactly what the operator `warn!` needs.
+#[derive(Debug, Clone, FromRow)]
+pub struct StuckClaimingTip {
+    pub id: Uuid,
+    pub asset: String,
+    pub tip_address: Option<String>,
+    pub claimed_by_user_id: Option<Uuid>,
+    pub claimed_at: Option<DateTime<Utc>>,
+}
+
 impl Database {
     /// Fetch a tip by id, or `None`. The UUID is the public bearer token behind
     /// a share URL, so this read is intentionally not owner-scoped.
@@ -777,5 +800,81 @@ impl Database {
         .execute(self.pool())
         .await?;
         Ok(())
+    }
+
+    // ── Stage 5: lifecycle garbage collection ───────────────────────────────────
+    //
+    // Two janitor passes for rows that would otherwise leak forever:
+    //   - cancel_old_drafts / cancel_stuck_pending_confirmation flip long-stuck
+    //     rows to 'cancelled', RETURNING each cancelled row so the worker warns.
+    //   - log_stuck_claiming is a READ-ONLY scan (mutates NOTHING) that surfaces
+    //     confirm-sweep-never-landed rows for operator follow-up.
+    //
+    // MONEY-SAFETY: cancel_old_drafts / cancel_stuck_pending_confirmation flip a
+    // funded-but-not-attached row to 'cancelled' with NO on-chain funds check —
+    // the funding tx may have landed while the row sat stuck. The only mitigations
+    // are (1) the generous 7-day window, (2) the per-row `warn!` the worker emits
+    // so an operator can grep journald for a funded tip_address, and (3) clawback
+    // INCLUDING 'cancelled' in its status set (see `clawback_social_tip`) so the
+    // sender can still recover. 'cancelled' MUST stay in that clawback filter.
+
+    /// UPDATE `draft` rows older than 7 days to `cancelled`, RETURNING the
+    /// cancelled rows (id / asset / tip_address / funding_txid / created_at) so
+    /// the GC worker can `warn!` per row. Targets `status='draft'` ONLY — anything
+    /// past the pre-funding stage (pending / claiming / …) has already been
+    /// broadcast and must NOT be GC'd here (orphaning it would be fund loss).
+    #[instrument(skip(self))]
+    pub async fn cancel_old_drafts(&self) -> Result<Vec<GcCancelledTip>, AppError> {
+        let rows = sqlx::query_as::<_, GcCancelledTip>(
+            "UPDATE social_tips \
+             SET status = 'cancelled', updated_at = NOW() \
+             WHERE status = 'draft' \
+               AND created_at < NOW() - INTERVAL '7 days' \
+             RETURNING id, asset, tip_address, funding_txid, created_at",
+        )
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// UPDATE `pending_confirmation` rows older than 7 days to `cancelled`,
+    /// RETURNING each cancelled row so the worker can `warn!`. Targets
+    /// `status='pending_confirmation'` ONLY — a row that reached `pending` already
+    /// cleared the funding verifier and is a real tip the sender expects claimed;
+    /// it must NOT be auto-cancelled here.
+    #[instrument(skip(self))]
+    pub async fn cancel_stuck_pending_confirmation(
+        &self,
+    ) -> Result<Vec<GcCancelledTip>, AppError> {
+        let rows = sqlx::query_as::<_, GcCancelledTip>(
+            "UPDATE social_tips \
+             SET status = 'cancelled', updated_at = NOW() \
+             WHERE status = 'pending_confirmation' \
+               AND created_at < NOW() - INTERVAL '7 days' \
+             RETURNING id, asset, tip_address, funding_txid, created_at",
+        )
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// READ-ONLY scan of stuck `claiming` rows for operator observability. Mutates
+    /// NOTHING — returns rows in `claiming` with no confirmed sweep whose claim is
+    /// older than 15 minutes (well past the client's ~13s confirm-sweep retry
+    /// window). Auto-reconciliation is the reconciler's job; this pass only
+    /// surfaces rows whose `confirm_tip_sweep` never landed so an operator can
+    /// follow up.
+    #[instrument(skip(self))]
+    pub async fn log_stuck_claiming(&self) -> Result<Vec<StuckClaimingTip>, AppError> {
+        let rows = sqlx::query_as::<_, StuckClaimingTip>(
+            "SELECT id, asset, tip_address, claimed_by_user_id, claimed_at \
+             FROM social_tips \
+             WHERE status = 'claiming' \
+               AND sweep_confirmed_at IS NULL \
+               AND claimed_at < NOW() - INTERVAL '15 minutes'",
+        )
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
     }
 }

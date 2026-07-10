@@ -709,6 +709,361 @@
         }
       }
     },
+    "/tips/social": {
+      "post": {
+        "tags": [
+          "tips"
+        ],
+        "summary": "Create a public tip (optionally as a two-phase draft).",
+        "operationId": "create_social_tip",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSocialTipRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Tip created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateSocialTipResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Tips off, targeted tip, or invalid input"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/tips/social/sent": {
+      "get": {
+        "tags": [
+          "tips"
+        ],
+        "summary": "All tips the caller has sent, newest first.",
+        "operationId": "get_sent_social_tips",
+        "responses": {
+          "200": {
+            "description": "Sent tips",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SocialTipsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Tips off"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/tips/social/{tip_id}/attach-funding": {
+      "post": {
+        "tags": [
+          "tips"
+        ],
+        "summary": "Attach a broadcast funding tx to a draft tip, advancing it into the funding\nlifecycle (`pending_confirmation`; the funding worker later flips it to\n`pending` once the on-chain receipt is confirmed AND covers `amount`).",
+        "description": "Idempotent: re-attaching the SAME txid is a no-op that returns the row; a\nDIFFERENT txid on a tip that already has one (or a non-draft tip) is a 400;\nan unknown / not-owned tip is a 404. Response mirrors create: the same\n`CreateSocialTipResponse { tip_id, status, share_url }`.",
+        "operationId": "attach_funding",
+        "parameters": [
+          {
+            "name": "tip_id",
+            "in": "path",
+            "description": "Tip id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachFundingRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Funding attached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateSocialTipResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Tips off, empty/oversized txid, or a conflicting funding tx"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "404": {
+            "description": "No such tip owned by the caller"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/tips/social/{tip_id}/cancel": {
+      "post": {
+        "tags": [
+          "tips"
+        ],
+        "summary": "Cancel a still-unfunded draft (owner-only, draft-only). A funded/claimed tip\nis recovered via clawback, not cancel.",
+        "operationId": "cancel_social_tip",
+        "parameters": [
+          {
+            "name": "tip_id",
+            "in": "path",
+            "description": "Tip id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Draft cancelled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelTipResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Tips off"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          },
+          "404": {
+            "description": "No cancellable draft"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/tips/social/{tip_id}/claim": {
+      "post": {
+        "tags": [
+          "tips"
+        ],
+        "summary": "Claim a public tip: lock it into `claiming` and return the encrypted claim\nkey + tip address so the caller can sweep the funds to their own wallet.",
+        "description": "AUTHED, no body. The `claiming` state is a UX signal, not a cryptographic\nlock — any URL holder may claim while the sweep hasn't confirmed (whoever\nwins the on-chain sweep race wins the tip; the reconciler resolves the\nwinner). A non-claimable tip (missing, underfunded, clawed back, already\nswept) is a 400.",
+        "operationId": "claim_social_tip",
+        "parameters": [
+          {
+            "name": "tip_id",
+            "in": "path",
+            "description": "Tip id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tip locked into claiming",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClaimTipResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Tips off or tip not claimable"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/tips/social/{tip_id}/clawback": {
+      "post": {
+        "tags": [
+          "tips"
+        ],
+        "summary": "Sender reclaims a tip's funds. AUTHED, no body. Succeeds for the sender on a\npending / pending_confirmation / claiming / funding_mismatch / cancelled tip\nwhile its sweep hasn't confirmed; a settled or non-clawable tip is a 400.",
+        "operationId": "clawback_social_tip",
+        "parameters": [
+          {
+            "name": "tip_id",
+            "in": "path",
+            "description": "Tip id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tip clawed back",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClawbackTipResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Tips off or tip not clawable"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/tips/social/{tip_id}/confirm-sweep": {
+      "post": {
+        "tags": [
+          "tips"
+        ],
+        "summary": "Record the claimer's broadcast sweep txid (first-recorder-wins). RECORD not\nsettle: the tip stays `claiming` and the reconciler owns the settle to\n`claimed` once the sweep confirms on-chain. Idempotent; a second, different\ntxid does NOT overwrite the recorded winner. A tip that was never claimed is\na 400.",
+        "operationId": "confirm_sweep",
+        "parameters": [
+          {
+            "name": "tip_id",
+            "in": "path",
+            "description": "Tip id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmSweepRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Sweep txid recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfirmSweepResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Tips off, empty/oversized txid, or tip not claiming"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/tips/social/{tip_id}/public": {
+      "get": {
+        "tags": [
+          "tips"
+        ],
+        "summary": "Public tip metadata for a share-URL holder. UNAUTHENTICATED: the tip id (a\nUUID) is the bearer token. 404s for an unknown or non-public tip.",
+        "operationId": "get_public_social_tip",
+        "parameters": [
+          {
+            "name": "tip_id",
+            "in": "path",
+            "description": "Tip id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Public tip info",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicTipInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Tips off"
+          },
+          "404": {
+            "description": "No such public tip"
+          }
+        }
+      }
+    },
     "/users/by-username/{username}": {
       "get": {
         "tags": [
@@ -2089,6 +2444,19 @@
           }
         }
       },
+      "AttachFundingRequest": {
+        "type": "object",
+        "description": "Attach a broadcast funding transaction to a draft tip.",
+        "required": [
+          "funding_txid"
+        ],
+        "properties": {
+          "funding_txid": {
+            "type": "string",
+            "description": "The on-chain funding transaction id (XMR/WOW txid, BTC/LTC txid)."
+          }
+        }
+      },
       "AuthResponse": {
         "type": "object",
         "description": "Successful session response: a JWT pair plus minimal user info.",
@@ -2174,6 +2542,17 @@
           "txid": {
             "type": "string",
             "description": "The broadcast transaction id."
+          }
+        }
+      },
+      "CancelTipResponse": {
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
           }
         }
       },
@@ -2349,6 +2728,74 @@
           }
         }
       },
+      "ClaimTipResponse": {
+        "type": "object",
+        "description": "Claim a tip: lock it into `claiming` and receive the encrypted claim key +\ntip address to sweep. Load-bearing INCONSISTENT key: `success` (not `ok`).",
+        "required": [
+          "success"
+        ],
+        "properties": {
+          "encrypted_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Hex-encoded AES-GCM ciphertext of the claim secret; `null` if the tip\nstored none. Useless without the URL-fragment key."
+          },
+          "success": {
+            "type": "boolean"
+          },
+          "tip_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ClawbackTipResponse": {
+        "type": "object",
+        "description": "Sender clawback of a tip. Load-bearing INCONSISTENT key: `success` (not `ok`).",
+        "required": [
+          "success"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ConfirmSweepRequest": {
+        "type": "object",
+        "description": "Record the claimer's broadcast sweep transaction (first-recorder-wins).",
+        "required": [
+          "sweep_txid"
+        ],
+        "properties": {
+          "sweep_txid": {
+            "type": "string",
+            "description": "The broadcast sweep transaction id."
+          }
+        }
+      },
+      "ConfirmSweepResponse": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "sweep_txid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The WINNING (first-recorded) sweep txid, or `null` if none is recorded."
+          }
+        }
+      },
       "ConfirmationsRequest": {
         "type": "object",
         "description": "Confirmation-count query for a tx.",
@@ -2413,6 +2860,103 @@
           "slatepack": {
             "type": "string",
             "description": "The armored slatepack (encrypted to the recipient)."
+          }
+        }
+      },
+      "CreateSocialTipRequest": {
+        "type": "object",
+        "description": "Create a public tip. Targeted-only fields (`platform`, `username`,\n`grin_commitment`, `sender_anonymous`) are accepted for wire-compat but\nignored in this port.",
+        "required": [
+          "asset",
+          "amount",
+          "is_public"
+        ],
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "asset": {
+            "type": "string"
+          },
+          "claim_key_hash": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SHA256 of the claim key (hex); the key itself never touches the server."
+          },
+          "encrypted_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Hex-encoded AES-GCM ciphertext of the claim secret; the backend cannot\ndecrypt it."
+          },
+          "funding_txid": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "grin_commitment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_public": {
+            "type": "boolean"
+          },
+          "platform": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sender_anonymous": {
+            "type": "boolean"
+          },
+          "tip_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tip_view_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Private view key for the tip address (XMR/WOW), so the backend can scan\nit for funding + sweep."
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "CreateSocialTipResponse": {
+        "type": "object",
+        "required": [
+          "tip_id",
+          "status"
+        ],
+        "properties": {
+          "share_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`{TIP_SHARE_BASE_URL}/{tip_id}` for a public tip, else null."
+          },
+          "status": {
+            "type": "string"
+          },
+          "tip_id": {
+            "type": "string"
           }
         }
       },
@@ -3519,6 +4063,65 @@
           }
         }
       },
+      "PublicTipInfo": {
+        "type": "object",
+        "required": [
+          "id",
+          "asset",
+          "amount",
+          "status",
+          "created_at",
+          "is_public",
+          "funding_confirmations",
+          "confirmations_required",
+          "is_claimable"
+        ],
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "asset": {
+            "type": "string"
+          },
+          "confirmations_required": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "encrypted_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Hex-encoded AES-GCM ciphertext; useless without the URL-fragment key."
+          },
+          "funding_confirmations": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "id": {
+            "type": "string"
+          },
+          "is_claimable": {
+            "type": "boolean"
+          },
+          "is_public": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          },
+          "tip_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "RandomOutputDto": {
         "type": "object",
         "description": "A decoy output.",
@@ -3822,6 +4425,81 @@
           }
         }
       },
+      "SentTip": {
+        "type": "object",
+        "required": [
+          "id",
+          "sender_user_id",
+          "asset",
+          "amount",
+          "is_public",
+          "status",
+          "created_at",
+          "funding_confirmations",
+          "confirmations_required",
+          "is_claimable"
+        ],
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "asset": {
+            "type": "string"
+          },
+          "claimed_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "clawed_back_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "confirmations_required": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "funding_confirmations": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "id": {
+            "type": "string"
+          },
+          "is_claimable": {
+            "type": "boolean"
+          },
+          "is_public": {
+            "type": "boolean"
+          },
+          "recipient_platform": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Always null in the public-only port (no targeted recipients)."
+          },
+          "recipient_username": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sender_user_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
       "SetUsernameRequest": {
         "type": "object",
         "required": [
@@ -3855,6 +4533,20 @@
         "properties": {
           "slate_id": {
             "type": "string"
+          }
+        }
+      },
+      "SocialTipsResponse": {
+        "type": "object",
+        "required": [
+          "tips"
+        ],
+        "properties": {
+          "tips": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SentTip"
+            }
           }
         }
       },
@@ -4367,6 +5059,10 @@
     {
       "name": "premium",
       "description": "Premium subscription: mint a tier invoice, activate on settlement, read status (feature-flagged)."
+    },
+    {
+      "name": "tips",
+      "description": "Public social tips: create/fund/claim/clawback share-URL tips (feature-flagged)."
     }
   ]
 }

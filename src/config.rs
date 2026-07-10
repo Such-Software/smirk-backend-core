@@ -1102,6 +1102,27 @@ impl Config {
             }
         }
 
+        // Public tips escrow on-chain and deliver by share URL, so an instance
+        // with FEATURE_TIPS on but no chain to escrow on, or no TIP_SHARE_BASE_URL
+        // to build share links from, would advertise a tips subsystem it cannot
+        // actually serve. Fail closed rather than boot broken. (Grin is out of the
+        // tips port, so it is NOT a supported tip chain here.)
+        if self.features.tips {
+            let c = &self.features.chains;
+            if !(c.btc || c.ltc || c.xmr || c.wow) {
+                return Err(cfg_err(
+                    "FEATURE_TIPS is on but no supported tip chain is enabled — enable at least \
+                     one of FEATURE_BTC / FEATURE_LTC / FEATURE_XMR / FEATURE_WOW",
+                ));
+            }
+            if self.tip_share_base.is_none() {
+                return Err(cfg_err(
+                    "FEATURE_TIPS is on but TIP_SHARE_BASE_URL is unset — it is required to build \
+                     public tip share links",
+                ));
+            }
+        }
+
         // Pay-to-register gate: when on, the processor wiring must be complete
         // and sane, or /capabilities would advertise payment_required while every
         // registration then fails. Fail closed at startup instead.
@@ -1559,6 +1580,38 @@ mod tests {
         c.environment = "production".into();
         c.features.chains.xmr = true; // xmr.lws_admin_key is empty
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn tips_enabled_requires_share_base() {
+        // FEATURE_TIPS on + a tip chain but NO share base → fail closed.
+        let mut c = valid();
+        c.features.tips = true;
+        c.features.chains.btc = true;
+        c.tip_share_base = None;
+        assert!(c.validate().is_err(), "tips on without a share base must fail");
+    }
+
+    #[test]
+    fn tips_enabled_requires_a_tip_chain() {
+        // FEATURE_TIPS on + a share base but NO tip chain enabled → fail closed.
+        // (valid() has all chains off.)
+        let mut c = valid();
+        c.features.tips = true;
+        c.tip_share_base = Some("https://tips.example".into());
+        assert!(c.validate().is_err(), "tips on with no tip chain must fail");
+    }
+
+    #[test]
+    fn tips_enabled_with_chain_and_share_base_ok() {
+        let mut c = valid();
+        c.features.tips = true;
+        c.features.chains.btc = true;
+        c.tip_share_base = Some("https://tips.example".into());
+        assert!(
+            c.validate().is_ok(),
+            "tips on with a tip chain + share base is valid"
+        );
     }
 
     #[test]
