@@ -226,20 +226,30 @@ impl LwsClient {
         view_key: &str,
         start_height: u64,
     ) -> Result<(), AppError> {
-        // `add_account` errors on a duplicate, so only register a NEW account;
-        // an existing one keeps its view key. Either way, lower its scan height
-        // to the birthday with a backwards rescan when that strictly lowers it.
-        let current = match self.account_scan_height(address).await? {
-            Some(h) => h,
+        // Only a NEWLY added account needs the backwards rescan to its birthday
+        // (monero-lws `add_account` starts every account at the chain tip). An
+        // account that ALREADY exists has already been imported from its
+        // birthday, so re-registration MUST be an idempotent no-op here.
+        //
+        // Rescanning an existing account resets its scan cursor to the birthday,
+        // so a client that re-registers on every balance poll (passing the fixed
+        // wallet birthday) would perpetually wipe scan progress: the account
+        // reads a 0 balance, slowly re-backfills, then gets reset again on the
+        // next poll and never catches up. A genuine re-restore to an EARLIER
+        // birthday goes through the explicit admin `rescan` path, not this one.
+        match self.account_scan_height(address).await? {
+            // Already registered: never reset an existing account from here.
+            Some(_) => Ok(()),
             None => {
                 self.admin_add_account(address, view_key).await?;
-                self.account_scan_height(address).await?.unwrap_or(u64::MAX)
+                let current =
+                    self.account_scan_height(address).await?.unwrap_or(u64::MAX);
+                if start_height < current {
+                    self.rescan(vec![address.to_string()], start_height).await?;
+                }
+                Ok(())
             }
-        };
-        if start_height < current {
-            self.rescan(vec![address.to_string()], start_height).await?;
         }
-        Ok(())
     }
 
     async fn admin_add_account(&self, address: &str, view_key: &str) -> Result<(), AppError> {
