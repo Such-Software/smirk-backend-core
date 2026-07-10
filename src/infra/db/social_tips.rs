@@ -26,7 +26,7 @@ pub(crate) const TIP_COLS: &str = "\
     funding_amount_observed, funding_amount_verified_at, claimed_at, claimed_by_user_id, \
     clawed_back_at, sweep_txid, sweep_confirmed_at, sweep_block_height, sweep_block_hash, \
     sweep_confirmed_dm_sent_at, reorg_notified_at, tip_view_key, lws_registered_at, \
-    lws_deactivated_at, created_at, updated_at";
+    lws_deactivated_at, created_at, updated_at, grin_commitment";
 
 /// A persisted public social tip. Field names/order match [`TIP_COLS`] (sqlx
 /// `FromRow` maps by name).
@@ -63,6 +63,10 @@ pub struct SocialTipRow {
     pub lws_deactivated_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Grin voucher commitment (hex, 66 chars). Set only for grin tips; the
+    /// on-chain handle the grin confirmation/sweep workers query by. The same
+    /// value also lands in `tip_address`; prefer this explicit field.
+    pub grin_commitment: Option<String>,
 }
 
 /// Values for a fresh public tip. `status` is set by the caller
@@ -78,6 +82,8 @@ pub struct NewSocialTip<'a> {
     pub funding_txid: Option<&'a str>,
     pub tip_view_key: Option<&'a str>,
     pub confirmations_required: i32,
+    /// Grin voucher commitment (hex). `None` for non-grin tips.
+    pub grin_commitment: Option<&'a str>,
 }
 
 /// A `social_tips` row cancelled by a GC pass, distilled to the fields the
@@ -127,8 +133,9 @@ impl Database {
         let row = sqlx::query_as::<_, SocialTipRow>(&format!(
             "INSERT INTO social_tips \
              (sender_user_id, asset, amount, is_public, claim_key_hash, encrypted_key, \
-              tip_address, funding_txid, status, confirmations_required, tip_view_key) \
-             VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $8, $9, $10) \
+              tip_address, funding_txid, status, confirmations_required, tip_view_key, \
+              grin_commitment) \
+             VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $8, $9, $10, $11) \
              RETURNING {TIP_COLS}"
         ))
         .bind(new.sender_user_id)
@@ -141,6 +148,7 @@ impl Database {
         .bind(status.as_str())
         .bind(new.confirmations_required)
         .bind(new.tip_view_key)
+        .bind(new.grin_commitment)
         .fetch_one(self.pool())
         .await?;
         Ok(row)

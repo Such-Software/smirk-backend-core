@@ -17,7 +17,14 @@
 //! winner ([`pick_winner`]).
 //!
 //! ## Confirmation thresholds (mirror the funding thresholds)
-//!   BTC/LTC 1, WOW 4, XMR 10. Grin is OUT of this port.
+//!   BTC/LTC 1, WOW 4, XMR 10, GRIN 10.
+//!
+//! ## Grin (voucher asset) source of truth
+//!   Grin has no address to scan: the "source of truth" is the voucher output
+//!   COMMITMENT. Present in `get_outputs` = still unspent (not claimed). Absent =
+//!   swept; `get_kernel(sweep_txid /* = kernel excess */)` dates the spend so the
+//!   depth gate + reorg-revert reuse the same machinery. A reorg that un-spends
+//!   the commitment makes it present again → not confirmed → revert.
 //!
 //! ## Money-safety invariants
 //!   - A probe ERROR (Electrum/LWS unreachable, hostile amount) NEVER settles or
@@ -36,6 +43,7 @@ use std::sync::Arc;
 
 use tracing::{debug, info, instrument, warn};
 
+use super::grin_commitment;
 use crate::error::AppError;
 use crate::infra::db::SocialTipRow;
 use crate::infra::electrum::VerboseTransaction;
@@ -68,12 +76,13 @@ pub struct ConfirmedSpend {
 /// Per-asset sweep confirmation threshold (confirmations the winning spend needs
 /// before we settle to `claimed`). Mirrors the funding-side thresholds. Unknown
 /// assets default to the most conservative (10) so a misconfigured asset never
-/// settles early. Grin is not supported by this port.
+/// settles early.
 pub(crate) fn sweep_confirm_threshold(asset: &str) -> u64 {
     match asset.to_lowercase().as_str() {
         "btc" | "ltc" => 1,
         "wow" => 4,
         "xmr" => 10,
+        "grin" => 10,
         _ => 10,
     }
 }
@@ -301,12 +310,78 @@ async fn probe_confirmed_spends(
     match asset.as_str() {
         "btc" | "ltc" => probe_electrum_spends(state, tip, &asset).await,
         "xmr" | "wow" => probe_lws_spends(state, tip, &asset).await,
+        "grin" => probe_grin_spends(state, tip).await,
         other => {
-            // Grin is out of this port; only btc/ltc/xmr/wow ever create a tip.
+            // Only btc/ltc/xmr/wow/grin ever create a tip.
             warn!(tip_id = %tip.id, asset = %other, "sweep probe: unsupported asset");
             Err(AppError::ValidationError(format!(
                 "sweep probe: unsupported asset {other}"
             )))
+        }
+    }
+}
+
+/// Grin (voucher) probe. The source of truth is the output COMMITMENT:
+///   - PRESENT in `get_outputs` → still unspent (the claimer hasn't swept, or the
+///     sweep isn't mined): no confirmed spend yet.
+///   - ABSENT → the voucher left the UTXO set (swept). Date the spend with
+///     `get_kernel(sweep_txid /* = kernel excess */)`: `Some(h)` yields a single
+///     `ConfirmedSpend`; `None` (kernel not mined yet) yields no spend.
+///
+/// This flows through the unchanged `pick_winner` → depth-10 gate →
+/// `confirm_sweep_onchain`. In the REORG cycle it is symmetric: a reorg that
+/// un-spends the commitment makes `get_outputs` present again → no
+/// `ConfirmedSpend` → the recorded txid vanishes from confirmed history → revert.
+///
+/// Money-safety: any node error is `Err` (the caller skips — never settles /
+/// reverts). Absence WITHOUT a kernel height (no recorded excess, or the kernel
+/// isn't mined) is treated as "no confirmed spend" — a settle needs the
+/// affirmative kernel height, so a bogus excess can never fake a settlement; the
+/// worst case is a stuck-claiming row (recoverable, surfaced by
+/// `log_stuck_claiming`), not fund loss.
+async fn probe_grin_spends(
+    state: &AppState,
+    tip: &SocialTipRow,
+) -> Result<(Vec<ConfirmedSpend>, i64), AppError> {
+    let grin = state
+        .chains
+        .grin
+        .as_ref()
+        .ok_or_else(|| AppError::NodeError("grin client disabled".into()))?;
+
+    let commit = grin_commitment(tip)
+        .ok_or_else(|| AppError::ValidationError("grin commitment missing for sweep probe".into()))?;
+
+    let tip_height = grin.get_height().await? as i64;
+
+    // Still in the UTXO set → not swept yet. No confirmed spend.
+    let outputs = grin.get_outputs(std::slice::from_ref(&commit)).await?;
+    if outputs.iter().any(|o| o.commit == commit) {
+        return Ok((Vec::new(), tip_height));
+    }
+
+    // Absent → swept. We need the sweep kernel excess to date the spend.
+    let Some(excess) = tip.sweep_txid.as_deref().filter(|s| !s.is_empty()) else {
+        // No recorded excess: we can't affirmatively date the spend, so we do
+        // NOT settle. (Stuck-claiming is recoverable; missettling is not.)
+        debug!(tip_id = %tip.id, "grin voucher absent but no recorded sweep excess — no confirmed spend");
+        return Ok((Vec::new(), tip_height));
+    };
+
+    match grin.get_kernel(excess).await? {
+        Some(height) => Ok((
+            vec![ConfirmedSpend {
+                txid: excess.to_string(),
+                block_height: height as i64,
+                block_hash: None,
+            }],
+            tip_height,
+        )),
+        // Kernel not mined yet: absence of the commitment alone isn't a
+        // depth-gateable spend, so treat as no confirmed spend (retry).
+        None => {
+            debug!(tip_id = %tip.id, "grin voucher absent, sweep kernel not yet mined — no confirmed spend");
+            Ok((Vec::new(), tip_height))
         }
     }
 }
@@ -585,6 +660,12 @@ mod tests {
     #[test]
     fn threshold_xmr_is_ten() {
         assert_eq!(sweep_confirm_threshold("xmr"), 10);
+    }
+
+    #[test]
+    fn threshold_grin_is_ten() {
+        assert_eq!(sweep_confirm_threshold("grin"), 10);
+        assert_eq!(sweep_confirm_threshold("GRIN"), 10);
     }
 
     #[test]

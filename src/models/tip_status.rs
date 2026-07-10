@@ -89,11 +89,11 @@ impl fmt::Display for TipStatus {
 }
 
 /// Confirmations required before an asset's funding tx is spendable/claimable.
-/// XMR 10, WOW 4, BTC/LTC 0 (immediately spendable). Grin is not supported in
-/// the public-tips port yet.
+/// XMR 10, GRIN 10, WOW 4, BTC/LTC 0 (immediately spendable).
 pub const fn confirmations_for_asset(asset: &str) -> i32 {
     match asset.as_bytes() {
         b"xmr" => 10,
+        b"grin" => 10,
         b"wow" => 4,
         _ => 0,
     }
@@ -160,6 +160,6 @@ mod tests {
         assert_eq!(confirmations_for_asset("wow"), 4);
         assert_eq!(confirmations_for_asset("btc"), 0);
         assert_eq!(confirmations_for_asset("ltc"), 0);
-        assert_eq!(confirmations_for_asset("grin"), 0);
+        assert_eq!(confirmations_for_asset("grin"), 10);
     }
 }

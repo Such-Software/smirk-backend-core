@@ -7,7 +7,7 @@
 
 use tracing::instrument;
 
-use super::{GrinClient, GrinStatus, ViewWallet};
+use super::{GrinClient, GrinKernelInfo, GrinOutputInfo, GrinStatus, ViewWallet};
 use crate::error::AppError;
 
 impl GrinClient {
@@ -86,6 +86,71 @@ impl GrinClient {
         Ok(self.get_status().await?.tip.height)
     }
 
+    /// Basic-auth for the node Foreign API (user "grin"), or `None` when no
+    /// secret is configured. Mirrors [`broadcast`]'s auth handling.
+    fn foreign_auth(&self) -> Option<(&str, &str)> {
+        if self.node_foreign_api_secret.is_empty() {
+            None
+        } else {
+            Some(("grin", self.node_foreign_api_secret.expose()))
+        }
+    }
+
+    /// Query the node's output set (UTXO + optional history) for `commits` via the
+    /// Foreign API `get_outputs`. A commitment PRESENT in the result (with a block
+    /// height) is confirmed on-chain; ABSENT means it is not in the queried set
+    /// (unconfirmed, or — for a previously-seen voucher — spent). Used to detect
+    /// grin tip funding confirmation and voucher sweeps.
+    ///
+    /// `get_outputs` params: `[commits, start_height, end_height, include_proof,
+    /// include_merkle_proof]`. The node wraps results in `{"Ok": [...]}`; the
+    /// transport unwraps that. An empty `commits` short-circuits to `[]`.
+    #[instrument(skip(self, commits), fields(num_commits = commits.len()))]
+    pub async fn get_outputs(&self, commits: &[String]) -> Result<Vec<GrinOutputInfo>, AppError> {
+        if commits.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.node_rpc(
+            &self.node_foreign_api_url,
+            self.foreign_auth(),
+            "get_outputs",
+            (
+                commits,
+                Option::<u64>::None,
+                Option::<u64>::None,
+                false,
+                false,
+            ),
+        )
+        .await
+    }
+
+    /// Look up the block height a transaction kernel was mined at via the Foreign
+    /// API `get_kernel`, keyed by the kernel EXCESS (hex). Returns `Some(height)`
+    /// when the kernel is on-chain, `None` when it is not yet mined (the node
+    /// returns `{"Ok": null}` or `{"Err":"NotFound"}` — both map to `None`). A
+    /// transport / JSON-RPC error stays `Err`.
+    ///
+    /// This is a HEIGHT lookup only — the definitive spend fact for a voucher is
+    /// the commitment's absence from `get_outputs`; `get_kernel` merely dates that
+    /// spend so the reconciler can gate on confirmation depth. `get_kernel`
+    /// params: `[excess, min_height, max_height]`.
+    #[instrument(skip(self, excess))]
+    pub async fn get_kernel(&self, excess: &str) -> Result<Option<u64>, AppError> {
+        let kernel: Option<Option<GrinKernelInfo>> = self
+            .node_rpc_optional(
+                &self.node_foreign_api_url,
+                self.foreign_auth(),
+                "get_kernel",
+                (excess, Option::<u64>::None, Option::<u64>::None),
+            )
+            .await?;
+        // Outer Option = Ok vs inner-Err(NotFound); inner Option = the API's
+        // `Option<LocatedTxKernel>` (`{"Ok": null}` when absent). Flatten both to
+        // a single "mined height or not".
+        Ok(kernel.flatten().map(|k| k.height))
+    }
+
     /// Broadcast a finalized transaction via the node Foreign API
     /// (`push_transaction`). The wallet builds + signs locally; the backend only
     /// relays. `tx` is the finalized transaction object.
@@ -113,7 +178,7 @@ impl GrinClient {
 mod tests {
     use super::*;
     use crate::config::GrinConfig;
-    use crate::infra::grin::ViewWalletOutputResult;
+    use crate::infra::grin::{GrinOutputInfo, ViewWalletOutputResult};
 
     fn cfg() -> GrinConfig {
         GrinConfig {
@@ -148,5 +213,19 @@ mod tests {
         assert_eq!(out(110).confirmations(110), 1); // tip block
         assert_eq!(out(0).confirmations(110), 0); // unconfirmed / no height
         assert_eq!(out(120).confirmations(110), 0); // beyond tip -> not a bogus count
+    }
+
+    #[test]
+    fn output_confirmations_handles_missing_and_future_height() {
+        let out = |block_height| GrinOutputInfo {
+            commit: "c".into(),
+            block_height,
+            mmr_index: 0,
+        };
+        assert_eq!(out(Some(100)).confirmations(110), 11); // 110 - 100 + 1
+        assert_eq!(out(Some(110)).confirmations(110), 1); // tip block
+        assert_eq!(out(None).confirmations(110), 0); // no block height yet
+        assert_eq!(out(Some(0)).confirmations(110), 0); // height 0 -> unconfirmed
+        assert_eq!(out(Some(120)).confirmations(110), 0); // beyond tip -> not bogus
     }
 }

@@ -1,24 +1,31 @@
 //! Funding confirmation + amount verification for public social tips.
 //!
-//! Ported (public subset) from the legacy `core/tip_confirmation.rs`. Grin and
-//! all DM/announcement side-effects are dropped: public tips deliver by share
-//! URL, so the "fire the recipient a notification" branches become no-ops here.
+//! Ported (public subset) from the legacy `core/tip_confirmation.rs`. All
+//! DM/announcement side-effects are dropped: public tips deliver by share URL,
+//! so the "fire the recipient a notification" branches become no-ops here.
 //!
 //! Confirmation thresholds (see [`crate::models::tip_status::confirmations_for_asset`]):
-//! XMR 10, WOW 4, BTC/LTC 0. BTC/LTC skip the confirmation-count pass entirely
-//! and go straight to amount verification.
+//! XMR 10, GRIN 10, WOW 4, BTC/LTC 0. BTC/LTC skip the confirmation-count pass
+//! entirely and go straight to amount verification.
+//!
+//! Grin is a VOUCHER asset, not address+view-key: funding "confirmation" is the
+//! output commitment appearing in the node's UTXO set (`get_outputs`), and the
+//! amount is NOT on-chain verifiable (the commitment hides it), so once the
+//! commitment confirms the declared amount is AUTO-VERIFIED (with a `warn!`).
 
 use std::sync::Arc;
 
 use tracing::{debug, info, instrument, warn};
 
+use super::grin_commitment;
 use crate::error::AppError;
 use crate::infra::db::SocialTipRow;
 use crate::infra::lws::AddressTxsResponse;
 use crate::AppState;
 
 /// CryptoNote assets that require an on-chain confirmation count before the
-/// amount pass. BTC/LTC are deliberately absent (`confirmations_required = 0`).
+/// amount pass. BTC/LTC are deliberately absent (`confirmations_required = 0`);
+/// grin is handled by [`check_grin_confirmations`] (voucher, not address+view).
 const CONFIRMATION_ASSETS: [&str; 2] = ["xmr", "wow"];
 
 /// Run one full funding pass: confirmation counting for XMR/WOW, then the
@@ -31,6 +38,11 @@ pub async fn run_tip_confirmation_cycle(state: Arc<AppState>) {
         if let Err(e) = check_asset_confirmations(&state, asset).await {
             warn!(error = %e, asset, "tip confirmation-count pass failed");
         }
+    }
+
+    // Grin's confirmation count is a commitment lookup, not an address-txs poll.
+    if let Err(e) = check_grin_confirmations(&state).await {
+        warn!(error = %e, asset = "grin", "grin tip confirmation-count pass failed");
     }
 
     if let Err(e) = process_pending_verifications(&state).await {
@@ -87,6 +99,62 @@ async fn check_asset_confirmations(state: &AppState, asset: &str) -> Result<(), 
                 // Daemon/LWS error: leave the row untouched for the next poll.
                 // NEVER mutate status here.
                 warn!(tip_id = %tip.id, error = %e, "failed to fetch confirmation count");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Grin funding-confirmation pass. Grin is a voucher asset: the confirmation
+/// signal is the output COMMITMENT appearing in the node's UTXO set, so we probe
+/// `get_outputs([commitment])` per pending tip rather than a funding txid. Confs
+/// = `tip_height − block_height + 1` when present, `0` when absent (unconfirmed,
+/// or the voucher was already swept — the sweep reconciler owns that case).
+///
+/// Same money-safety contract as [`check_asset_confirmations`]:
+/// `update_tip_confirmations` writes only the counter + timestamps (never
+/// status), and any node error leaves the row untouched for the next poll.
+#[instrument(skip(state))]
+async fn check_grin_confirmations(state: &AppState) -> Result<(), AppError> {
+    let Some(grin) = state.chains.grin.as_ref() else {
+        return Ok(());
+    };
+
+    let tips = state.db.get_tips_pending_confirmation("grin").await?;
+    if tips.is_empty() {
+        debug!("no grin tips awaiting confirmation");
+        return Ok(());
+    }
+    info!(count = tips.len(), "checking grin tip funding confirmations");
+
+    // One tip-height read for the whole batch. A node error here aborts the pass
+    // (logged/swallowed by the caller) leaving every row untouched — never a
+    // partial mutation.
+    let tip_height = grin.get_height().await?;
+
+    for tip in &tips {
+        let Some(commit) = grin_commitment(tip) else {
+            warn!(tip_id = %tip.id, "grin confirmation: no commitment — skipping");
+            continue;
+        };
+        match grin.get_outputs(std::slice::from_ref(&commit)).await {
+            Ok(outputs) => {
+                // Present (with a block height) → confs; absent → 0 (and the
+                // timestamp stamp still lands, so we don't re-poll it hot).
+                let confs = outputs
+                    .iter()
+                    .find(|o| o.commit == commit)
+                    .map(|o| o.confirmations(tip_height))
+                    .unwrap_or(0);
+                let confs_i32 = confs.min(i32::MAX as u64) as i32;
+                if let Err(e) = state.db.update_tip_confirmations(tip.id, confs_i32).await {
+                    warn!(tip_id = %tip.id, error = %e, "failed to update grin tip confirmations");
+                }
+            }
+            Err(e) => {
+                // Node error: leave the row untouched for the next poll. NEVER
+                // mutate status (or the counter) here.
+                warn!(tip_id = %tip.id, error = %e, "failed to fetch grin get_outputs");
             }
         }
     }
@@ -163,6 +231,22 @@ pub(crate) fn classify_funding_amount(
         FundingVerification::Verified { observed: net }
     } else {
         FundingVerification::Short { observed: net }
+    }
+}
+
+/// Grin amount verification from the voucher commitment's presence in the UTXO
+/// set. Grin amounts are NOT on-chain verifiable (a Pedersen commitment hides the
+/// value), so once the commitment is confirmed the sender-declared `declared`
+/// amount is AUTO-VERIFIED (mirrors the legacy grin path). Present →
+/// `Verified{observed: declared}`; absent → `Unfunded` (stay pending for the next
+/// poll). Grin NEVER returns `Short`/`Drained` — it can never mass-mismatch. Pure
+/// (no I/O), so unit-testable like [`classify_funding_amount`].
+pub(crate) fn grin_amount_from_presence(present: bool, declared: i64) -> FundingVerification {
+    if present {
+        let observed = if declared < 0 { 0 } else { declared as u64 };
+        FundingVerification::Verified { observed }
+    } else {
+        FundingVerification::Unfunded
     }
 }
 
@@ -281,10 +365,37 @@ async fn verify_funding_amount(state: &AppState, tip: &SocialTipRow) -> FundingV
                 FundingVerification::Short { observed: net }
             }
         }
+        "grin" => {
+            let Some(grin) = state.chains.grin.as_ref() else {
+                warn!(tip_id = %tip.id, "verify: grin client disabled — staying in pending_confirmation");
+                return FundingVerification::LwsError;
+            };
+            let Some(commit) = grin_commitment(tip) else {
+                warn!(tip_id = %tip.id, "verify: grin commitment missing — treating as LwsError");
+                return FundingVerification::LwsError;
+            };
+            match grin.get_outputs(std::slice::from_ref(&commit)).await {
+                Ok(outputs) => {
+                    let present = outputs.iter().any(|o| o.commit == commit);
+                    if present {
+                        // The commitment hides the value, so we CANNOT cross-check
+                        // the amount on-chain — auto-verify the declared amount and
+                        // flag it loudly (mirrors legacy). Never a mass-mismatch.
+                        warn!(tip_id = %tip.id, declared = tip.amount, "verify: grin amount not cross-checked on-chain — auto-verifying declared amount");
+                    }
+                    grin_amount_from_presence(present, tip.amount)
+                }
+                Err(e) => {
+                    warn!(tip_id = %tip.id, error = %e, "verify: grin get_outputs failed — staying in pending_confirmation");
+                    FundingVerification::LwsError
+                }
+            }
+        }
         other => {
-            // Only btc/ltc/xmr/wow can ever create a tip, so this is unreachable
-            // in practice. Do NOT auto-verify an unknown asset (that would be a
-            // money-safety hole) — treat it as an error so the row stays put.
+            // Only btc/ltc/xmr/wow/grin can ever create a tip, so this is
+            // unreachable in practice. Do NOT auto-verify an unknown asset (that
+            // would be a money-safety hole) — treat it as an error so the row
+            // stays put.
             warn!(tip_id = %tip.id, asset = other, "verify: unsupported asset — staying in pending_confirmation");
             FundingVerification::LwsError
         }
@@ -463,5 +574,39 @@ mod tests {
     #[test]
     fn lws_error_distinct_from_unfunded() {
         assert_ne!(FundingVerification::LwsError, FundingVerification::Unfunded);
+    }
+
+    // ---- grin_amount_from_presence (voucher auto-verify) -------------------
+
+    #[test]
+    fn grin_present_auto_verifies_declared_amount() {
+        // The commitment hides the value; a confirmed commitment auto-verifies
+        // the declared amount (never Short/Drained).
+        assert_eq!(
+            grin_amount_from_presence(true, 500),
+            FundingVerification::Verified { observed: 500 }
+        );
+        assert_eq!(
+            grin_amount_from_presence(true, 1),
+            FundingVerification::Verified { observed: 1 }
+        );
+    }
+
+    #[test]
+    fn grin_absent_is_unfunded() {
+        assert_eq!(
+            grin_amount_from_presence(false, 500),
+            FundingVerification::Unfunded
+        );
+    }
+
+    #[test]
+    fn grin_negative_declared_saturates_to_zero() {
+        // Defensive: create-tip rejects amount <= 0, but a negative never
+        // underflows the u64 observed.
+        assert_eq!(
+            grin_amount_from_presence(true, -1),
+            FundingVerification::Verified { observed: 0 }
+        );
     }
 }

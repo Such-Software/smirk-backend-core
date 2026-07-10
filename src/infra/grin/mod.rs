@@ -134,3 +134,43 @@ pub struct GrinStatus {
 pub struct GrinTip {
     pub height: u64,
 }
+
+/// One output returned by the node Foreign API `get_outputs`. The commitment is
+/// the on-chain handle for a grin voucher; its presence in the UTXO set (with a
+/// block height) is how tips detect funding confirmation, and its ABSENCE is how
+/// they detect the voucher was swept. `block_height` is `Option` because the
+/// node's `OutputPrintable.block_height` is nullable.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GrinOutputInfo {
+    /// The Pedersen commitment (hex).
+    pub commit: String,
+    /// Block height the output was included at (`None` if not yet in a block).
+    #[serde(rename = "block_height", default)]
+    pub block_height: Option<u64>,
+    /// Output MMR index.
+    #[serde(default)]
+    pub mmr_index: u64,
+}
+
+impl GrinOutputInfo {
+    /// Confirmations at `tip_height`; `0` if the output has no block height or
+    /// claims a block beyond the tip (a lagging/inconsistent node) rather than a
+    /// bogus count. Mirrors [`ViewWalletOutputResult::confirmations`].
+    pub fn confirmations(&self, tip_height: u64) -> u64 {
+        match self.block_height {
+            Some(h) if h > 0 && h <= tip_height => {
+                tip_height.saturating_sub(h).saturating_add(1)
+            }
+            _ => 0,
+        }
+    }
+}
+
+/// A located transaction kernel returned by the node Foreign API `get_kernel`.
+/// Only the confirmed `height` is read (the spend's block height); the kernel
+/// body + `mmr_index` are ignored. Extra fields are tolerated by serde.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GrinKernelInfo {
+    /// Block height the kernel (and thus its spending tx) was mined at.
+    pub height: u64,
+}

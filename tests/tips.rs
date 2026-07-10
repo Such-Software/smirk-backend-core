@@ -110,13 +110,15 @@ async fn db_create_draft_roundtrips_all_columns() {
         funding_txid: None,
         tip_view_key: None,
         confirmations_required: 0,
+        grin_commitment: None,
     };
-    // Exercises the full 31-column FromRow decode on RETURNING.
+    // Exercises the full 32-column FromRow decode on RETURNING.
     let row = app.state.db.create_draft_social_tip(new).await.expect("create draft");
     assert_eq!(row.status, "draft");
     assert_eq!(row.amount, 100_000);
     assert!(row.is_public);
     assert_eq!(row.encrypted_key.as_deref(), Some(&[0xcd, 0xcd][..]));
+    assert_eq!(row.grin_commitment, None);
 }
 
 #[tokio::test]
@@ -193,6 +195,7 @@ async fn make_draft(
         funding_txid: None,
         tip_view_key: view_key,
         confirmations_required: conf,
+        grin_commitment: None,
     };
     app.state
         .db
@@ -799,4 +802,223 @@ async fn log_stuck_claiming_returns_backdated_and_mutates_nothing() {
     let row = app.state.db.get_social_tip(stale).await.expect("get").expect("row");
     assert_eq!(row.status, "claiming", "log_stuck_claiming must not mutate status");
     assert!(row.sweep_confirmed_at.is_none(), "log_stuck_claiming must not settle the sweep");
+}
+
+// ── Grin (voucher asset) tests ────────────────────────────────────────────────
+//
+// Grin tips carry no address+view-key: the client funds a voucher OUTPUT and
+// sends its Pedersen COMMITMENT (66 hex) as both `tip_address` and
+// `grin_commitment`. These cover the create-time surface (gating, validation,
+// the grin_commitment column/migration, the 10-conf threshold). The
+// get_outputs/get_kernel-backed worker paths need a live grin node and are
+// documented manual steps (see the module docs in src/tips/{confirmation,
+// sweep_reconciler}.rs).
+
+/// Boot the app with tips + the grin chain flag on (+ a share base). The grin
+/// client is built against the empty test grin config; no worker runs in-harness,
+/// so the create-time surface is exercised without a live node.
+async fn grin_tips_app() -> Option<common::TestApp> {
+    common::try_app_with(|c| {
+        c.features.tips = true;
+        c.features.chains.grin = true;
+        c.tip_share_base = Some("https://tips.example".into());
+    })
+    .await
+}
+
+/// A valid Grin voucher commitment shape: 66 hex chars (33-byte compressed point).
+fn grin_commit() -> String {
+    format!("09{}", "a1".repeat(32))
+}
+
+#[tokio::test]
+async fn grin_public_tip_create_returns_draft_and_share_url() {
+    let Some(app) = grin_tips_app().await else {
+        eprintln!("skipping: TEST_DATABASE_URL not set");
+        return;
+    };
+    let (_uid, token, _refresh) = app.mint_session().await;
+    let commit = grin_commit();
+
+    // No funding_txid -> the backend creates status='draft' (voucher funds later).
+    let body = json!({
+        "asset": "grin",
+        "amount": 500,
+        "is_public": true,
+        "claim_key_hash": CLAIM_HASH,
+        "encrypted_key": ENC_KEY_HEX,
+        "tip_address": commit,
+        "grin_commitment": commit,
+    });
+    let (status, resp) = app
+        .request("POST", "/api/v1/tips/social", Some(&token), Some(body))
+        .await;
+    assert_eq!(status, StatusCode::OK, "create grin: {resp}");
+    assert_eq!(resp["status"], "draft");
+    let tip_id = resp["tip_id"].as_str().expect("tip_id").to_string();
+    assert_eq!(resp["share_url"], format!("https://tips.example/{tip_id}"));
+
+    // Migration applied: the grin_commitment column round-trips, tip_address
+    // mirrors it, and the grin funding threshold is 10.
+    let uuid = tip_id.parse::<uuid::Uuid>().unwrap();
+    let row = app.state.db.get_social_tip(uuid).await.expect("get").expect("row");
+    assert_eq!(row.asset, "grin");
+    assert_eq!(row.grin_commitment.as_deref(), Some(commit.as_str()));
+    assert_eq!(row.tip_address.as_deref(), Some(commit.as_str()));
+    assert_eq!(row.confirmations_required, 10);
+}
+
+#[tokio::test]
+async fn grin_create_falls_back_to_tip_address_for_commitment() {
+    let Some(app) = grin_tips_app().await else { return };
+    let (_uid, token, _refresh) = app.mint_session().await;
+    let commit = grin_commit();
+
+    // Omit grin_commitment entirely -> the backend stores tip_address as the
+    // commitment (the client sends the same value for both).
+    let body = json!({
+        "asset": "grin",
+        "amount": 500,
+        "is_public": true,
+        "claim_key_hash": CLAIM_HASH,
+        "tip_address": commit,
+    });
+    let (status, resp) = app
+        .request("POST", "/api/v1/tips/social", Some(&token), Some(body))
+        .await;
+    assert_eq!(status, StatusCode::OK, "create grin (no commit field): {resp}");
+    let uuid = resp["tip_id"].as_str().unwrap().parse::<uuid::Uuid>().unwrap();
+    let row = app.state.db.get_social_tip(uuid).await.expect("get").expect("row");
+    assert_eq!(row.grin_commitment.as_deref(), Some(commit.as_str()));
+}
+
+#[tokio::test]
+async fn grin_create_rejects_junk_commitment() {
+    let Some(app) = grin_tips_app().await else { return };
+    let (_uid, token, _refresh) = app.mint_session().await;
+
+    // tip_address that isn't a 66-hex commitment -> clean 400.
+    for bad in [
+        "deadbeef".to_string(),               // too short
+        "z".repeat(66),                       // right length, not hex
+        format!("09{}", "a1".repeat(33)),     // 68 chars, too long
+    ] {
+        let body = json!({
+            "asset": "grin",
+            "amount": 500,
+            "is_public": true,
+            "claim_key_hash": CLAIM_HASH,
+            "tip_address": bad,
+        });
+        let (status, resp) = app
+            .request("POST", "/api/v1/tips/social", Some(&token), Some(body))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "junk grin address must 400: {resp}");
+    }
+
+    // A valid tip_address but a junk explicit grin_commitment is also rejected
+    // (the explicit field is preferred, so it must validate too).
+    let body = json!({
+        "asset": "grin",
+        "amount": 500,
+        "is_public": true,
+        "claim_key_hash": CLAIM_HASH,
+        "tip_address": grin_commit(),
+        "grin_commitment": "z".repeat(66),
+    });
+    let (status, resp) = app
+        .request("POST", "/api/v1/tips/social", Some(&token), Some(body))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "junk grin_commitment must 400: {resp}");
+}
+
+#[tokio::test]
+async fn grin_create_rejected_when_chain_disabled() {
+    // supported_tip_asset gates on the feature flag: grin OFF -> 400 even though
+    // the wire is otherwise valid.
+    let Some(app) = common::try_app_with(|c| {
+        c.features.tips = true;
+        c.features.chains.grin = false;
+        c.tip_share_base = Some("https://tips.example".into());
+    })
+    .await else {
+        return;
+    };
+    let (_uid, token, _refresh) = app.mint_session().await;
+    let commit = grin_commit();
+    let body = json!({
+        "asset": "grin",
+        "amount": 500,
+        "is_public": true,
+        "claim_key_hash": CLAIM_HASH,
+        "tip_address": commit,
+        "grin_commitment": commit,
+    });
+    let (status, resp) = app
+        .request("POST", "/api/v1/tips/social", Some(&token), Some(body))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "grin disabled must 400: {resp}");
+}
+
+/// The grin voucher flows through the SAME draft -> attach-funding -> claiming
+/// lifecycle as the other assets: attach a client bookkeeping id, mark it
+/// funded+verified (as the workers would), claim it, and record the sweep's
+/// kernel excess as sweep_txid. Pure DB-level (no node), asserting the columns
+/// the grin worker arms depend on.
+#[tokio::test]
+async fn grin_tip_db_lifecycle_columns() {
+    let Some(app) = grin_tips_app().await else { return };
+    let uid = app.create_user().await;
+    let commit = grin_commit();
+
+    use smirk_backend_core::infra::db::NewSocialTip;
+    let new = NewSocialTip {
+        sender_user_id: uid,
+        asset: "grin",
+        amount: 500,
+        claim_key_hash: Some(CLAIM_HASH),
+        encrypted_key: None,
+        tip_address: Some(&commit),
+        funding_txid: None,
+        tip_view_key: None,
+        confirmations_required: 10,
+        grin_commitment: Some(&commit),
+    };
+    let tip_id = app.state.db.create_draft_social_tip(new).await.expect("create draft").id;
+
+    // attach-funding with the client's bookkeeping id (grin has no real txid).
+    let r = app
+        .state
+        .db
+        .attach_funding_to_tip(tip_id, uid, "grin-bookkeeping-uuid")
+        .await
+        .expect("attach");
+    assert_eq!(r.status, "pending_confirmation");
+    assert_eq!(r.grin_commitment.as_deref(), Some(commit.as_str()));
+
+    // Simulate the funding worker: 10 confs reached + amount auto-verified.
+    app.state.db.update_tip_confirmations(tip_id, 10).await.expect("confs");
+    let verified = app
+        .state
+        .db
+        .mark_tip_funding_verified(tip_id, 500)
+        .await
+        .expect("verify")
+        .expect("row");
+    assert_eq!(verified.status, "pending");
+    assert!(verified.funding_amount_verified);
+
+    // Claim, then record the sweep's kernel excess as sweep_txid.
+    let claimant = app.create_user().await;
+    app.state.db.mark_tip_claiming(tip_id, claimant).await.expect("claim").expect("row");
+    let excess = format!("08{}", "bc".repeat(32)); // kernel excess (66 hex)
+    let swept = app
+        .state
+        .db
+        .confirm_tip_sweep(tip_id, claimant, &excess)
+        .await
+        .expect("confirm sweep")
+        .expect("row");
+    assert_eq!(swept.status, "claiming");
+    assert_eq!(swept.sweep_txid.as_deref(), Some(excess.as_str()));
 }

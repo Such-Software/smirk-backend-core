@@ -1,0 +1,12 @@
+-- Grin public tips use a VOUCHER model, not an address + view-key. The sender
+-- builds a single-party voucher output locally and shares its blinding factor
+-- (the "spend key" for a Pedersen commitment) in the encrypted claim blob. The
+-- on-chain handle for that voucher is the output's Pedersen COMMITMENT (hex, 66
+-- chars) — the grin confirmation + sweep workers query the node by commitment
+-- (get_outputs present/absent) rather than by a txid.
+--
+-- The commitment also arrives in `tip_address` (the client sends the same value
+-- for both), but store it in a dedicated column so the grin worker arms read a
+-- clear, purpose-named field. Nullable: only grin tips populate it. Preferred
+-- over `tip_address` where both exist.
+ALTER TABLE social_tips ADD COLUMN grin_commitment VARCHAR(66);

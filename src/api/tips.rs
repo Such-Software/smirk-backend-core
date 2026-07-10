@@ -169,8 +169,7 @@ fn ensure_tips_enabled(state: &AppState) -> Result<(), AppError> {
     }
 }
 
-/// Whether `asset` is a tip-capable chain enabled on this instance. Grin is not
-/// supported by the tips port yet.
+/// Whether `asset` is a tip-capable chain enabled on this instance.
 fn supported_tip_asset(state: &AppState, asset: &str) -> bool {
     let c = &state.config.features.chains;
     match asset {
@@ -178,14 +177,16 @@ fn supported_tip_asset(state: &AppState, asset: &str) -> bool {
         "ltc" => c.ltc,
         "xmr" => c.xmr,
         "wow" => c.wow,
+        "grin" => c.grin,
         _ => false,
     }
 }
 
 /// Basic tip-address validation. XMR/WOW reuse the CryptoNote validator; BTC/LTC
-/// get a light sanity check (the sender funds and later sweeps THEIR OWN
-/// address, so a malformed one merely fails funding verification — it can't
-/// misdirect funds to a third party).
+/// get a light sanity check; grin's "address" is the voucher's 66-hex Pedersen
+/// commitment (the sender funds and later sweeps THEIR OWN output, so a malformed
+/// one merely fails funding verification — it can't misdirect funds to a third
+/// party).
 fn validate_tip_address(asset: &str, address: &str) -> Result<(), AppError> {
     if address.is_empty() || address.len() > 255 {
         return Err(AppError::ValidationError("tip_address is invalid.".into()));
@@ -194,6 +195,16 @@ fn validate_tip_address(asset: &str, address: &str) -> Result<(), AppError> {
         "xmr" | "wow" => validate_cn_address(address),
         "btc" | "ltc" => {
             if address.len() >= 14 && address.chars().all(|c| c.is_ascii_alphanumeric()) {
+                Ok(())
+            } else {
+                Err(AppError::ValidationError("tip_address is invalid.".into()))
+            }
+        }
+        // Grin: a Pedersen commitment is a compressed point, 33 bytes = 66 hex
+        // chars. Reject anything else so a malformed value is a clean 400 (and
+        // never overflows the VARCHAR(66) grin_commitment column).
+        "grin" => {
+            if address.len() == 66 && address.chars().all(|c| c.is_ascii_hexdigit()) {
                 Ok(())
             } else {
                 Err(AppError::ValidationError("tip_address is invalid.".into()))
@@ -333,6 +344,24 @@ pub async fn create_social_tip(
         validate_tip_address(&asset, addr)?;
     }
 
+    // Grin tips use a voucher: the on-chain handle is the output's Pedersen
+    // commitment, which the client sends as BOTH tip_address and grin_commitment.
+    // Prefer the explicit field, fall back to tip_address, and validate it as a
+    // 66-hex commitment so a malformed value is a clean 400 (not a DB overflow).
+    let grin_commitment = if asset == "grin" {
+        let commit = req
+            .grin_commitment
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or(tip_address);
+        if let Some(commit) = commit {
+            validate_tip_address("grin", commit)?;
+        }
+        commit
+    } else {
+        None
+    };
+
     let new = NewSocialTip {
         sender_user_id: user_id,
         asset: &asset,
@@ -343,6 +372,7 @@ pub async fn create_social_tip(
         funding_txid,
         tip_view_key: req.tip_view_key.as_deref().filter(|s| !s.is_empty()),
         confirmations_required: confirmations_for_asset(&asset),
+        grin_commitment,
     };
 
     let tip = if is_draft {

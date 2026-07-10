@@ -22,3 +22,18 @@ pub mod sweep_reconciler;
 pub use confirmation::run_tip_confirmation_cycle;
 pub use gc::{run_tip_draft_gc_cycle, run_tip_lifecycle_gc_cycle};
 pub use sweep_reconciler::{run_sweep_reconcile_cycle, run_sweep_reorg_cycle};
+
+use crate::infra::db::SocialTipRow;
+
+/// The Grin voucher commitment (hex) for a tip: the explicit `grin_commitment`
+/// column, falling back to `tip_address` (the client sends the commitment as
+/// both). `None` (empty/absent) means the grin worker arms can't act on the row.
+/// Trimmed; an empty value is treated as absent.
+pub(crate) fn grin_commitment(tip: &SocialTipRow) -> Option<String> {
+    tip.grin_commitment
+        .as_deref()
+        .or(tip.tip_address.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}

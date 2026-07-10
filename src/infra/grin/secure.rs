@@ -221,6 +221,40 @@ impl GrinClient {
         envelope_into_result(env, "grin node")
     }
 
+    /// Like [`node_rpc`], but treats Grin's inner `{"Err": _}` result as a
+    /// legitimate "not found" (`Ok(None)`) rather than an error. Grin's Foreign
+    /// API `get_kernel` returns `{"result":{"Err":"NotFound"}}` for an unmined /
+    /// unknown excess; the caller must distinguish that (kernel not mined yet)
+    /// from a transport/JSON-RPC error (which stays `Err`). A `{"Ok": _}` result
+    /// maps to `Ok(Some(_))`; a JSON-RPC `error` envelope or a malformed body
+    /// stays `Err`.
+    pub(super) async fn node_rpc_optional<T, R>(
+        &self,
+        url: &str,
+        auth: Option<(&str, &str)>,
+        method: &str,
+        params: T,
+    ) -> Result<Option<R>, AppError>
+    where
+        T: Serialize,
+        R: DeserializeOwned,
+    {
+        let bytes = self
+            .post_capped(url, auth, &JsonRpcRequest::new(method, params))
+            .await?;
+        let env: RpcEnvelope<R> = serde_json::from_slice(&bytes)
+            .map_err(|_| AppError::NodeError("grin node: invalid response".into()))?;
+        if let Some(e) = env.error {
+            return Err(AppError::NodeError(format!("grin node error {}", e.code)));
+        }
+        match env.result {
+            Some(GrinOk::Ok(r)) => Ok(Some(r)),
+            // `{"Err": "NotFound"}` (or any inner Err): not an outage, just absent.
+            Some(GrinOk::Err(_)) => Ok(None),
+            None => Err(AppError::NodeError("grin node: empty result".into())),
+        }
+    }
+
     /// POST a JSON body (optionally basic-auth'd) and return the size-capped
     /// response bytes. The body is never logged or echoed into an error.
     async fn post_capped<B: Serialize>(

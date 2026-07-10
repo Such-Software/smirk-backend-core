@@ -334,14 +334,13 @@ fn feed_advertised(config: &Config) -> bool {
 }
 
 /// Whether public tips are actually serveable: the feature is on, a share-URL
-/// base is configured, AND at least one supported tip chain (btc/ltc/xmr/wow)
+/// base is configured, AND at least one supported tip chain (btc/ltc/xmr/wow/grin)
 /// is serviceable. Mirrors the chain/relay presence-downgrade — never advertise
-/// tips an instance can't escrow on or build share links for. (Grin is out of
-/// the tips port, so it is not a supported tip chain here.)
+/// tips an instance can't escrow on or build share links for.
 fn tips_advertised(config: &Config) -> bool {
     config.features.tips
         && config.tip_share_base.is_some()
-        && ["btc", "ltc", "xmr", "wow"]
+        && ["btc", "ltc", "xmr", "wow", "grin"]
             .iter()
             .any(|asset| chain_serviceable(config, asset))
 }
