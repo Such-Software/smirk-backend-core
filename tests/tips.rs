@@ -601,7 +601,10 @@ async fn confirm_sweep_onchain_settles_claiming_only() {
 }
 
 /// (d) revert_sweep_on_reorg reverts 'claimed' -> 'claiming' ONLY, clearing the
-/// sweep witness (incl. sweep_txid so the next cycle records the new winner).
+/// settlement witness (sweep_confirmed_at, block height/hash) but PRESERVING
+/// sweep_txid. Address-scan chains overwrite it via confirm_sweep_onchain on the
+/// next cycle; grin (voucher) needs it to re-date the re-mined sweep via
+/// get_kernel, so nulling it would strand the row in 'claiming'.
 #[tokio::test]
 async fn revert_sweep_on_reorg_only_from_claimed() {
     let Some(app) = tips_app().await else { return };
@@ -612,9 +615,10 @@ async fn revert_sweep_on_reorg_only_from_claimed() {
     let reverted = app.state.db.revert_sweep_on_reorg(id).await.expect("revert").expect("reverted row");
     assert_eq!(reverted.status, "claiming");
     assert!(reverted.sweep_confirmed_at.is_none());
-    assert!(
-        reverted.sweep_txid.is_none(),
-        "reorg clears sweep_txid so the next confirm cycle records the new on-chain winner"
+    assert_eq!(
+        reverted.sweep_txid.as_deref(),
+        Some("onchain-swp"),
+        "reorg preserves sweep_txid: address-scan chains overwrite it next cycle, grin needs it to re-date via get_kernel"
     );
     assert!(reverted.sweep_block_height.is_none());
 

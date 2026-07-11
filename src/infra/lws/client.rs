@@ -245,7 +245,28 @@ impl LwsClient {
                 let current =
                     self.account_scan_height(address).await?.unwrap_or(u64::MAX);
                 if start_height < current {
-                    self.rescan(vec![address.to_string()], start_height).await?;
+                    // The account is now added at the chain tip. If this backfill
+                    // rescan fails, the account is stranded at the tip: it reads a
+                    // 0 balance and the `Some(_)` short-circuit above (which exists
+                    // to prevent the reset loop) means a later re-registration will
+                    // NOT retry it. So retry a transient failure here, where we
+                    // still know this is a fresh account that owes a backwards scan.
+                    let mut attempt = 0u32;
+                    loop {
+                        match self.rescan(vec![address.to_string()], start_height).await {
+                            Ok(()) => break,
+                            Err(e) => {
+                                attempt += 1;
+                                if attempt >= 3 {
+                                    return Err(e);
+                                }
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    300 * u64::from(attempt),
+                                ))
+                                .await;
+                            }
+                        }
+                    }
                 }
                 Ok(())
             }

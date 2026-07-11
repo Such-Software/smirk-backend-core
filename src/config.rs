@@ -1105,14 +1105,14 @@ impl Config {
         // Public tips escrow on-chain and deliver by share URL, so an instance
         // with FEATURE_TIPS on but no chain to escrow on, or no TIP_SHARE_BASE_URL
         // to build share links from, would advertise a tips subsystem it cannot
-        // actually serve. Fail closed rather than boot broken. (Grin is out of the
-        // tips port, so it is NOT a supported tip chain here.)
+        // actually serve. Fail closed rather than boot broken. Grin tips (voucher
+        // model, verified against the grin node) are supported, so grin counts.
         if self.features.tips {
             let c = &self.features.chains;
-            if !(c.btc || c.ltc || c.xmr || c.wow) {
+            if !(c.btc || c.ltc || c.xmr || c.wow || c.grin) {
                 return Err(cfg_err(
-                    "FEATURE_TIPS is on but no supported tip chain is enabled — enable at least \
-                     one of FEATURE_BTC / FEATURE_LTC / FEATURE_XMR / FEATURE_WOW",
+                    "FEATURE_TIPS is on but no supported tip chain is enabled: enable at least \
+                     one of FEATURE_BTC / FEATURE_LTC / FEATURE_XMR / FEATURE_WOW / FEATURE_GRIN",
                 ));
             }
             if self.tip_share_base.is_none() {

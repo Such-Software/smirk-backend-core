@@ -694,12 +694,20 @@ impl Database {
     }
 
     /// Revert a settled (`claimed`) tip back to `claiming` after a reorg orphaned
-    /// its recorded sweep. Clearing `sweep_txid` is LOAD-BEARING: the next
-    /// confirm cycle re-scans the address and records the NEW on-chain winner,
-    /// not the orphaned one. Also clears `sweep_confirmed_dm_sent_at` so a fresh
-    /// "claimed" notify can fire once re-confirmation lands. The
-    /// `status = 'claimed' AND sweep_confirmed_at IS NOT NULL` guard is the only
-    /// path off `claimed`; `None` if the row isn't settled.
+    /// its recorded sweep. Clears the settlement markers (`sweep_confirmed_at`,
+    /// block height/hash) and `sweep_confirmed_dm_sent_at` so a fresh "claimed"
+    /// notify can fire once re-confirmation lands.
+    ///
+    /// `sweep_txid` is deliberately PRESERVED. For address-scan chains
+    /// (btc/ltc/xmr/wow) the next confirm cycle re-scans the address and
+    /// `confirm_sweep_onchain` overwrites `sweep_txid` with the new on-chain
+    /// winner, so preserving the orphaned value is harmless. For grin (voucher)
+    /// it is REQUIRED: `probe_grin_spends` dates the re-mined sweep via
+    /// `get_kernel(sweep_txid /* = kernel excess */)`, so nulling it would strand
+    /// the row in `claiming` forever after a reorg.
+    ///
+    /// The `status = 'claimed' AND sweep_confirmed_at IS NOT NULL` guard is the
+    /// only path off `claimed`; `None` if the row isn't settled.
     #[instrument(skip(self))]
     pub async fn revert_sweep_on_reorg(
         &self,
@@ -709,7 +717,6 @@ impl Database {
             "UPDATE social_tips \
              SET status = 'claiming', \
                  sweep_confirmed_at = NULL, \
-                 sweep_txid = NULL, \
                  sweep_block_height = NULL, \
                  sweep_block_hash = NULL, \
                  sweep_confirmed_dm_sent_at = NULL, \
