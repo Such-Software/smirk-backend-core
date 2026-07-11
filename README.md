@@ -4,9 +4,9 @@ Open, self-hostable backend for the [Smirk](https://smirk.cash) non-custodial
 multi-chain wallet. Rust + Axum + PostgreSQL.
 
 It gives a wallet chain access (balances, history, UTXOs, spend inputs, fee
-estimation, broadcast), Nostr-native identity, a fiat price feed, and an async
-Grin slatepack relay — **without ever holding a spend key or seed**. Run your
-own; the wallet is backend-agnostic.
+estimation, broadcast), Nostr-native identity, a fiat price feed, an async
+Grin slatepack relay, and a public social-tips subsystem, all **without ever
+holding a spend key or seed**. Run your own; the wallet is backend-agnostic.
 
 > **Status:** v0.3.0 — feature-complete and security-reviewed, but young. The
 > schema/API may still evolve. Run your own chain backends where you can, review
@@ -26,7 +26,7 @@ and relays bytes.
 |-------|--------|-------|
 | Bitcoin, Litecoin | Electrum / Fulcrum | reads, fee estimation, broadcast |
 | Monero, Wownero | light-wallet-server (LWS) | stateless view-key forwarding |
-| Grin | grin-wallet (view-only) + node | `rewind_hash` scan, broadcast, slatepack relay |
+| Grin | grin-lws (default) / grin-wallet (view-only) + node | `rewind_hash` scan, broadcast, slatepack relay; scans proxy to grin-lws when configured, falling back to the authoritative grin-wallet scan |
 
 Each chain is independently feature-flagged; a chain whose source isn't configured
 is reported `enabled: false` by `/capabilities` rather than failing at call time.
@@ -45,6 +45,20 @@ Public surface (`/api/v1`):
   broadcast.
 - **Grin relay** — non-custodial store-and-forward mailbox for interactive Grin
   transfers (feature-flagged).
+- **Social tips** (`/tips/social/*`, feature-flagged): the public send-a-tip
+  surface across BTC/LTC/XMR/WOW and Grin. Roughly ten endpoints cover the
+  lifecycle: create (two-phase draft), attach-funding, public metadata for a
+  share-URL holder, sent, received, claimable, cancel, claim, confirm-sweep, and
+  clawback. A `TipStatus` state machine (`draft → pending_confirmation → pending →
+  claiming → claimed`, plus `cancelled` / `clawed_back` / `funding_mismatch`)
+  governs the row. The backend never holds the spend key: for BTC/LTC/XMR/WOW the
+  tip key rides the share URL; Grin tips use a voucher/commitment model verified
+  against the node's `get_outputs` / `get_kernel`. Three background workers keep it
+  honest, and every one leaves a row untouched on any upstream error (never a
+  status flip): a funding verifier (confirmation-count + on-chain amount check
+  before a tip becomes claimable), a sweep reconciler (settles `claiming → claimed`
+  only after the claim sweep confirms on-chain to the per-asset depth, with reorg
+  revert), and lifecycle/draft GC janitors for abandoned rows.
 - **Capabilities** (`/capabilities`) — what this instance enables, so the wallet
   adapts per-instance.
 - **Prices** (`/prices`) — cached fiat feed, per-feed operator control.
