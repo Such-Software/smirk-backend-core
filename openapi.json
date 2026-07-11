@@ -751,6 +751,70 @@
         ]
       }
     },
+    "/tips/social/claimable": {
+      "get": {
+        "tags": [
+          "tips"
+        ],
+        "summary": "Tips CLAIMABLE by the caller. As with `received`, a public-only instance has\nno targeted-claimable inbox, so this is always empty (served 200, not 404).",
+        "operationId": "get_claimable_social_tips",
+        "responses": {
+          "200": {
+            "description": "Claimable tips (empty on a public-only instance)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SocialTipsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Tips off"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/tips/social/received": {
+      "get": {
+        "tags": [
+          "tips"
+        ],
+        "summary": "Tips RECEIVED by the caller. Public-only instances have no targeted-recipient\ninbox (public tips are claimed via share URL, never delivered to a user), so\nthis is always empty — served (200) rather than 404 so the client's inbox\npoll doesn't error on a targeted-only endpoint this instance doesn't serve.",
+        "operationId": "get_received_social_tips",
+        "responses": {
+          "200": {
+            "description": "Received tips (empty on a public-only instance)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SocialTipsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Tips off"
+          },
+          "401": {
+            "description": "Missing or invalid token"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/tips/social/sent": {
       "get": {
         "tags": [

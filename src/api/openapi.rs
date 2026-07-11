@@ -70,6 +70,8 @@ use utoipa::OpenApi;
         crate::api::premium::status,
         crate::api::tips::create_social_tip,
         crate::api::tips::get_sent_social_tips,
+        crate::api::tips::get_received_social_tips,
+        crate::api::tips::get_claimable_social_tips,
         crate::api::tips::get_public_social_tip,
         crate::api::tips::cancel_social_tip,
         crate::api::tips::attach_funding,

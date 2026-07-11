@@ -419,6 +419,54 @@ pub async fn get_sent_social_tips(
     }))
 }
 
+/// Tips RECEIVED by the caller. Public-only instances have no targeted-recipient
+/// inbox (public tips are claimed via share URL, never delivered to a user), so
+/// this is always empty — served (200) rather than 404 so the client's inbox
+/// poll doesn't error on a targeted-only endpoint this instance doesn't serve.
+#[utoipa::path(
+    security(("bearer_auth" = [])),
+    get,
+    path = "/tips/social/received",
+    responses(
+        (status = 200, description = "Received tips (empty on a public-only instance)", body = SocialTipsResponse),
+        (status = 400, description = "Tips off"),
+        (status = 401, description = "Missing or invalid token")
+    ),
+    tag = "tips"
+)]
+#[instrument(skip(state, headers))]
+pub async fn get_received_social_tips(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<SocialTipsResponse>, AppError> {
+    extract_user_id_from_token(&state, &headers).await?;
+    ensure_tips_enabled(&state)?;
+    Ok(Json(SocialTipsResponse { tips: Vec::new() }))
+}
+
+/// Tips CLAIMABLE by the caller. As with `received`, a public-only instance has
+/// no targeted-claimable inbox, so this is always empty (served 200, not 404).
+#[utoipa::path(
+    security(("bearer_auth" = [])),
+    get,
+    path = "/tips/social/claimable",
+    responses(
+        (status = 200, description = "Claimable tips (empty on a public-only instance)", body = SocialTipsResponse),
+        (status = 400, description = "Tips off"),
+        (status = 401, description = "Missing or invalid token")
+    ),
+    tag = "tips"
+)]
+#[instrument(skip(state, headers))]
+pub async fn get_claimable_social_tips(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<SocialTipsResponse>, AppError> {
+    extract_user_id_from_token(&state, &headers).await?;
+    ensure_tips_enabled(&state)?;
+    Ok(Json(SocialTipsResponse { tips: Vec::new() }))
+}
+
 /// Public tip metadata for a share-URL holder. UNAUTHENTICATED: the tip id (a
 /// UUID) is the bearer token. 404s for an unknown or non-public tip.
 #[utoipa::path(
@@ -664,6 +712,8 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/tips/social", post(create_social_tip))
         .route("/tips/social/sent", get(get_sent_social_tips))
+        .route("/tips/social/received", get(get_received_social_tips))
+        .route("/tips/social/claimable", get(get_claimable_social_tips))
         .route("/tips/social/:tip_id/public", get(get_public_social_tip))
         .route("/tips/social/:tip_id/cancel", post(cancel_social_tip))
         .route(
