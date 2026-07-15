@@ -25,9 +25,9 @@
 //!     `checked_add`. A hostile peer cannot drive a balance to `0` or `u64::MAX`.
 //!   * Each JSON-RPC response id is **correlated** with its request.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rand::seq::SliceRandom;
 use rustls_pki_types::ServerName;
@@ -42,14 +42,30 @@ use tracing::{instrument, warn};
 use crate::config::UtxoConfig;
 use crate::error::AppError;
 
-/// TCP + TLS connect deadline per server.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// TCP + TLS connect deadline per server. Kept tight: the primary is a warm node
+/// on the private mesh (sub-second when healthy) and public fallbacks answer in
+/// ~1s, so a longer deadline only turns a dead server into a user-facing stall.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
+/// Consecutive primary failures before the primary is put on ice (circuit
+/// breaker), so a down primary stops costing a connect timeout on every request.
+const PRIMARY_FAIL_THRESHOLD: u32 = 2;
+/// How long to skip a tripped primary before re-probing it once.
+const PRIMARY_COOLDOWN: Duration = Duration::from_secs(30);
 /// Deadline for the write-request / read-response exchange on a connected stream.
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 /// Hard cap on a single Electrum response line. Even a large verbose tx or a
 /// busy address's full history sits well under this; the cap turns a hostile
 /// unbounded stream into a clean error instead of unbounded memory growth.
 const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Unix time in milliseconds. Used only as the primary circuit-breaker clock, so
+/// a clock glitch at worst re-probes the primary a little early/late.
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// The coin + network an [`ElectrumClient`] is bound to. Used to validate that
 /// a queried address actually belongs to this chain (reject ltc-on-btc,
@@ -129,6 +145,11 @@ pub struct ElectrumClient {
     tls: TlsConnector,
     /// Monotonic JSON-RPC request id, shared across clones for correlation.
     next_id: Arc<AtomicU64>,
+    /// Primary circuit breaker: consecutive-failure count, and — once tripped —
+    /// the unix-millis instant until which the primary is skipped in favour of
+    /// fallbacks. Shared across clones so the whole process backs off together.
+    primary_fail_count: Arc<AtomicU32>,
+    primary_cooldown_until_ms: Arc<AtomicU64>,
 }
 
 /// Confirmed/unconfirmed balance in satoshis (integer fields straight off the
@@ -361,6 +382,8 @@ impl ElectrumClient {
             fallbacks,
             tls: build_tls_connector(cfg.electrum_strict_tls),
             next_id: Arc::new(AtomicU64::new(1)),
+            primary_fail_count: Arc::new(AtomicU32::new(0)),
+            primary_cooldown_until_ms: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -453,19 +476,49 @@ impl ElectrumClient {
         T: for<'de> Deserialize<'de>,
     {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let servers = self.servers_in_order();
-        if servers.is_empty() {
+
+        if self.primary.is_none() && self.fallbacks.is_empty() {
             return Err(AppError::NodeError("no Electrum server configured".into()));
         }
 
+        let now = now_millis();
+        // Skip a known-down primary (circuit breaker) ONLY when there is a
+        // fallback to use instead: a dead primary otherwise burns the full
+        // CONNECT_TIMEOUT on every request. With no fallback we still try the
+        // primary as a last resort rather than fail outright.
+        let use_primary = self
+            .primary
+            .as_ref()
+            .filter(|_| !(self.primary_in_cooldown(now) && !self.fallbacks.is_empty()));
+
         let mut last_err = AppError::NodeError("all Electrum servers failed".into());
-        for server in servers {
+
+        // Primary first, tracked by the breaker so repeated failures trip it and
+        // subsequent requests go straight to fallbacks instead of stalling.
+        if let Some(p) = use_primary {
+            match self.try_call::<T>(p, method, &params, id).await {
+                Ok(value) => {
+                    self.record_primary_success();
+                    return Ok(value);
+                }
+                Err(e) => {
+                    self.record_primary_failure(now);
+                    // host/port are operator config (not attacker body); the
+                    // detailed `inner` is logged privately by AppError.
+                    warn!(host = %p.host, port = p.port, method, "Electrum primary query failed");
+                    last_err = e;
+                }
+            }
+        }
+
+        // Then fallbacks, in randomized order.
+        let mut fallbacks = self.fallbacks.clone();
+        fallbacks.shuffle(&mut rand::thread_rng());
+        for server in fallbacks {
             match self.try_call::<T>(&server, method, &params, id).await {
                 Ok(value) => return Ok(value),
                 Err(e) => {
-                    // host/port are operator config (not attacker body); the
-                    // detailed `inner` is logged privately by AppError.
-                    warn!(host = %server.host, port = server.port, method, "Electrum server query failed");
+                    warn!(host = %server.host, port = server.port, method, "Electrum fallback query failed");
                     last_err = e;
                 }
             }
@@ -473,16 +526,25 @@ impl ElectrumClient {
         Err(last_err)
     }
 
-    /// Primary first, then fallbacks in randomized order.
-    fn servers_in_order(&self) -> Vec<ServerUrl> {
-        let mut ordered = Vec::with_capacity(1 + self.fallbacks.len());
-        if let Some(p) = &self.primary {
-            ordered.push(p.clone());
+    /// True while the primary is inside its post-failure cooldown window.
+    fn primary_in_cooldown(&self, now_ms: u64) -> bool {
+        self.primary_cooldown_until_ms.load(Ordering::Relaxed) > now_ms
+    }
+
+    /// Record a primary failure; trip the breaker once the threshold is reached.
+    fn record_primary_failure(&self, now_ms: u64) {
+        let count = self.primary_fail_count.fetch_add(1, Ordering::Relaxed) + 1;
+        if count >= PRIMARY_FAIL_THRESHOLD {
+            let until = now_ms.saturating_add(PRIMARY_COOLDOWN.as_millis() as u64);
+            self.primary_cooldown_until_ms.store(until, Ordering::Relaxed);
         }
-        let mut fallbacks = self.fallbacks.clone();
-        fallbacks.shuffle(&mut rand::thread_rng());
-        ordered.extend(fallbacks);
-        ordered
+    }
+
+    /// Record a primary success; clear the failure count and any cooldown so the
+    /// primary is preferred again immediately.
+    fn record_primary_success(&self) {
+        self.primary_fail_count.store(0, Ordering::Relaxed);
+        self.primary_cooldown_until_ms.store(0, Ordering::Relaxed);
     }
 
     /// One attempt against one server: connect (TLS or TCP), exchange, and map
@@ -861,6 +923,41 @@ mod tests {
 
     fn ltc() -> ElectrumClient {
         ElectrumClient::new(UtxoNetwork::LitecoinMainnet, &cfg()).unwrap()
+    }
+
+    #[test]
+    fn primary_circuit_breaker_trips_and_clears() {
+        let cfg = UtxoConfig {
+            network: "mainnet".into(),
+            electrum_primary: Some("tcp://primary.local:50002".into()),
+            electrum_fallbacks: vec!["ssl://fallback.example:50002".into()],
+            electrum_strict_tls: false,
+        };
+        let c = ElectrumClient::new(UtxoNetwork::LitecoinMainnet, &cfg).unwrap();
+        let t = 1_000_000u64;
+        let window = PRIMARY_COOLDOWN.as_millis() as u64;
+
+        assert!(!c.primary_in_cooldown(t), "starts closed");
+        c.record_primary_failure(t);
+        assert!(
+            !c.primary_in_cooldown(t),
+            "one failure is below threshold: still closed"
+        );
+        c.record_primary_failure(t);
+        assert!(
+            c.primary_in_cooldown(t),
+            "second consecutive failure trips the breaker"
+        );
+        assert!(
+            c.primary_in_cooldown(t + window - 1),
+            "still tripped inside the cooldown window"
+        );
+        assert!(
+            !c.primary_in_cooldown(t + window + 1),
+            "reopens after the cooldown elapses"
+        );
+        c.record_primary_success();
+        assert!(!c.primary_in_cooldown(t), "a success clears the breaker");
     }
 
     /// The lenient (default) TLS connector must complete the handshake + an
