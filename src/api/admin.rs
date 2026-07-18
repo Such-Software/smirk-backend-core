@@ -1120,6 +1120,55 @@ mod tests {
         );
     }
 
+    // Exercise the real serve path (routing + content-type + body) without a DB:
+    // admin_index / admin_asset are stateless, so a tiny router reproduces exactly
+    // what an operator's browser hits at GET /admin and GET /admin/assets/<hash>.js.
+    #[tokio::test]
+    async fn admin_console_serves_over_http() {
+        use axum::{body::Body, routing::get, Router};
+        use tower::ServiceExt;
+
+        let app: Router = Router::new()
+            .route("/admin", get(super::admin_index))
+            .route("/admin/assets/*path", get(super::admin_asset));
+
+        // GET /admin -> the console HTML.
+        let res = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::OK);
+        assert_eq!(res.headers()["content-type"], "text/html; charset=utf-8");
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        assert!(std::str::from_utf8(&body).unwrap().contains("Smirk Operator Console"));
+
+        // GET /admin/assets/<real built asset> -> served with a sane content-type.
+        let asset = AdminAssets::iter()
+            .find(|p| p.starts_with("assets/") && p.ends_with(".js"))
+            .expect("a built JS asset exists");
+        let uri = format!("/admin/{asset}"); // asset already carries the "assets/" prefix
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            res.headers()["content-type"],
+            "application/javascript; charset=utf-8",
+        );
+    }
+
     #[test]
     fn host_allowlist() {
         // Missing host is allowed (rebinding must supply a host; bind is primary).
