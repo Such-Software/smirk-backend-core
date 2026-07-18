@@ -32,6 +32,7 @@ tower_governor = "0.4"
 governor = "0.6"
 
 # Database
+rust-embed = { version = "8", features = ["debug-embed"] }
 arc-swap = "1"
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "ipnetwork", "migrate", "json"] }
 ipnetwork = "0.20"

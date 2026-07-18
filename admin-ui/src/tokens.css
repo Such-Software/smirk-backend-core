@@ -1,0 +1,50 @@
+/* Smirk brand tokens (vendored — the admin-ui is standalone, no @smirk/ui dep). */
+:root {
+  --smirk-bg: #2c1e12;
+  --smirk-bg-elevated: #3a2a1b;
+  --smirk-bg-sunken: #241810;
+  --smirk-fg: #f3e9dd;
+  --smirk-fg-muted: #b9a891;
+  --smirk-accent: #f5c542;
+  --smirk-accent-fg: #2c1e12;
+  --smirk-border: rgba(255, 255, 255, 0.12);
+  --smirk-border-strong: rgba(255, 255, 255, 0.22);
+  --smirk-danger: #ef4444;
+  --smirk-ok: #22c55e;
+  --smirk-warn: #f59e0b;
+  --smirk-radius: 10px;
+  --smirk-font: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--smirk-bg);
+  color: var(--smirk-fg);
+  font-family: var(--smirk-font);
+  font-size: 14px;
+  line-height: 1.5;
+}
+h1, h2, h3 { font-weight: 700; }
+button {
+  font: inherit;
+  cursor: pointer;
+  border-radius: 8px;
+  border: 1px solid var(--smirk-border);
+  background: var(--smirk-bg-elevated);
+  color: inherit;
+  padding: 8px 14px;
+}
+button.primary { background: var(--smirk-accent); color: var(--smirk-accent-fg); border: none; font-weight: 700; }
+button.danger { color: var(--smirk-danger); border-color: var(--smirk-danger); }
+button:disabled { opacity: 0.5; cursor: default; }
+input, textarea, select {
+  font: inherit;
+  color: inherit;
+  background: var(--smirk-bg-sunken);
+  border: 1px solid var(--smirk-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+a { color: var(--smirk-accent); }

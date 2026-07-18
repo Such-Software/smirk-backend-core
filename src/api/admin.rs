@@ -1032,8 +1032,61 @@ pub async fn admin_invites_list(
     }))
 }
 
+// ── Operator console SPA (embedded, served at /admin) ─────────────────────────
+// The Preact console built from admin-ui/ and embedded via rust-embed (single-binary
+// self-host, no separate deploy). Served UNAUTHENTICATED (no admin_guard) — the shell
+// loads without a session and runs the NIP-98 login client-side against the guarded
+// JSON routes. Only exact /admin, /admin/, /admin/assets/*path are added, so the JSON
+// routes (/admin/keys, /admin/config, ...) are never shadowed.
+
+#[derive(rust_embed::RustEmbed)]
+#[folder = "admin-ui/dist/"]
+struct AdminAssets;
+
+pub async fn admin_index() -> Response {
+    match AdminAssets::get("index.html") {
+        Some(f) => (
+            [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            f.data.into_owned(),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            "operator console not built (run: npm --prefix admin-ui run build)",
+        )
+            .into_response(),
+    }
+}
+
+pub async fn admin_asset(Path(path): Path<String>) -> Response {
+    match AdminAssets::get(&format!("assets/{path}")) {
+        Some(f) => {
+            let mime = if path.ends_with(".js") || path.ends_with(".mjs") {
+                "application/javascript; charset=utf-8"
+            } else if path.ends_with(".css") {
+                "text/css; charset=utf-8"
+            } else if path.ends_with(".svg") {
+                "image/svg+xml"
+            } else if path.ends_with(".woff2") {
+                "font/woff2"
+            } else if path.ends_with(".png") {
+                "image/png"
+            } else if path.ends_with(".json") {
+                "application/json"
+            } else {
+                "application/octet-stream"
+            };
+            ([(axum::http::header::CONTENT_TYPE, mime)], f.data.into_owned()).into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/admin", get(admin_index))
+        .route("/admin/", get(admin_index))
+        .route("/admin/assets/*path", get(admin_asset))
         .route("/admin/auth/challenge", post(admin_challenge))
         .route("/admin/auth/verify", post(admin_verify))
         .route("/admin/auth/refresh", post(admin_refresh))
@@ -1049,7 +1102,23 @@ pub fn routes() -> Router<Arc<AppState>> {
 
 #[cfg(test)]
 mod tests {
-    use super::host_allowed;
+    use super::{host_allowed, AdminAssets};
+
+    // The Operator Console SPA must be built into admin-ui/dist/ and embedded at
+    // compile time (rust-embed). If admin-ui was never built, index.html is absent
+    // and /admin serves nothing — this catches that before it reaches an operator.
+    #[test]
+    fn admin_console_is_embedded() {
+        let index = AdminAssets::get("index.html").expect("admin-ui/dist/index.html embedded");
+        let html = std::str::from_utf8(&index.data).expect("index.html is utf-8");
+        assert!(html.contains("Smirk Operator Console"), "console title missing");
+        // Vite rewrites asset URLs to the /admin/ base; the served route matches.
+        assert!(html.contains("/admin/assets/"), "asset base not rewritten to /admin/");
+        assert!(
+            AdminAssets::iter().any(|p| p.starts_with("assets/")),
+            "no built JS/CSS assets embedded",
+        );
+    }
 
     #[test]
     fn host_allowlist() {
