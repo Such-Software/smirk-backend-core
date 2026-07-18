@@ -56,7 +56,9 @@ export interface InviteView {
 }
 
 export const api = {
-  challenge: () => req('GET', '/admin/auth/challenge') as Promise<ChallengeResp>,
+  // POST (not GET): issuing a single-use nonce is a write, and must never be
+  // cached or prefetched. Matches the route wired in src/api/admin.rs.
+  challenge: () => req('POST', '/admin/auth/challenge', {}) as Promise<ChallengeResp>,
   verify: (admin_token: string, challenge: string) =>
     req('POST', '/admin/auth/verify', { admin_token, challenge }) as Promise<TokenResp>,
   logout: () => req('POST', '/admin/auth/logout', {}),
