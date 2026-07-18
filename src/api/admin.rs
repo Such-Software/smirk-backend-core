@@ -943,6 +943,95 @@ fn json_merge_skip_null(base: &mut serde_json::Value, patch: &serde_json::Value)
     }
 }
 
+// ── Invites (POST + GET /admin/invites) ───────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct MintInvitesRequest {
+    #[serde(default)]
+    count: Option<u32>,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct MintInvitesResponse {
+    /// RAW single-use codes — shown ONCE (only the hash is stored, unrecoverable).
+    codes: Vec<String>,
+}
+
+#[instrument(skip(state, headers, req))]
+pub async fn admin_invites_mint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<MintInvitesRequest>,
+) -> Result<Json<MintInvitesResponse>, AppError> {
+    let ctx = admin_guard(&state, &headers).await?;
+    let secret = state.cfg().admin.key_integrity_secret.clone();
+    let count = req.count.unwrap_or(1).clamp(1, 1000);
+    let audit = NewAdminAudit {
+        action: "invites_minted".into(),
+        actor_kind: "admin".into(),
+        actor_pubkey_prefix: Some(pubkey_prefix(&ctx.pubkey)),
+        target: req.label.clone(),
+        details: Some(serde_json::json!({ "count": count })),
+        ip_address: None,
+    };
+    let codes = state
+        .db
+        .mint_invites_audited(count, req.label.as_deref(), &audit, &secret)
+        .await?;
+    Ok(Json(MintInvitesResponse { codes }))
+}
+
+#[derive(serde::Serialize)]
+struct InviteView {
+    /// Non-secret: first 12 hex chars of the code hash (operator eyeball only).
+    code_prefix: String,
+    label: Option<String>,
+    created_at: String,
+    /// "unused" | "used" | "expired".
+    status: String,
+}
+
+#[derive(serde::Serialize)]
+struct InvitesListResponse {
+    invites: Vec<InviteView>,
+    unused_count: i64,
+}
+
+#[instrument(skip(state, headers))]
+pub async fn admin_invites_list(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<InvitesListResponse>, AppError> {
+    admin_guard(&state, &headers).await?;
+    let rows = state.db.list_invite_codes(200, 0).await?;
+    let now = Utc::now();
+    let invites = rows
+        .into_iter()
+        .map(|r| {
+            let status = if r.used_at.is_some() {
+                "used"
+            } else if r.expires_at.map(|e| e <= now).unwrap_or(false) {
+                "expired"
+            } else {
+                "unused"
+            };
+            InviteView {
+                code_prefix: r.code_hash.chars().take(12).collect(),
+                label: r.label,
+                created_at: r.created_at.to_rfc3339(),
+                status: status.into(),
+            }
+        })
+        .collect();
+    let unused_count = state.db.unused_invite_code_count().await?;
+    Ok(Json(InvitesListResponse {
+        invites,
+        unused_count,
+    }))
+}
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/admin/auth/challenge", post(admin_challenge))
@@ -955,6 +1044,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/admin/keys/:id", delete(admin_keys_revoke))
         .route("/admin/keys/:id/rotate", post(admin_keys_rotate))
         .route("/admin/config", get(admin_config_get).put(admin_config_put))
+        .route("/admin/invites", post(admin_invites_mint).get(admin_invites_list))
 }
 
 #[cfg(test)]
