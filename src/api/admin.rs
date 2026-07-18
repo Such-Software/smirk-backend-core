@@ -900,6 +900,17 @@ pub async fn admin_config_put(
     // the next request); any restart-required field is persisted + flagged so the
     // operator applies it with a graceful restart.
     if any_restart {
+        // In `auto` mode, self-restart shortly AFTER responding so the persisted change
+        // takes effect (systemd `Restart=always` brings us back). The console warns the
+        // operator before saving in auto mode; `manual` just flags restart_pending.
+        if state.cfg().console.restart_apply_mode == crate::config::RestartApplyMode::Auto {
+            let shutdown = state.shutdown.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+                tracing::info!("config auto-apply: self-restart to apply a restart-required change");
+                shutdown.notify_one();
+            });
+        }
         Ok(Json(PutConfigResponse {
             applied: "restart-required".into(),
             restart_pending: true,

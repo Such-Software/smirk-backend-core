@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Config, RestorePolicy};
+use crate::config::{Config, RestartApplyMode, RestorePolicy};
 use crate::error::AppError;
 
 /// Sparse patch over the env-derived [`Config`]. Each section is independent; a `None`
@@ -21,6 +21,7 @@ pub struct SettingsOverlay {
     pub landing: Option<LandingOverlay>,
     pub retention: Option<RetentionOverlay>,
     pub restore: Option<RestoreOverlay>,
+    pub console: Option<ConsoleOverlay>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -60,6 +61,13 @@ pub struct RestoreOverlay {
     pub pow_max_bits: Option<u32>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConsoleOverlay {
+    /// How a restart-required config change applies: `manual` | `auto`.
+    pub restart_apply_mode: Option<String>,
+}
+
 /// Whether a changed field applies live or needs a restart. Drives BOTH the hot-swap
 /// decision and the `GET /admin/config` annotation — the single source of truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -82,6 +90,7 @@ pub fn runtime_class(section: &str, field: &str) -> RuntimeClass {
         ("landing", _) => RuntimeSafe,
         ("retention", _) => RuntimeSafe,
         ("restore", _) => RuntimeSafe,
+        ("console", _) => RuntimeSafe,
         _ => RestartRequired,
     }
 }
@@ -169,6 +178,20 @@ impl Config {
             }
         }
 
+        if let Some(cs) = &ov.console {
+            if let Some(m) = &cs.restart_apply_mode {
+                c.console.restart_apply_mode = match m.as_str() {
+                    "manual" => RestartApplyMode::Manual,
+                    "auto" => RestartApplyMode::Auto,
+                    other => {
+                        return Err(AppError::ValidationError(format!(
+                            "invalid console.restart_apply_mode {other:?} (want manual|auto)"
+                        )))
+                    }
+                };
+            }
+        }
+
         c.validate()?;
         Ok(c)
     }
@@ -196,6 +219,7 @@ pub const EDITABLE_FIELDS: &[(&str, &str)] = &[
     ("restore", "pow_free_days"),
     ("restore", "pow_days_per_bit"),
     ("restore", "pow_max_bits"),
+    ("console", "restart_apply_mode"),
 ];
 
 impl Config {
@@ -230,6 +254,9 @@ impl Config {
                 pow_days_per_bit: Some(self.restore.pow_days_per_bit),
                 pow_max_bits: Some(self.restore.pow_max_bits),
             }),
+            console: Some(ConsoleOverlay {
+                restart_apply_mode: Some(self.console.restart_apply_mode.as_str().to_string()),
+            }),
         }
     }
 }
@@ -262,6 +289,29 @@ mod tests {
             runtime_class("retention", "erasure_enabled"),
             RuntimeClass::RestartRequired
         );
+        assert_eq!(
+            runtime_class("console", "restart_apply_mode"),
+            RuntimeClass::RuntimeSafe
+        );
         assert_eq!(runtime_class("mystery", "field"), RuntimeClass::RestartRequired);
+    }
+
+    #[test]
+    fn console_overlay_parses_restart_apply_mode() {
+        let ov: SettingsOverlay =
+            serde_json::from_str(r#"{"console":{"restart_apply_mode":"auto"}}"#).unwrap();
+        assert_eq!(
+            ov.console.unwrap().restart_apply_mode.as_deref(),
+            Some("auto")
+        );
+    }
+
+    #[test]
+    fn every_editable_field_has_a_runtime_class() {
+        // EDITABLE_FIELDS is the enumerable surface GET /admin/config annotates.
+        for (section, field) in EDITABLE_FIELDS {
+            let _ = runtime_class(section, field); // no panic / all covered
+        }
+        assert!(EDITABLE_FIELDS.iter().any(|(s, f)| *s == "console" && *f == "restart_apply_mode"));
     }
 }

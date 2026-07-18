@@ -171,6 +171,32 @@ pub struct Config {
     pub messaging: MessagingConfig,
     pub premium: PremiumConfig,
     pub feed: FeedConfig,
+    pub console: ConsoleConfig,
+}
+
+/// How a restart-required config change is applied.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RestartApplyMode {
+    /// Persist + flag; the operator applies it with a graceful restart.
+    Manual,
+    /// The instance self-restarts after saving (the console warns first). Requires the
+    /// service to be brought back on exit (systemd `Restart=always`).
+    Auto,
+}
+
+impl RestartApplyMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RestartApplyMode::Manual => "manual",
+            RestartApplyMode::Auto => "auto",
+        }
+    }
+}
+
+/// Operator-console preferences (runtime-safe, DB-overridable via /admin/config).
+#[derive(Clone)]
+pub struct ConsoleConfig {
+    pub restart_apply_mode: RestartApplyMode,
 }
 
 #[derive(Clone)]
@@ -912,6 +938,12 @@ impl Config {
                 allowlist_npubs: env_list("FEED_ALLOWLIST_NPUBS"),
                 extra_relays: env_list("FEED_EXTRA_RELAYS"),
             },
+            console: ConsoleConfig {
+                restart_apply_mode: match env_or("RESTART_APPLY_MODE", "manual").as_str() {
+                    "auto" => RestartApplyMode::Auto,
+                    _ => RestartApplyMode::Manual,
+                },
+            },
         };
 
         cfg.validate()?;
@@ -1501,6 +1533,9 @@ mod tests {
                 owner_npub: String::new(),
                 allowlist_npubs: Vec::new(),
                 extra_relays: Vec::new(),
+            },
+            console: ConsoleConfig {
+                restart_apply_mode: RestartApplyMode::Manual,
             },
         }
     }

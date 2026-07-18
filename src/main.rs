@@ -118,6 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         web_challenges: Arc::default(),
         prices: prices_cache,
         admin_sessions,
+        shutdown: Arc::new(tokio::sync::Notify::new()),
     });
 
     // Periodic GC of expired website-auth challenges. Bounds the single-node
@@ -394,6 +395,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    let shutdown = state.shutdown.clone();
     let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -403,6 +405,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal(shutdown))
     .await?;
     Ok(())
+}
+
+/// Completes on SIGTERM / Ctrl-C, or when the app signals a restart (an operator config
+/// change in `auto` mode). Lets axum drain in-flight requests before exit; systemd
+/// `Restart=always` then brings the instance back with the new config.
+async fn shutdown_signal(app_triggered: Arc<tokio::sync::Notify>) {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        if let Ok(mut sig) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            sig.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = term => {}
+        _ = app_triggered.notified() => {}
+    }
+    tracing::info!("shutdown signal received; draining in-flight requests");
 }

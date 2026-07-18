@@ -99,6 +99,7 @@ pub async fn try_app_with(mutate: impl FnOnce(&mut Config)) -> Option<TestApp> {
         web_challenges: Arc::default(),
         prices,
         admin_sessions,
+        shutdown: Arc::default(),
     });
 
     Some(TestApp {

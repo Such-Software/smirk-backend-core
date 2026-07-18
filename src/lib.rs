@@ -82,6 +82,10 @@ pub struct AppState {
     /// Admin token minter/verifier. `Some` only when the admin surface is
     /// enabled; the admin plane and guard refuse all requests otherwise.
     pub admin_sessions: Option<AdminSessionManager>,
+    /// Signalled to trigger a graceful shutdown from INSIDE the app — e.g. an operator
+    /// config change in `auto` restart mode. `main` awaits this alongside SIGTERM;
+    /// systemd `Restart=always` brings the instance back with the new config applied.
+    pub shutdown: Arc<tokio::sync::Notify>,
 }
 
 impl AppState {
