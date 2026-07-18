@@ -738,6 +738,200 @@ pub async fn admin_features(
 // ── router ───────────────────────────────────────────────────────────────────
 
 /// Admin-plane routes. Mounted by [`crate::admin_router`] on the loopback socket.
+// ── Operator config (GET + PUT /admin/config) ─────────────────────────────────
+// The editable settings surface, on the effective-config layer (config_overlay.rs).
+// GET reports each field's effective value + the DB overlay + per-section version +
+// runtime_class + restart_pending. PUT validates a patch with the SAME rules boot
+// uses, persists the changed sections (audited, version-guarded), then hot-swaps the
+// effective config for runtime-safe edits or flags restart-required.
+
+#[derive(serde::Serialize)]
+struct AdminConfigResponse {
+    /// Effective value of every editable field (all populated).
+    effective: crate::config_overlay::SettingsOverlay,
+    /// DB overlay (operator-set values only): a field present here has source=db;
+    /// absent = env/default.
+    overlay: crate::config_overlay::SettingsOverlay,
+    /// Persisted version per section (echo back as `expected_versions` on PUT).
+    versions: std::collections::HashMap<String, i64>,
+    /// "section.field" -> runtime-safe | restart-required.
+    runtime_class: std::collections::HashMap<String, crate::config_overlay::RuntimeClass>,
+    /// A persisted change hasn't been applied to the running config yet (needs restart).
+    restart_pending: bool,
+}
+
+#[instrument(skip(state, headers))]
+pub async fn admin_config_get(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<AdminConfigResponse>, AppError> {
+    admin_guard(&state, &headers).await?;
+    let secret = state.cfg().admin.key_integrity_secret.clone();
+
+    let overlay = state.db.load_settings_overlay(&secret).await?;
+    let versions = state.db.settings_versions().await?;
+    let effective = state.cfg().editable_overlay();
+
+    // restart_pending: the persisted overlay's effective view differs from the RUNNING
+    // effective view (a restart-required field was saved but not yet applied).
+    let restart_pending = match state.config_base.apply_overlay(&overlay) {
+        Ok(persisted) => {
+            serde_json::to_value(persisted.editable_overlay()).ok()
+                != serde_json::to_value(&effective).ok()
+        }
+        Err(_) => false,
+    };
+
+    let runtime_class = crate::config_overlay::EDITABLE_FIELDS
+        .iter()
+        .map(|(section, field)| {
+            (
+                format!("{section}.{field}"),
+                crate::config_overlay::runtime_class(section, field),
+            )
+        })
+        .collect();
+
+    Ok(Json(AdminConfigResponse {
+        effective,
+        overlay,
+        versions,
+        runtime_class,
+        restart_pending,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct PutConfigRequest {
+    /// Sparse patch: only the fields to change (unset fields left as-is).
+    patch: crate::config_overlay::SettingsOverlay,
+    /// Optional optimistic-concurrency guard: expected current version per touched
+    /// section. A mismatch is a 409 (another operator edited it first).
+    #[serde(default)]
+    expected_versions: std::collections::HashMap<String, i64>,
+}
+
+#[derive(serde::Serialize)]
+struct PutConfigResponse {
+    /// "runtime" = hot-swapped, live now. "restart-required" = persisted, applies on
+    /// the next (graceful) restart.
+    applied: String,
+    restart_pending: bool,
+}
+
+#[instrument(skip(state, headers, req))]
+pub async fn admin_config_put(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<PutConfigRequest>,
+) -> Result<Json<PutConfigResponse>, AppError> {
+    let ctx = admin_guard(&state, &headers).await?;
+    let secret = state.cfg().admin.key_integrity_secret.clone();
+
+    let patch_json = serde_json::to_value(&req.patch)
+        .map_err(|e| AppError::ValidationError(format!("bad patch: {e}")))?;
+    let patch_obj = patch_json.as_object().cloned().unwrap_or_default();
+
+    // merged = persisted overlay + patch (patch's non-null fields win), then validate
+    // with the SAME rules boot uses. Reject the whole PUT if invalid (nothing persists).
+    let persisted = state.db.load_settings_overlay(&secret).await?;
+    let mut merged_json =
+        serde_json::to_value(&persisted).map_err(|e| AppError::Internal(e.to_string()))?;
+    json_merge_skip_null(&mut merged_json, &patch_json);
+    let merged: crate::config_overlay::SettingsOverlay = serde_json::from_value(merged_json.clone())
+        .map_err(|e| AppError::ValidationError(format!("bad settings: {e}")))?;
+    let candidate = state.config_base.apply_overlay(&merged)?; // ValidationError -> 400
+
+    // Classify the CHANGED fields: which sections changed + does any need a restart?
+    let mut any_restart = false;
+    let mut changed_sections: Vec<String> = Vec::new();
+    for (section, fields) in &patch_obj {
+        let Some(fields) = fields.as_object() else { continue };
+        let touched: Vec<&String> = fields
+            .iter()
+            .filter(|(_, v)| !v.is_null())
+            .map(|(k, _)| k)
+            .collect();
+        if touched.is_empty() {
+            continue;
+        }
+        changed_sections.push(section.clone());
+        for field in touched {
+            if crate::config_overlay::runtime_class(section, field)
+                == crate::config_overlay::RuntimeClass::RestartRequired
+            {
+                any_restart = true;
+            }
+        }
+    }
+    if changed_sections.is_empty() {
+        return Err(AppError::ValidationError("empty config patch".into()));
+    }
+
+    // Persist each changed section's merged doc, audited + version-guarded.
+    let merged_obj = merged_json.as_object().cloned().unwrap_or_default();
+    for section in &changed_sections {
+        let doc = merged_obj
+            .get(section)
+            .cloned()
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+        let audit = NewAdminAudit {
+            action: "config_updated".into(),
+            actor_kind: "admin".into(),
+            actor_pubkey_prefix: Some(pubkey_prefix(&ctx.pubkey)),
+            target: Some(section.clone()),
+            details: Some(serde_json::json!({ "section": section })),
+            ip_address: None,
+        };
+        state
+            .db
+            .put_setting_audited(
+                section,
+                &doc,
+                Some(ctx.admin_key_id),
+                req.expected_versions.get(section).copied(),
+                &audit,
+                &secret,
+            )
+            .await?;
+    }
+
+    // Apply. Runtime-safe-only edits hot-swap the effective config atomically (live on
+    // the next request); any restart-required field is persisted + flagged so the
+    // operator applies it with a graceful restart.
+    if any_restart {
+        Ok(Json(PutConfigResponse {
+            applied: "restart-required".into(),
+            restart_pending: true,
+        }))
+    } else {
+        state.config.store(std::sync::Arc::new(candidate));
+        Ok(Json(PutConfigResponse {
+            applied: "runtime".into(),
+            restart_pending: false,
+        }))
+    }
+}
+
+/// Recursively merge `patch` into `base` (JSON objects); a `null` in `patch` means
+/// "leave unset" and is skipped, so a sparse overlay patch only sets present fields.
+fn json_merge_skip_null(base: &mut serde_json::Value, patch: &serde_json::Value) {
+    match (base, patch) {
+        (serde_json::Value::Object(b), serde_json::Value::Object(p)) => {
+            for (k, pv) in p {
+                if pv.is_null() {
+                    continue;
+                }
+                json_merge_skip_null(
+                    b.entry(k.clone()).or_insert(serde_json::Value::Null),
+                    pv,
+                );
+            }
+        }
+        (b, p) => *b = p.clone(),
+    }
+}
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/admin/auth/challenge", post(admin_challenge))
@@ -749,6 +943,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/admin/keys", post(admin_keys_add).get(admin_keys_list))
         .route("/admin/keys/:id", delete(admin_keys_revoke))
         .route("/admin/keys/:id/rotate", post(admin_keys_rotate))
+        .route("/admin/config", get(admin_config_get).put(admin_config_put))
 }
 
 #[cfg(test)]

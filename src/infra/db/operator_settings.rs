@@ -104,6 +104,7 @@ impl Database {
         section: &str,
         doc: &Value,
         updated_by: Option<Uuid>,
+        expected_version: Option<i64>,
         audit: &NewAdminAudit,
         secret: &str,
     ) -> Result<i64, AppError> {
@@ -115,7 +116,17 @@ impl Database {
         .bind(section)
         .fetch_optional(&mut *tx)
         .await?;
-        let version = current.unwrap_or(0) + 1;
+        let cur = current.unwrap_or(0);
+        // Optimistic concurrency: reject a stale write (two operators editing at once).
+        if let Some(exp) = expected_version {
+            if cur != exp {
+                tx.rollback().await?;
+                return Err(AppError::Conflict(format!(
+                    "settings section '{section}' changed concurrently (expected v{exp}, found v{cur}); reload and retry"
+                )));
+            }
+        }
+        let version = cur + 1;
         let mac = settings_mac(secret, section, version, doc);
         let updated_at = Utc::now().trunc_subsecs(6);
 
@@ -140,6 +151,18 @@ impl Database {
         self.append_admin_audit(&mut *tx, audit, secret).await?;
         tx.commit().await?;
         Ok(version)
+    }
+
+    /// Current persisted version per section (for optimistic-concurrency PUTs + the
+    /// GET response). A section with no row is absent (its effective source is env).
+    pub async fn settings_versions(
+        &self,
+    ) -> Result<std::collections::HashMap<String, i64>, AppError> {
+        let rows: Vec<(String, i64)> =
+            sqlx::query_as("SELECT section, version FROM operator_settings")
+                .fetch_all(self.pool())
+                .await?;
+        Ok(rows.into_iter().collect())
     }
 }
 

@@ -174,6 +174,66 @@ impl Config {
     }
 }
 
+/// Every operator-editable `(section, field)` pair — the enumerable surface for
+/// `GET /admin/config` (per-field runtime_class) and for classifying a PUT patch.
+pub const EDITABLE_FIELDS: &[(&str, &str)] = &[
+    ("landing", "enabled"),
+    ("landing", "title"),
+    ("landing", "expose_version"),
+    ("landing", "expose_chains"),
+    ("landing", "expose_price_feed"),
+    ("landing", "expose_uptime"),
+    ("landing", "stats_enabled"),
+    ("landing", "stats_cache_hours"),
+    ("retention", "login_events_days"),
+    ("retention", "audit_days"),
+    ("retention", "erasure_enabled"),
+    ("retention", "purge_login_events"),
+    ("retention", "export_per_day"),
+    ("retention", "grace_period_hours"),
+    ("restore", "policy"),
+    ("restore", "max_depth_days"),
+    ("restore", "pow_free_days"),
+    ("restore", "pow_days_per_bit"),
+    ("restore", "pow_max_bits"),
+];
+
+impl Config {
+    /// A fully-populated overlay reflecting the EFFECTIVE value of every editable
+    /// field (all `Some`). `GET /admin/config` returns this so the console shows
+    /// current values; diffing against the persisted overlay yields each field's
+    /// source (default/env vs db).
+    pub fn editable_overlay(&self) -> SettingsOverlay {
+        SettingsOverlay {
+            landing: Some(LandingOverlay {
+                enabled: Some(self.landing.enabled),
+                title: Some(self.landing.title.clone().unwrap_or_default()),
+                expose_version: Some(self.landing.expose_version),
+                expose_chains: Some(self.landing.expose_chains),
+                expose_price_feed: Some(self.landing.expose_price_feed),
+                expose_uptime: Some(self.landing.expose_uptime),
+                stats_enabled: Some(self.landing.stats_enabled),
+                stats_cache_hours: Some(self.landing.stats_cache_hours),
+            }),
+            retention: Some(RetentionOverlay {
+                login_events_days: Some(self.retention.login_events_days),
+                audit_days: Some(self.retention.audit_days),
+                erasure_enabled: Some(self.retention.erasure_enabled),
+                purge_login_events: Some(self.retention.purge_login_events),
+                export_per_day: Some(self.retention.export_per_day),
+                grace_period_hours: Some(self.retention.grace_period_hours),
+            }),
+            restore: Some(RestoreOverlay {
+                policy: Some(self.restore.policy.as_str().to_string()),
+                max_depth_days: Some(self.restore.max_depth_days),
+                pow_free_days: Some(self.restore.pow_free_days),
+                pow_days_per_bit: Some(self.restore.pow_days_per_bit),
+                pow_max_bits: Some(self.restore.pow_max_bits),
+            }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
