@@ -1,0 +1,207 @@
+//! Operator-editable settings overlay — the DB precedence tier under the env-derived
+//! [`Config`] (effective = defaults -> env -> DB overlay). A [`SettingsOverlay`] is a
+//! SPARSE patch: one `Option<*Overlay>` per editable section, each a struct of
+//! `Option<T>` NON-SECRET fields (absent = "leave as env"). Secrets are excluded BY
+//! CONSTRUCTION — no overlay field maps to a secret sub-struct — so the admin plane can
+//! neither read nor set one. [`Config::apply_overlay`] merges an overlay onto the
+//! env-derived config and re-runs the SAME [`Config::validate`] boot uses, so a bad edit
+//! fails identically and nothing invalid is ever applied. Pure over `Config`.
+
+use serde::{Deserialize, Serialize};
+
+use crate::config::{Config, RestorePolicy};
+use crate::error::AppError;
+
+/// Sparse patch over the env-derived [`Config`]. Each section is independent; a `None`
+/// (absent) section leaves that whole group at its env value. Unknown sections/fields
+/// are ignored on load (forward-compat); the PUT path validates before persisting.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SettingsOverlay {
+    pub landing: Option<LandingOverlay>,
+    pub retention: Option<RetentionOverlay>,
+    pub restore: Option<RestoreOverlay>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LandingOverlay {
+    pub enabled: Option<bool>,
+    /// Empty string clears the title (env `None`); any other value sets it.
+    pub title: Option<String>,
+    pub expose_version: Option<bool>,
+    pub expose_chains: Option<bool>,
+    pub expose_price_feed: Option<bool>,
+    pub expose_uptime: Option<bool>,
+    pub stats_enabled: Option<bool>,
+    pub stats_cache_hours: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RetentionOverlay {
+    pub login_events_days: Option<u64>,
+    pub audit_days: Option<u64>,
+    /// Gates a boot-spawned sweep worker -> RESTART-REQUIRED (see `runtime_class`).
+    pub erasure_enabled: Option<bool>,
+    pub purge_login_events: Option<bool>,
+    pub export_per_day: Option<u32>,
+    pub grace_period_hours: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RestoreOverlay {
+    /// One of `create-only` | `bounded` | `unlimited`.
+    pub policy: Option<String>,
+    pub max_depth_days: Option<u32>,
+    pub pow_free_days: Option<u32>,
+    pub pow_days_per_bit: Option<u32>,
+    pub pow_max_bits: Option<u32>,
+}
+
+/// Whether a changed field applies live or needs a restart. Drives BOTH the hot-swap
+/// decision and the `GET /admin/config` annotation — the single source of truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeClass {
+    /// Re-read off the effective config on the next request; hot-swappable.
+    RuntimeSafe,
+    /// Captured by a boot-built client/socket/worker; applied on graceful restart.
+    RestartRequired,
+}
+
+/// Classify one `(section, field)`. Unknown pairs default to `RestartRequired` (the
+/// safe default: never hot-swap something whose consumers we haven't reasoned about).
+pub fn runtime_class(section: &str, field: &str) -> RuntimeClass {
+    use RuntimeClass::*;
+    match (section, field) {
+        // erasure_enabled gates a boot-spawned sweep worker; a live flip would desync
+        // the worker from the request gate.
+        ("retention", "erasure_enabled") => RestartRequired,
+        ("landing", _) => RuntimeSafe,
+        ("retention", _) => RuntimeSafe,
+        ("restore", _) => RuntimeSafe,
+        _ => RestartRequired,
+    }
+}
+
+impl Config {
+    /// Merge a settings overlay onto this (env-derived) config, then re-run the SAME
+    /// validation boot uses. Returns the candidate effective config, or the identical
+    /// [`AppError`] boot would raise — so a bad edit is rejected BEFORE anything
+    /// persists and can never brick the instance. Pure: does not mutate `self`.
+    pub fn apply_overlay(&self, ov: &SettingsOverlay) -> Result<Config, AppError> {
+        let mut c = self.clone();
+
+        if let Some(l) = &ov.landing {
+            if let Some(v) = l.enabled {
+                c.landing.enabled = v;
+            }
+            if let Some(v) = &l.title {
+                c.landing.title = if v.is_empty() { None } else { Some(v.clone()) };
+            }
+            if let Some(v) = l.expose_version {
+                c.landing.expose_version = v;
+            }
+            if let Some(v) = l.expose_chains {
+                c.landing.expose_chains = v;
+            }
+            if let Some(v) = l.expose_price_feed {
+                c.landing.expose_price_feed = v;
+            }
+            if let Some(v) = l.expose_uptime {
+                c.landing.expose_uptime = v;
+            }
+            if let Some(v) = l.stats_enabled {
+                c.landing.stats_enabled = v;
+            }
+            if let Some(v) = l.stats_cache_hours {
+                c.landing.stats_cache_hours = v;
+            }
+        }
+
+        if let Some(r) = &ov.retention {
+            if let Some(v) = r.login_events_days {
+                c.retention.login_events_days = v;
+            }
+            if let Some(v) = r.audit_days {
+                c.retention.audit_days = v;
+            }
+            if let Some(v) = r.erasure_enabled {
+                c.retention.erasure_enabled = v;
+            }
+            if let Some(v) = r.purge_login_events {
+                c.retention.purge_login_events = v;
+            }
+            if let Some(v) = r.export_per_day {
+                c.retention.export_per_day = v;
+            }
+            if let Some(v) = r.grace_period_hours {
+                c.retention.grace_period_hours = v;
+            }
+        }
+
+        if let Some(r) = &ov.restore {
+            if let Some(p) = &r.policy {
+                c.restore.policy = match p.as_str() {
+                    "create-only" => RestorePolicy::CreateOnly,
+                    "bounded" => RestorePolicy::Bounded,
+                    "unlimited" => RestorePolicy::Unlimited,
+                    other => {
+                        return Err(AppError::ValidationError(format!(
+                            "invalid restore.policy {other:?} (want create-only|bounded|unlimited)"
+                        )))
+                    }
+                };
+            }
+            if let Some(v) = r.max_depth_days {
+                c.restore.max_depth_days = v;
+            }
+            if let Some(v) = r.pow_free_days {
+                c.restore.pow_free_days = v;
+            }
+            if let Some(v) = r.pow_days_per_bit {
+                c.restore.pow_days_per_bit = v;
+            }
+            if let Some(v) = r.pow_max_bits {
+                c.restore.pow_max_bits = v;
+            }
+        }
+
+        c.validate()?;
+        Ok(c)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlay_parses_sparse_json_ignoring_absent_and_unknown_sections() {
+        // Absent sections stay None; unknown sections are ignored (forward-compat).
+        let ov: SettingsOverlay = serde_json::from_str(
+            r#"{"restore":{"policy":"unlimited"},"future_section":{"x":1}}"#,
+        )
+        .expect("sparse overlay parses");
+        assert!(ov.landing.is_none());
+        assert!(ov.retention.is_none());
+        assert_eq!(ov.restore.unwrap().policy.as_deref(), Some("unlimited"));
+    }
+
+    #[test]
+    fn runtime_class_classifies_known_and_defaults_restart_for_unknown() {
+        assert_eq!(runtime_class("landing", "enabled"), RuntimeClass::RuntimeSafe);
+        assert_eq!(
+            runtime_class("restore", "max_depth_days"),
+            RuntimeClass::RuntimeSafe
+        );
+        // erasure_enabled gates a boot worker; unknown pairs default restart-required.
+        assert_eq!(
+            runtime_class("retention", "erasure_enabled"),
+            RuntimeClass::RestartRequired
+        );
+        assert_eq!(runtime_class("mystery", "field"), RuntimeClass::RestartRequired);
+    }
+}

@@ -10,6 +10,7 @@
 
 pub mod api;
 pub mod config;
+pub mod config_overlay;
 pub mod core;
 pub mod error;
 pub mod infra;
