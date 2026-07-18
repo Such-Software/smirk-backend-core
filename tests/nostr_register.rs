@@ -88,7 +88,7 @@ async fn register_creates_user_by_npub_and_is_idempotent() {
     let app = require_app!();
     let base = app
         .state
-        .config
+        .cfg()
         .identity
         .public_api_url
         .clone()
@@ -120,7 +120,7 @@ async fn register_replays_are_rejected() {
     let app = require_app!();
     let base = app
         .state
-        .config
+        .cfg()
         .identity
         .public_api_url
         .clone()
@@ -160,7 +160,7 @@ async fn register_refuses_to_bind_npub_onto_existing_seed_fingerprint_row_withou
     let app = require_app!();
     let base = app
         .state
-        .config
+        .cfg()
         .identity
         .public_api_url
         .clone()

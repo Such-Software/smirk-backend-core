@@ -32,6 +32,7 @@ tower_governor = "0.4"
 governor = "0.6"
 
 # Database
+arc-swap = "1"
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "ipnetwork", "migrate", "json"] }
 ipnetwork = "0.20"
 
@@ -119,6 +120,7 @@ tonic-build = "0.12"
 protoc-bin-vendored = "3"
 
 [dev-dependencies]
+arc-swap = "1"
 tokio-test = "0.4"
 mockall = "0.12"
 

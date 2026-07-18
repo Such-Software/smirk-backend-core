@@ -92,19 +92,19 @@ pub fn build_server_info(config: &Config) -> ServerInfo {
 /// is off (matching an unmatched route — the `{error,code}` envelope would itself
 /// hint the route exists, so it is deliberately not used here).
 pub async fn server_info(State(state): State<Arc<AppState>>) -> Response {
-    if !state.config.landing.enabled {
+    if !state.cfg().landing.enabled {
         return StatusCode::NOT_FOUND.into_response();
     }
-    Json(build_server_info(&state.config)).into_response()
+    Json(build_server_info(&state.cfg())).into_response()
 }
 
 /// `GET /` — minimal HTML rendered from the read model; bare `404` when off.
 pub async fn root(State(state): State<Arc<AppState>>) -> Response {
-    if !state.config.landing.enabled {
+    if !state.cfg().landing.enabled {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let title = state
-        .config
+    let cfg = state.cfg();
+    let title = cfg
         .landing
         .title
         .as_deref()

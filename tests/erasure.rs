@@ -89,7 +89,7 @@ async fn erasure_request_confirm_execute_flow() {
     let app = require_app!();
     let base = app
         .state
-        .config
+        .cfg()
         .identity
         .public_api_url
         .clone()
@@ -221,7 +221,7 @@ async fn erasure_request_confirm_execute_flow() {
     assert!(body["erasure_id"].as_str().is_some());
     assert_eq!(body["status"], "pending");
 
-    let secret = app.state.config.admin.key_integrity_secret.clone();
+    let secret = app.state.cfg().admin.key_integrity_secret.clone();
 
     // [HIGH regression] a request CANCELLED after confirmation is NOT executed:
     // execute claims `WHERE status='confirmed'`, so a cancelled row is skipped.

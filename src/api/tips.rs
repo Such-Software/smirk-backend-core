@@ -160,7 +160,7 @@ pub struct ClawbackTipResponse {
 
 /// Reject when tips are not enabled on this instance.
 fn ensure_tips_enabled(state: &AppState) -> Result<(), AppError> {
-    if state.config.features.tips {
+    if state.cfg().features.tips {
         Ok(())
     } else {
         Err(AppError::ValidationError(
@@ -171,7 +171,7 @@ fn ensure_tips_enabled(state: &AppState) -> Result<(), AppError> {
 
 /// Whether `asset` is a tip-capable chain enabled on this instance.
 fn supported_tip_asset(state: &AppState, asset: &str) -> bool {
-    let c = &state.config.features.chains;
+    let c = &state.cfg().features.chains;
     match asset {
         "btc" => c.btc,
         "ltc" => c.ltc,
@@ -382,7 +382,7 @@ pub async fn create_social_tip(
     };
 
     let share_url = state
-        .config
+        .cfg()
         .tip_share_base
         .as_ref()
         .map(|base| format!("{}/{}", base.trim_end_matches('/'), tip.id));
@@ -573,7 +573,7 @@ pub async fn attach_funding(
         .await?;
 
     let share_url = state
-        .config
+        .cfg()
         .tip_share_base
         .as_ref()
         .map(|base| format!("{}/{}", base.trim_end_matches('/'), tip.id));

@@ -69,7 +69,7 @@ pub fn client_ip(state: &AppState, headers: &HeaderMap, peer: SocketAddr) -> IpA
     let peer_ip = peer.ip();
 
     let peer_is_trusted = state
-        .config
+        .cfg()
         .trusted_proxies
         .iter()
         .any(|net| net.contains(peer_ip));

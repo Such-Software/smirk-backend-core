@@ -88,7 +88,7 @@ async fn is_registered_npub_membership() {
 #[tokio::test]
 async fn admission_inbox_outbox_end_to_end() {
     let app = require_app!();
-    let svc = AdmissionService::new(inbox_outbox_relay(&app.state.config), app.state.db.clone());
+    let svc = AdmissionService::new(inbox_outbox_relay(&app.state.cfg()), app.state.db.clone());
 
     let author = hex64("b1"); // registered author (outbox)
     let recipient = hex64("b2"); // registered recipient (inbox)

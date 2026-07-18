@@ -19,21 +19,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
     let _ = dotenvy::dotenv();
 
-    // Fail-closed: aborts on a weak/missing/inconsistent secret.
-    let config = Config::from_env()?;
-    tracing::info!(environment = %config.environment, "configuration loaded");
+    // Fail-closed: aborts on a weak/missing/inconsistent secret. This is the env-only
+    // truth; the effective config below layers the validated DB overlay on top.
+    let config_base = Config::from_env()?;
+    tracing::info!(environment = %config_base.environment, "configuration loaded");
 
     let pool = PgPoolOptions::new()
         .max_connections(20)
-        .connect(&config.database_url)
+        .connect(&config_base.database_url)
         .await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
 
     let db = Database::new(
         pool,
-        config.secrets.seed_fingerprint_pepper.clone(),
-        config.secrets.ip_salt.clone(),
+        config_base.secrets.seed_fingerprint_pepper.clone(),
+        config_base.secrets.ip_salt.clone(),
     );
+
+    // Effective config = env-derived base + validated DB overlay (operator settings).
+    // Overlay rows are MAC'd under ADMIN_KEY_INTEGRITY_SECRET; without that anchor
+    // (admin disabled) we stay env-only. A persisted overlay that no longer validates
+    // is ignored (boot env-only + loud log) rather than bricking the instance. Every
+    // client/worker/router below is built from `config` (the effective view).
+    let overlay = if config_base.admin.key_integrity_secret.is_empty() {
+        smirk_backend_core::config_overlay::SettingsOverlay::default()
+    } else {
+        db.load_settings_overlay(&config_base.admin.key_integrity_secret)
+            .await?
+    };
+    let config = match config_base.apply_overlay(&overlay) {
+        Ok(effective) => effective,
+        Err(e) => {
+            tracing::error!(error = %e, "persisted config overlay invalid; ignoring it, booting env-only");
+            config_base.clone()
+        }
+    };
+
     let sessions = SessionManager::new(&config.auth.jwt_secret, config.auth.jwt_expiry_hours);
     let chains = ChainClients::from_config(&config)?;
     // Payment processor for the pay-to-register gate (None unless it's enabled).
@@ -87,7 +108,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enabled
         .then(|| AdminSessionManager::new(&config.admin.jwt_secret));
     let state = Arc::new(AppState {
-        config,
+        config: Arc::new(arc_swap::ArcSwap::from_pointee(config)),
+        config_base: Arc::new(config_base),
         db,
         sessions,
         chains,
@@ -116,7 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // enabled). The respond/finalize paths already reject expired relays in their
     // UPDATE guard; this sweep flips past-TTL rows to Expired so the table stays
     // bounded and the lifecycle reflects reality.
-    if state.config.features.grin_relay {
+    if state.cfg().features.grin_relay {
         let db = state.db.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
@@ -146,7 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Background erasure execution: confirmed requests past their grace window
     // are deleted (per-table policy + cascade + hash-chained audit, one tx each).
-    if state.config.retention.erasure_enabled {
+    if state.cfg().retention.erasure_enabled {
         let state = state.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
@@ -165,8 +187,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // fetch the configured feeds and replace the snapshot; a failure logs and
     // keeps the last good values rather than blanking them. The first interval
     // tick fires immediately, so prices populate at startup.
-    if state.config.features.prices {
-        let f = &state.config.features;
+    if state.cfg().features.prices {
+        let f = &state.cfg().features;
         match prices::PriceClient::new(&f.prices_provider, &f.prices_currency, &f.prices_assets) {
             Ok(client) if !client.is_empty() => {
                 let cache = state.prices.clone();
@@ -195,8 +217,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // not middleware ordering). The fail-closed non-loopback bind guard and the
     // browser/Host hardening land with the admin-posture subsystem; for now bind
     // to the configured (loopback-default) address and warn if it isn't local.
-    if state.config.admin.enabled {
-        let admin_addr = state.config.admin.bind.clone();
+    if state.cfg().admin.enabled {
+        let admin_addr = state.cfg().admin.bind.clone();
         // Fail-closed bind guard: refuse a non-loopback admin bind unless the
         // operator explicitly opts in (confidentiality is by socket). Resolve the
         // address (so "localhost" works) and require EVERY resolved addr to be
@@ -209,7 +231,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(_) => false,
         };
-        if !is_loopback && !state.config.admin.allow_public_bind {
+        if !is_loopback && !state.cfg().admin.allow_public_bind {
             return Err(format!(
                 "ADMIN_BIND {admin_addr} is not loopback; set ADMIN_ALLOW_PUBLIC_BIND=true to override \
                  (and front it with Tor client-auth / a trusted proxy)"
@@ -238,7 +260,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         use smirk_backend_core::infra::relay::WritePolicy;
         if relay.write_policy() != WritePolicy::Open {
             let addr: std::net::SocketAddr = state
-                .config
+                .cfg()
                 .messaging
                 .relay
                 .admission_bind
@@ -267,7 +289,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // pending_confirmation tips). Only runs when tips are enabled. A panic in a
     // single pass is caught + backed off so the loop survives (visible in logs)
     // rather than silently dying and stranding every pending tip.
-    if state.config.features.tips {
+    if state.cfg().features.tips {
         use futures::FutureExt;
         let state = state.clone();
         tokio::spawn(async move {
@@ -291,7 +313,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // an immediate startup pass (so a restart doesn't wait a full interval before
     // settling anything that confirmed while we were down) then every 60s. Same
     // catch_unwind guard as the money-in worker.
-    if state.config.features.tips {
+    if state.cfg().features.tips {
         use futures::FutureExt;
         let state = state.clone();
         tokio::spawn(async move {
@@ -312,7 +334,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Public-tips reorg-check pass: re-probe settled tips and revert any whose
     // recorded sweep was orphaned by a chain reorg. Lowest-frequency, novel, and
     // recoverable, so it runs on a slower cadence (300s) than the confirm pass.
-    if state.config.features.tips {
+    if state.cfg().features.tips {
         use futures::FutureExt;
         let state = state.clone();
         tokio::spawn(async move {
@@ -333,7 +355,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Public-tips draft GC: hourly, cancel `draft` rows abandoned mid-flow (> 7
     // days, never funded-attached) and warn per cancelled row. Same catch_unwind
     // guard as the money-in/out workers.
-    if state.config.features.tips {
+    if state.cfg().features.tips {
         use futures::FutureExt;
         let state = state.clone();
         tokio::spawn(async move {
@@ -354,7 +376,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Public-tips lifecycle GC: every 5 min, cancel stuck `pending_confirmation`
     // rows (> 7 days) and warn-only-scan stuck `claiming` rows (> 15 min). Same
     // catch_unwind guard.
-    if state.config.features.tips {
+    if state.cfg().features.tips {
         use futures::FutureExt;
         let state = state.clone();
         tokio::spawn(async move {

@@ -320,8 +320,8 @@ pub async fn register(
             // Restore: gate the scan depth against this instance's policy (the
             // backfill cost lands on our LWS). `None` (create) needs no check.
             let tip = client.get_blockchain_height().await?;
-            state.config.restore.enforce(&asset, h, tip)?;
-            state.config.restore.enforce_restore_pow(
+            state.cfg().restore.enforce(&asset, h, tip)?;
+            state.cfg().restore.enforce_restore_pow(
                 &asset,
                 &req.address,
                 h,

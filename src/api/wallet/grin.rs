@@ -202,8 +202,8 @@ pub async fn scan(
     // grin-wallet fallback, so it is enforced before either scan path is chosen.
     if let Some(h) = req.start_height {
         let tip = grin_tip(&state).await?;
-        state.config.restore.enforce("grin", h, tip)?;
-        state.config.restore.enforce_restore_pow(
+        state.cfg().restore.enforce("grin", h, tip)?;
+        state.cfg().restore.enforce_restore_pow(
             "grin",
             &req.rewind_hash,
             h,

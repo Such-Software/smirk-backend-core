@@ -63,7 +63,7 @@ const RELAY_TTL_DAYS: i64 = 7;
 
 /// 400 unless the relay feature is enabled on this server.
 fn ensure_enabled(state: &AppState) -> Result<(), AppError> {
-    if state.config.features.grin_relay {
+    if state.cfg().features.grin_relay {
         Ok(())
     } else {
         Err(AppError::NotFound(

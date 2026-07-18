@@ -89,7 +89,8 @@ pub async fn try_app_with(mutate: impl FnOnce(&mut Config)) -> Option<TestApp> {
         .enabled
         .then(|| AdminSessionManager::new(&config.admin.jwt_secret));
     let state = Arc::new(AppState {
-        config,
+        config: Arc::new(arc_swap::ArcSwap::from_pointee(config.clone())),
+        config_base: Arc::new(config),
         db,
         sessions,
         chains,
@@ -258,7 +259,7 @@ impl TestApp {
             .expect("mint token pair");
         let hash = hash_refresh_token(
             &pair.refresh_token,
-            &self.state.config.secrets.refresh_token_pepper,
+            &self.state.cfg().secrets.refresh_token_pepper,
         );
         self.state
             .db

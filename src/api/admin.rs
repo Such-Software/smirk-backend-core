@@ -66,14 +66,14 @@ fn admin_manager(state: &AppState) -> Result<&AdminSessionManager, AppError> {
 fn admin_verify_url(state: &AppState) -> String {
     format!(
         "{}/admin/auth/verify",
-        state.config.admin.public_url.trim_end_matches('/')
+        state.cfg().admin.public_url.trim_end_matches('/')
     )
 }
 
 /// A stable per-instance id bound into the signed action, so a challenge signed
 /// for this instance cannot be relayed to another.
 fn admin_instance_id(state: &AppState) -> String {
-    hex::encode(Sha256::digest(state.config.admin.public_url.as_bytes()))[..16].to_string()
+    hex::encode(Sha256::digest(state.cfg().admin.public_url.as_bytes()))[..16].to_string()
 }
 
 fn pubkey_prefix(pubkey: &str) -> String {
@@ -121,7 +121,7 @@ pub async fn admin_plane_guard(
         .unwrap_or("");
     // Compute the response on both paths, then apply the security headers once so
     // the 403 Host-reject carries them too.
-    let mut resp = if host_allowed(host, state.config.admin.onion.as_deref()) {
+    let mut resp = if host_allowed(host, state.cfg().admin.onion.as_deref()) {
         next.run(req).await
     } else {
         (StatusCode::FORBIDDEN, "forbidden").into_response()
@@ -190,7 +190,7 @@ pub async fn admin_guard(
 
     // Live, uncached allowlist re-check (MAC re-verified inside): must be active
     // AND activated (a pending key is not yet authorized for protected routes).
-    let secret = &state.config.admin.key_integrity_secret;
+    let secret = &state.cfg().admin.key_integrity_secret;
     let key = state
         .db
         .get_active_admin_key(&info.pubkey, secret)
@@ -279,7 +279,7 @@ pub async fn admin_verify(
 ) -> Result<Json<AdminTokenResponse>, AppError> {
     let mgr = admin_manager(&state)?;
     let ip = client_ip(&state, &headers, peer);
-    let secret = &state.config.admin.key_integrity_secret;
+    let secret = &state.cfg().admin.key_integrity_secret;
 
     // 1. Prove the signature + bindings (purpose/nonce/descriptor/instance). The
     // descriptor binds the verify URL with an EMPTY body (the proof rides in the
@@ -335,7 +335,7 @@ pub async fn admin_verify(
     let pair = mgr.create_token_pair(&pubkey, session_id)?;
     let refresh_hash = hash_refresh_token(
         &pair.refresh_token,
-        &state.config.secrets.refresh_token_pepper,
+        &state.cfg().secrets.refresh_token_pepper,
     );
     let audit = NewAdminAudit {
         action: "admin_login".into(),
@@ -386,7 +386,7 @@ pub async fn admin_refresh(
 
     // Re-authorize against the live allowlist (closes the "8h refresh is the real
     // blast radius" gap).
-    let secret = &state.config.admin.key_integrity_secret;
+    let secret = &state.cfg().admin.key_integrity_secret;
     let key = state
         .db
         .get_active_admin_key(&pubkey, secret)
@@ -403,7 +403,7 @@ pub async fn admin_refresh(
         .ok_or_else(admin_auth_fail)?;
     let presented = hash_refresh_token(
         &req.refresh_token,
-        &state.config.secrets.refresh_token_pepper,
+        &state.cfg().secrets.refresh_token_pepper,
     );
     let hash_ok: bool = presented
         .as_bytes()
@@ -435,7 +435,7 @@ pub async fn admin_logout(
 ) -> Result<Json<OkResponse>, AppError> {
     let ctx = admin_guard(&state, &headers).await?;
     state.db.revoke_admin_session(ctx.session_id).await?;
-    let secret = &state.config.admin.key_integrity_secret;
+    let secret = &state.cfg().admin.key_integrity_secret;
     let _ = state
         .db
         .record_admin_audit(
@@ -520,7 +520,7 @@ fn pending_key(state: &AppState, pubkey: String, label: Option<String>) -> NewAd
         scope: "admin".into(),
         created_by_kind: "admin".into(),
         activation_deadline: Some(
-            Utc::now() + Duration::days(state.config.admin.pending_key_ttl_days as i64),
+            Utc::now() + Duration::days(state.cfg().admin.pending_key_ttl_days as i64),
         ),
     }
 }
@@ -536,7 +536,7 @@ pub async fn admin_keys_add(
     let pubkey = req.pubkey.to_lowercase();
     validate_admin_pubkey(&pubkey)?;
 
-    let secret = &state.config.admin.key_integrity_secret;
+    let secret = &state.cfg().admin.key_integrity_secret;
     let audit = NewAdminAudit {
         action: "admin_key_added".into(),
         actor_kind: "admin".into(),
@@ -552,7 +552,7 @@ pub async fn admin_keys_add(
             pending_key(&state, pubkey, req.label),
             &audit,
             secret,
-            state.config.admin.max_keys as i64,
+            state.cfg().admin.max_keys as i64,
         )
         .await?
     {
@@ -593,7 +593,7 @@ pub async fn admin_keys_revoke(
     Path(id): Path<Uuid>,
 ) -> Result<Json<OkResponse>, AppError> {
     let ctx = admin_guard(&state, &headers).await?;
-    let secret = &state.config.admin.key_integrity_secret;
+    let secret = &state.cfg().admin.key_integrity_secret;
     let audit = NewAdminAudit {
         action: "admin_key_revoked".into(),
         actor_kind: "admin".into(),
@@ -632,7 +632,7 @@ pub async fn admin_keys_rotate(
     let ctx = admin_guard(&state, &headers).await?;
     let pubkey = req.pubkey.to_lowercase();
     validate_admin_pubkey(&pubkey)?;
-    let secret = &state.config.admin.key_integrity_secret;
+    let secret = &state.cfg().admin.key_integrity_secret;
     let audit = NewAdminAudit {
         action: "admin_key_rotated".into(),
         actor_kind: "admin".into(),
@@ -679,7 +679,7 @@ pub async fn admin_features(
     headers: HeaderMap,
 ) -> Result<Json<AdminFeaturesResponse>, AppError> {
     admin_guard(&state, &headers).await?;
-    let cfg = &state.config;
+    let cfg = &state.cfg();
     let effective = crate::api::capabilities::effective_capabilities(cfg);
 
     let mut downgrades = Vec::new();

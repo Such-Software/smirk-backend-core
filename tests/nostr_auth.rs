@@ -78,7 +78,7 @@ async fn link_challenge_then_link_resolves_and_rejects_replay_and_wrong_user() {
     let app = require_app!();
     let base = app
         .state
-        .config
+        .cfg()
         .identity
         .public_api_url
         .clone()

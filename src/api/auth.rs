@@ -170,15 +170,15 @@ fn validate_username(username: &str) -> Result<(), AppError> {
 /// validation only requires `ALTCHA_HMAC_KEY` when the feature is enabled). When
 /// disabled we never call `verify_payload`, so the empty key is never used.
 fn pow_applies(state: &AppState, pubkey_hash_lc: &str) -> bool {
-    state.config.pow.enabled && crate::core::pow::required_for(&state.config.pow, pubkey_hash_lc)
+    state.cfg().pow.enabled && crate::core::pow::required_for(&state.cfg().pow, pubkey_hash_lc)
 }
 
 /// The canonical absolute URL a NIP-98 token must bind for `path` (the value of
 /// the event's `u` tag). Built from `config.identity.public_api_url`, never the
 /// request Host. Fail closed when unset (Nostr identity is disabled).
 fn nip98_url(state: &AppState, path: &str) -> Result<String, AppError> {
-    let base = state
-        .config
+    let cfg = state.cfg();
+    let base = cfg
         .identity
         .public_api_url
         .as_deref()
@@ -215,7 +215,7 @@ async fn issue_session(
 
     let refresh_token_hash = hash_refresh_token(
         &pair.refresh_token,
-        &state.config.secrets.refresh_token_pepper,
+        &state.cfg().secrets.refresh_token_pepper,
     );
     let expires_at = Utc::now() + state.sessions.refresh_token_expiry();
 
@@ -276,7 +276,7 @@ async fn upsert_all_keys(
 pub async fn pow_challenge(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<altcha::Challenge>, AppError> {
-    let challenge = crate::core::pow::issue_challenge(&state.config.pow)?;
+    let challenge = crate::core::pow::issue_challenge(&state.cfg().pow)?;
     Ok(Json(challenge))
 }
 
@@ -622,13 +622,13 @@ fn enforce_pow(
                     .into(),
             )
         })?;
-        crate::core::pow::verify_payload(&state.config.pow, solution)?;
+        crate::core::pow::verify_payload(&state.cfg().pow, solution)?;
         info!(pow = "ok", "PoW solution accepted (new user)");
     } else if let Some(solution) = solution {
         // Supplied but not required: verify anyway (clear error on malformed),
         // but only if the feature is enabled so we never touch an empty key.
-        if state.config.pow.enabled {
-            crate::core::pow::verify_payload(&state.config.pow, solution)?;
+        if state.cfg().pow.enabled {
+            crate::core::pow::verify_payload(&state.cfg().pow, solution)?;
         }
     }
     Ok(())
@@ -723,15 +723,15 @@ async fn plan_gate_consume(
         .is_some_and(|s| !s.is_empty());
 
     match plan_gates(
-        state.config.registration.gate_mode,
-        state.config.registration.require_invite,
-        state.config.registration.payment.require_payment,
+        state.cfg().registration.gate_mode,
+        state.cfg().registration.require_invite,
+        state.cfg().registration.payment.require_payment,
         has_invite,
         has_payment,
     ) {
         GatePlan::Open => Ok(GatedRegistration { invite_code_hash: None, payment: None }),
         GatePlan::All => {
-            let invite_code_hash = if state.config.registration.require_invite {
+            let invite_code_hash = if state.cfg().registration.require_invite {
                 Some(require_invite_hash(invite_code)?)
             } else {
                 None
@@ -776,7 +776,7 @@ async fn verify_payment_settled(
     pubkey_hash: &str,
     payment_invoice_id: Option<&str>,
 ) -> Result<Option<String>, AppError> {
-    if returning || !state.config.registration.payment.require_payment {
+    if returning || !state.cfg().registration.payment.require_payment {
         return Ok(None);
     }
     // Gate on but no provider built — config validation prevents this, so it is
@@ -932,7 +932,7 @@ pub async fn payment_invoice(
     State(state): State<Arc<AppState>>,
     Json(req): Json<PaymentInvoiceRequest>,
 ) -> Result<Json<PaymentInvoiceResponse>, AppError> {
-    let cfg = &state.config.registration.payment;
+    let cfg = &state.cfg().registration.payment;
     if !cfg.require_payment {
         return Err(AppError::ValidationError(
             "This instance does not require registration payment.".into(),
@@ -1175,7 +1175,7 @@ pub async fn refresh_token(
 
     let token_hash = hash_refresh_token(
         &req.refresh_token,
-        &state.config.secrets.refresh_token_pepper,
+        &state.cfg().secrets.refresh_token_pepper,
     );
     let session = state
         .db
@@ -1256,7 +1256,7 @@ pub async fn logout(
 ) -> Result<Json<LogoutResponse>, AppError> {
     let token_hash = hash_refresh_token(
         &req.refresh_token,
-        &state.config.secrets.refresh_token_pepper,
+        &state.cfg().secrets.refresh_token_pepper,
     );
     if let Some(session) = state.db.get_session_by_token_hash(&token_hash).await? {
         let _ = state.db.revoke_session(session.id).await;

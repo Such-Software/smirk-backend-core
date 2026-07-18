@@ -297,7 +297,7 @@ pub async fn website_verify(
         .create_token_pair(user.id, Platform::Web, session_id)?;
     let refresh_token_hash = hash_refresh_token(
         &pair.refresh_token,
-        &state.config.secrets.refresh_token_pepper,
+        &state.cfg().secrets.refresh_token_pepper,
     );
     let expires_at = Utc::now() + state.sessions.refresh_token_expiry();
     state

@@ -56,7 +56,13 @@ const NORMAL_BURST: u32 = 60;
 /// Shared application state injected into handlers via `State<Arc<AppState>>`.
 #[derive(Clone)]
 pub struct AppState {
-    pub config: Config,
+    /// Effective config = env-derived base + validated DB overlay. Hot-swappable:
+    /// a runtime-safe operator edit stores a new `Arc<Config>` here (lock-free).
+    /// Read it via [`AppState::cfg`] (`state.cfg().field`), never a stale copy.
+    pub config: Arc<arc_swap::ArcSwap<Config>>,
+    /// Immutable env-only config (no overlay). Used to recompute the effective
+    /// config on a settings change and to report a field's source (default/env/db).
+    pub config_base: Arc<Config>,
     pub db: Database,
     pub sessions: SessionManager,
     /// Per-chain data-source clients (present only for enabled chains).
@@ -78,12 +84,23 @@ pub struct AppState {
     pub admin_sessions: Option<AdminSessionManager>,
 }
 
+impl AppState {
+    /// Load the current effective [`Config`] (lock-free, wait-free). The returned
+    /// guard derefs to `&Config`, so `state.cfg().field` reads the live value and
+    /// `&state.cfg()` passes to a `fn(&Config)` helper. Every config read goes
+    /// through here so a runtime-safe operator edit is seen on the next request.
+    #[inline]
+    pub fn cfg(&self) -> arc_swap::Guard<std::sync::Arc<Config>> {
+        self.config.load()
+    }
+}
+
 /// Assemble the full application router with every route mounted and state
 /// applied. Shared by `main` and the integration-test harness so both exercise
 /// the exact same wiring: `/health` and the NIP-05 directory at the root, the
 /// authenticated wallet/identity API nested under `/api/v1`.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    let cors = cors_layer(&state.config);
+    let cors = cors_layer(&state.cfg());
 
     // Per-IP rate limiting (PeerIpKeyExtractor reads ConnectInfo — `main` serves
     // with `into_make_service_with_connect_info`; the test harness injects it).
