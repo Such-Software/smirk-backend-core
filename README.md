@@ -72,6 +72,10 @@ Operator/admin functions live on a **separate loopback listener** (front it with
 Tor or an SSH tunnel) — confidentiality by socket, never merged into the public
 router or OpenAPI.
 
+- **Operator Console**: an embedded single-page app served at `/admin` on the
+  loopback admin plane. Sign in with your admin key, then review status, manage
+  admin keys and invite codes, and edit the runtime config overlay (env plus a
+  validated DB layer). Guide: [docs/operations/CONSOLE.md](docs/operations/CONSOLE.md).
 - **Sign-in-with-Smirk admin auth** — a NIP-98 *signed action* over a single-use
   nonce (AUTHN) + a MAC-protected key allowlist (AUTHZ), composed so a route can't
   run without both.

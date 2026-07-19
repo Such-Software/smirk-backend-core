@@ -37,10 +37,28 @@ recipient), which a static pubkey whitelist can't do.
 | `inbox-outbox` (default) | registered npubs publish their own events (outbox); **anyone** may deliver a NIP-17 gift-wrap (kind 1059) **addressed to a registered user** (inbox) |
 | `author-allowlist` | only registered Smirk npubs may publish anything (no external inbound) |
 | `open` | accept everything (the relay's resource caps still apply) |
+| `premium-post` | registered users post wallet-functional events (DMs, tips, swap coordination) free; **general** notes require an active premium subscription (see the premium tier below). This is the flagship monetized relay policy |
 
 `RELAY_INBOUND_POW_BITS` (0 = off) requires a NIP-13 proof-of-work on
 cross-ecosystem (non-registered-author) inbound events — spam friction without an
 author allowlist. Only the `inbox-outbox` external-inbound branch is gated.
+
+`RELAY_WRITE_ALLOWLIST_NPUBS` (comma-separated `npub1…` or 64-char hex; empty by
+default) lists write-exempt npubs that may publish **any** kind regardless of the
+write policy or premium status. The intended use is an announcements or
+feed-owner account that seeds a `premium-post` feed without itself holding a
+subscription. It is an exemption list, not the `author-allowlist` policy.
+
+## Premium tier (`premium-post`)
+
+The `premium-post` policy pairs with the premium subscription block
+(`PREMIUM_ENABLED=true`, `PREMIUM_CURRENCY`, `PREMIUM_PLANS`) and the `PAYMENT_*`
+processor. Wallet use stays free; premium unlocks general Nostr posting to your
+relay. `Config::validate` fails closed if `PREMIUM_ENABLED` is set without
+`RELAY_ENABLED=true`, `RELAY_WRITE_POLICY=premium-post`, the processor
+credentials, and at least one priced `PREMIUM_PLANS` entry. Full design:
+[../design/premium-relay.md](../design/premium-relay.md); ready-to-copy config:
+the [`paid-relay`](../../examples/paid-relay/) recipe.
 
 ## Enable it
 

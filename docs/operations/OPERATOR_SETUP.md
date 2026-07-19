@@ -100,6 +100,19 @@ Expose the admin plane over a Tor onion or an SSH tunnel; never bind it to a
 public interface. `ADMIN_BIND` defaults to loopback, and a non-loopback bind
 requires an explicit `ADMIN_ALLOW_PUBLIC_BIND=true`.
 
+- **SSH tunnel:** `ssh -L 8081:127.0.0.1:8081 you@server`, then reach the plane at
+  `http://127.0.0.1:8081`. The loopback Host passes the admin allowlist with no
+  extra config.
+- **Tor onion:** point a hidden service at `127.0.0.1:8081` and set
+  `TOR_ADMIN_ONION=<hash>.onion`. That onion host is added to the admin Host
+  allowlist; without it, a request whose `Host` header is the onion is rejected
+  (`403`), because the allowlist only accepts loopback names plus the one
+  configured onion (anti DNS-rebinding).
+
+The Operator Console (an embedded admin SPA served at `/admin` on this same
+plane) gives you a browser front end for keys, invites, status, and the runtime
+config overlay. See [CONSOLE.md](CONSOLE.md).
+
 ## 6. Registration policy (optional)
 
 Gates are composable and advertised via `/capabilities`; returning wallets and
