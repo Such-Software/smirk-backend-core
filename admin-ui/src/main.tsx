@@ -115,8 +115,13 @@ function KeysTab() {
   };
   const revoke = async (id: string) => {
     if (!confirm('Revoke this admin key?')) return;
-    await api.revokeKey(id);
-    reload();
+    setMsg(null);
+    try {
+      await api.revokeKey(id);
+      reload();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    }
   };
 
   return (
@@ -163,13 +168,17 @@ function InvitesTab() {
   const [label, setLabel] = useState('');
   const [minted, setMinted] = useState<string[] | null>(null);
   const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
 
   const mint = async () => {
     setBusy(true);
+    setMsg(null);
     try {
       const r = await api.mintInvites(count, label.trim() || undefined);
       setMinted(r.codes);
       reload();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -193,10 +202,11 @@ function InvitesTab() {
           value={label}
           onInput={(e) => setLabel((e.target as HTMLInputElement).value)}
         />
-        <button class="primary" disabled={busy} onClick={mint}>
+        <button class="primary" disabled={busy || count < 1} onClick={mint}>
           Mint
         </button>
       </div>
+      {msg && <p style={{ color: 'var(--smirk-danger)' }}>{msg}</p>}
       {minted && (
         <div style={{ background: 'var(--smirk-bg-sunken)', padding: 12, borderRadius: 8, marginBottom: 12 }}>
           <b>New codes — copy now, they are shown once:</b>
@@ -236,7 +246,17 @@ function ConfigTab() {
   const [msg, setMsg] = useState<string | null>(null);
 
   useEffect(() => {
-    if (data) setEdit(structuredClone(data.effective));
+    if (!data) return;
+    // Seed edit state for sections we are NOT already editing, and preserve
+    // in-progress edits — a reload after saving one section must not discard
+    // unsaved edits in the others.
+    setEdit((prev) => {
+      const next = { ...prev };
+      for (const section of Object.keys(data.effective)) {
+        if (!(section in next)) next[section] = structuredClone(data.effective[section]);
+      }
+      return next;
+    });
   }, [data]);
 
   if (err) return <Section title="Config">{<p style={{ color: 'var(--smirk-danger)' }}>{err}</p>}</Section>;
@@ -247,11 +267,21 @@ function ConfigTab() {
 
   const save = async (section: string) => {
     setMsg(null);
+    // Send ONLY the fields that actually changed. Sending the whole section makes the
+    // backend count every populated field as "touched" — spuriously flagging a restart
+    // and pinning env-sourced values into the DB overlay.
+    const orig = (data.effective[section] ?? {}) as Record<string, unknown>;
+    const cur = (edit[section] ?? {}) as Record<string, unknown>;
+    const patch: Record<string, unknown> = {};
+    for (const k of Object.keys(cur)) {
+      if (JSON.stringify(cur[k]) !== JSON.stringify(orig[k])) patch[k] = cur[k];
+    }
+    if (Object.keys(patch).length === 0) {
+      setMsg(`No changes in ${section}.`);
+      return;
+    }
     try {
-      await api.putConfig(
-        { [section]: edit[section] },
-        { [section]: data.versions[section] ?? 0 },
-      );
+      await api.putConfig({ [section]: patch }, { [section]: data.versions[section] ?? 0 });
       setMsg(`Saved ${section}.`);
       reload();
     } catch (e) {
@@ -303,7 +333,14 @@ function ConfigTab() {
                       value={String(value ?? '')}
                       onInput={(e) => {
                         const v = (e.target as HTMLInputElement).value;
-                        setField(section, field, typeof value === 'number' ? Number(v) : v);
+                        if (typeof value === 'number') {
+                          // Ignore empty / non-numeric input instead of coercing to 0.
+                          if (v === '') return;
+                          const n = Number(v);
+                          if (!Number.isNaN(n)) setField(section, field, n);
+                        } else {
+                          setField(section, field, v);
+                        }
                       }}
                     />
                   )}

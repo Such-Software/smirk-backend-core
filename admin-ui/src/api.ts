@@ -64,7 +64,9 @@ export const api = {
   logout: () => req('POST', '/admin/auth/logout', {}),
   me: () => req('GET', '/admin/me'),
   features: () => req('GET', '/admin/features'),
-  keys: () => req('GET', '/admin/keys') as Promise<KeyRow[]>,
+  // The backend wraps the list as {keys:[...]} (KeysListResponse); unwrap here so
+  // callers get the array they expect (KeysTab maps over it directly).
+  keys: () => req('GET', '/admin/keys').then((r) => (r as { keys: KeyRow[] }).keys),
   addKey: (pubkey: string, label?: string) =>
     req('POST', '/admin/keys', label ? { pubkey, label } : { pubkey }),
   revokeKey: (id: string) => req('DELETE', `/admin/keys/${id}`),
