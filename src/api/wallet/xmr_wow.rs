@@ -120,6 +120,14 @@ pub struct ConfirmationsRequest {
 
 // ── response DTOs ─────────────────────────────────────────────────────────────
 
+/// Serialize a `u64` atomic amount as a decimal STRING. XMR/WOW amounts can exceed
+/// 2^53, which a JavaScript `number` cannot hold exactly, so every atomic amount
+/// crosses the wire as a string; the wallet BigInt-parses it. Heights, indices,
+/// counts, and fee params stay numbers (always well under 2^53).
+fn ser_u64_str<S: serde::Serializer>(v: &u64, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&v.to_string())
+}
+
 /// Balance + scan state, as a **verification passthrough**. The backend holds no
 /// spend key, so it cannot net out spends; the wallet computes the true spendable
 /// balance client-side: `total_received − sum(spent_outputs it verifies with the
@@ -129,10 +137,16 @@ pub struct ConfirmationsRequest {
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct LwsBalanceResponse {
     pub asset: String,
+    #[serde(serialize_with = "ser_u64_str")]
+    #[schema(value_type = String, example = "12345000000000")]
     pub total_received: u64,
+    #[serde(serialize_with = "ser_u64_str")]
+    #[schema(value_type = String)]
     pub locked_balance: u64,
     /// Unconfirmed (mempool) received — 0-conf. `0` until the LWS reports mempool
     /// rows (the monero-lws mempool feature); never negative.
+    #[serde(serialize_with = "ser_u64_str")]
+    #[schema(value_type = String)]
     pub pending_balance: u64,
     pub start_height: u64,
     pub scanned_height: u64,
@@ -146,6 +160,8 @@ pub struct LwsBalanceResponse {
 /// A candidate spent output (verify with the spend key before trusting).
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SpentOutputDto {
+    #[serde(serialize_with = "ser_u64_str")]
+    #[schema(value_type = String)]
     pub amount: u64,
     pub key_image: String,
     pub tx_pub_key: String,
@@ -159,8 +175,12 @@ pub struct TxDto {
     pub hash: String,
     pub height: u64,
     pub timestamp: String,
+    #[serde(serialize_with = "ser_u64_str")]
+    #[schema(value_type = String)]
     pub total_received: u64,
     /// "Possible" sent — candidate spends, not authoritative.
+    #[serde(serialize_with = "ser_u64_str")]
+    #[schema(value_type = String)]
     pub total_sent: u64,
     pub mempool: bool,
     pub unlock_time: u64,
@@ -177,6 +197,8 @@ pub struct LwsHistoryResponse {
 /// An unspent output for spend construction.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct UnspentOutputDto {
+    #[serde(serialize_with = "ser_u64_str")]
+    #[schema(value_type = String)]
     pub amount: u64,
     pub public_key: String,
     pub tx_pub_key: String,
@@ -608,4 +630,53 @@ pub fn routes() -> Router<Arc<AppState>> {
         )
         .route("/wallet/lws/height", post(height))
         .route("/wallet/lws/confirmations", post(confirmations))
+}
+
+#[cfg(test)]
+mod amount_wire_tests {
+    use super::*;
+
+    // XMR/WOW atomic amounts can exceed 2^53, so they must cross the wire as decimal
+    // STRINGS (a JS number would round them). This locks that contract.
+    const BIG: u64 = 9_007_199_254_740_993; // 2^53 + 1
+
+    #[test]
+    fn unspent_output_amount_serializes_as_string() {
+        let dto = UnspentOutputDto {
+            amount: BIG,
+            public_key: "aa".into(),
+            tx_pub_key: "bb".into(),
+            index: 0,
+            global_index: 1,
+            height: 2,
+            timestamp: "t".into(),
+            tx_hash: "h".into(),
+            rct: String::new(),
+            spend_key_images: vec![],
+        };
+        let v = serde_json::to_value(&dto).unwrap();
+        assert_eq!(v["amount"], serde_json::json!("9007199254740993"));
+        assert!(v["amount"].is_string(), "amount must be a JSON string");
+        // A non-amount field stays a number.
+        assert!(v["global_index"].is_number());
+    }
+
+    #[test]
+    fn balance_amounts_serialize_as_strings() {
+        let bal = LwsBalanceResponse {
+            asset: "xmr".into(),
+            total_received: BIG,
+            locked_balance: 0,
+            pending_balance: 0,
+            start_height: 100,
+            scanned_height: 100,
+            blockchain_height: 100,
+            transaction_count: 1,
+            spent_outputs: vec![],
+        };
+        let v = serde_json::to_value(&bal).unwrap();
+        assert_eq!(v["total_received"], serde_json::json!("9007199254740993"));
+        assert!(v["locked_balance"].is_string() && v["pending_balance"].is_string());
+        assert!(v["blockchain_height"].is_number(), "heights stay numbers");
+    }
 }
