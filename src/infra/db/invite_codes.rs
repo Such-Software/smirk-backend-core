@@ -112,7 +112,7 @@ impl Database {
                 .await?;
             codes.push(code);
         }
-        self.append_admin_audit(&mut *tx, audit, secret).await?;
+        self.append_admin_audit(&mut tx, audit, secret).await?;
         tx.commit().await?;
         Ok(codes)
     }

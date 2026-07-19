@@ -746,7 +746,7 @@ pub async fn admin_features(
 // effective config for runtime-safe edits or flags restart-required.
 
 #[derive(serde::Serialize)]
-struct AdminConfigResponse {
+pub struct AdminConfigResponse {
     /// Effective value of every editable field (all populated).
     effective: crate::config_overlay::SettingsOverlay,
     /// DB overlay (operator-set values only): a field present here has source=db;
@@ -812,7 +812,7 @@ pub struct PutConfigRequest {
 }
 
 #[derive(serde::Serialize)]
-struct PutConfigResponse {
+pub struct PutConfigResponse {
     /// "runtime" = hot-swapped, live now. "restart-required" = persisted, applies on
     /// the next (graceful) restart.
     applied: String,
@@ -954,7 +954,7 @@ pub struct MintInvitesRequest {
 }
 
 #[derive(serde::Serialize)]
-struct MintInvitesResponse {
+pub struct MintInvitesResponse {
     /// RAW single-use codes — shown ONCE (only the hash is stored, unrecoverable).
     codes: Vec<String>,
 }
@@ -984,7 +984,7 @@ pub async fn admin_invites_mint(
 }
 
 #[derive(serde::Serialize)]
-struct InviteView {
+pub struct InviteView {
     /// Non-secret: first 12 hex chars of the code hash (operator eyeball only).
     code_prefix: String,
     label: Option<String>,
@@ -994,7 +994,7 @@ struct InviteView {
 }
 
 #[derive(serde::Serialize)]
-struct InvitesListResponse {
+pub struct InvitesListResponse {
     invites: Vec<InviteView>,
     unused_count: i64,
 }

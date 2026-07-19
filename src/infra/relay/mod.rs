@@ -145,6 +145,27 @@ struct NostrRelayProvider {
     write_allowlist: HashSet<String>,
 }
 
+impl RelayProvider for NostrRelayProvider {
+    fn kind(&self) -> &'static str {
+        self.kind
+    }
+    fn advertised_url(&self) -> &str {
+        &self.advertised_url
+    }
+    fn write_policy(&self) -> WritePolicy {
+        self.policy
+    }
+    fn inbound_pow_bits(&self) -> u8 {
+        self.inbound_pow_bits
+    }
+    fn max_event_bytes(&self) -> usize {
+        self.max_event_bytes
+    }
+    fn is_write_allowlisted(&self, author_hex: &str) -> bool {
+        !self.write_allowlist.is_empty() && self.write_allowlist.contains(author_hex)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::allowlist_entry_to_hex;
@@ -173,26 +194,5 @@ mod tests {
         assert_eq!(allowlist_entry_to_hex("not-a-key"), None);
         assert_eq!(allowlist_entry_to_hex("npub1garbage"), None);
         assert_eq!(allowlist_entry_to_hex("deadbeef"), None); // too short
-    }
-}
-
-impl RelayProvider for NostrRelayProvider {
-    fn kind(&self) -> &'static str {
-        self.kind
-    }
-    fn advertised_url(&self) -> &str {
-        &self.advertised_url
-    }
-    fn write_policy(&self) -> WritePolicy {
-        self.policy
-    }
-    fn inbound_pow_bits(&self) -> u8 {
-        self.inbound_pow_bits
-    }
-    fn max_event_bytes(&self) -> usize {
-        self.max_event_bytes
-    }
-    fn is_write_allowlisted(&self, author_hex: &str) -> bool {
-        !self.write_allowlist.is_empty() && self.write_allowlist.contains(author_hex)
     }
 }

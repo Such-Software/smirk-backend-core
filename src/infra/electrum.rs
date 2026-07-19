@@ -489,7 +489,7 @@ impl ElectrumClient {
         let use_primary = self
             .primary
             .as_ref()
-            .filter(|_| !(self.primary_in_cooldown(now) && !self.fallbacks.is_empty()));
+            .filter(|_| !self.primary_in_cooldown(now) || self.fallbacks.is_empty());
 
         let mut last_err = AppError::NodeError("all Electrum servers failed".into());
 

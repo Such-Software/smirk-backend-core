@@ -148,7 +148,7 @@ impl Database {
         .execute(&mut *tx)
         .await?;
 
-        self.append_admin_audit(&mut *tx, audit, secret).await?;
+        self.append_admin_audit(&mut tx, audit, secret).await?;
         tx.commit().await?;
         Ok(version)
     }
