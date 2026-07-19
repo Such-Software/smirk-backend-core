@@ -197,13 +197,14 @@ impl TestApp {
         extra_headers: &[(&str, &str)],
         body: Option<Value>,
     ) -> (StatusCode, axum::http::HeaderMap, Value) {
-        let mut builder = Request::builder()
-            .method(method)
-            .uri(uri)
-            .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
-                [127, 0, 0, 1],
-                0,
-            ))));
+        let mut builder =
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                    [127, 0, 0, 1],
+                    0,
+                ))));
         for (k, v) in extra_headers {
             builder = builder.header(*k, *v);
         }

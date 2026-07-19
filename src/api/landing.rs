@@ -104,11 +104,7 @@ pub async fn root(State(state): State<Arc<AppState>>) -> Response {
         return StatusCode::NOT_FOUND.into_response();
     }
     let cfg = state.cfg();
-    let title = cfg
-        .landing
-        .title
-        .as_deref()
-        .unwrap_or("smirk-backend-core");
+    let title = cfg.landing.title.as_deref().unwrap_or("smirk-backend-core");
     let t = html_escape(title);
     let html = format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\

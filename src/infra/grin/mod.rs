@@ -158,9 +158,7 @@ impl GrinOutputInfo {
     /// bogus count. Mirrors [`ViewWalletOutputResult::confirmations`].
     pub fn confirmations(&self, tip_height: u64) -> u64 {
         match self.block_height {
-            Some(h) if h > 0 && h <= tip_height => {
-                tip_height.saturating_sub(h).saturating_add(1)
-            }
+            Some(h) if h > 0 && h <= tip_height => tip_height.saturating_sub(h).saturating_add(1),
             _ => 0,
         }
     }

@@ -138,14 +138,23 @@ async fn register_replays_are_rejected() {
         "keys": [{ "asset": "btc", "public_key": format!("btcpub-{}", &pk[..16]) }],
     });
     let (s1, _) = app
-        .request("POST", "/api/v1/auth/nostr/register", None, Some(body.clone()))
+        .request(
+            "POST",
+            "/api/v1/auth/nostr/register",
+            None,
+            Some(body.clone()),
+        )
         .await;
     assert_eq!(s1, StatusCode::OK);
     // Same nonce again -> consumed -> rejected (single-use replay guard).
     let (s2, _) = app
         .request("POST", "/api/v1/auth/nostr/register", None, Some(body))
         .await;
-    assert_ne!(s2, StatusCode::OK, "a consumed nonce must not register again");
+    assert_ne!(
+        s2,
+        StatusCode::OK,
+        "a consumed nonce must not register again"
+    );
 }
 
 #[tokio::test]

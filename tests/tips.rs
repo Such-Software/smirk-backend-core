@@ -42,7 +42,12 @@ async fn public_tip_draft_create_get_cancel_flow() {
 
     // 1. Create a draft (no funding_txid) -> draft + share_url.
     let (status, body) = app
-        .request("POST", "/api/v1/tips/social", Some(&token), Some(draft_body()))
+        .request(
+            "POST",
+            "/api/v1/tips/social",
+            Some(&token),
+            Some(draft_body()),
+        )
         .await;
     assert_eq!(status, StatusCode::OK, "create: {body}");
     assert_eq!(body["status"], "draft");
@@ -51,7 +56,12 @@ async fn public_tip_draft_create_get_cancel_flow() {
 
     // 2. Public read (UNAUTH) surfaces it and is not yet claimable.
     let (status, pub_body) = app
-        .request("GET", &format!("/api/v1/tips/social/{tip_id}/public"), None, None)
+        .request(
+            "GET",
+            &format!("/api/v1/tips/social/{tip_id}/public"),
+            None,
+            None,
+        )
         .await;
     assert_eq!(status, StatusCode::OK, "get_public: {pub_body}");
     assert_eq!(pub_body["is_public"], true);
@@ -72,14 +82,24 @@ async fn public_tip_draft_create_get_cancel_flow() {
 
     // 4. Cancel the draft (owner) -> {ok:true}.
     let (status, cancel_body) = app
-        .request("POST", &format!("/api/v1/tips/social/{tip_id}/cancel"), Some(&token), None)
+        .request(
+            "POST",
+            &format!("/api/v1/tips/social/{tip_id}/cancel"),
+            Some(&token),
+            None,
+        )
         .await;
     assert_eq!(status, StatusCode::OK, "cancel: {cancel_body}");
     assert_eq!(cancel_body["ok"], true);
 
     // 5. Cancelling again -> 404 (no longer a draft).
     let (status, _) = app
-        .request("POST", &format!("/api/v1/tips/social/{tip_id}/cancel"), Some(&token), None)
+        .request(
+            "POST",
+            &format!("/api/v1/tips/social/{tip_id}/cancel"),
+            Some(&token),
+            None,
+        )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
@@ -89,7 +109,10 @@ async fn public_tip_draft_create_get_cancel_flow() {
         .await;
     assert_eq!(status, StatusCode::OK, "sent: {sent}");
     let tips = sent["tips"].as_array().expect("tips array");
-    let found = tips.iter().find(|t| t["id"] == tip_id).expect("tip in sent list");
+    let found = tips
+        .iter()
+        .find(|t| t["id"] == tip_id)
+        .expect("tip in sent list");
     assert_eq!(found["status"], "cancelled");
     assert_eq!(found["is_public"], true);
 }
@@ -113,7 +136,12 @@ async fn db_create_draft_roundtrips_all_columns() {
         grin_commitment: None,
     };
     // Exercises the full 32-column FromRow decode on RETURNING.
-    let row = app.state.db.create_draft_social_tip(new).await.expect("create draft");
+    let row = app
+        .state
+        .db
+        .create_draft_social_tip(new)
+        .await
+        .expect("create draft");
     assert_eq!(row.status, "draft");
     assert_eq!(row.amount, 100_000);
     assert!(row.is_public);
@@ -136,7 +164,11 @@ async fn targeted_tip_is_rejected() {
             })),
         )
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "targeted must be rejected: {body}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "targeted must be rejected: {body}"
+    );
 }
 
 #[tokio::test]
@@ -147,13 +179,17 @@ async fn create_requires_positive_amount_and_claim_hash() {
     // Non-positive amount.
     let mut b = draft_body();
     b["amount"] = json!(0);
-    let (status, _) = app.request("POST", "/api/v1/tips/social", Some(&token), Some(b)).await;
+    let (status, _) = app
+        .request("POST", "/api/v1/tips/social", Some(&token), Some(b))
+        .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     // Missing claim_key_hash on a public tip.
     let mut b = draft_body();
     b.as_object_mut().unwrap().remove("claim_key_hash");
-    let (status, _) = app.request("POST", "/api/v1/tips/social", Some(&token), Some(b)).await;
+    let (status, _) = app
+        .request("POST", "/api/v1/tips/social", Some(&token), Some(b))
+        .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -166,7 +202,12 @@ async fn tips_disabled_returns_400() {
     };
     let (_uid, token, _r) = app.mint_session().await;
     let (status, _) = app
-        .request("POST", "/api/v1/tips/social", Some(&token), Some(draft_body()))
+        .request(
+            "POST",
+            "/api/v1/tips/social",
+            Some(&token),
+            Some(draft_body()),
+        )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "tips off must 400");
 }
@@ -253,7 +294,10 @@ async fn attach_funding_conflicting_txid_is_validation_error() {
         .attach_funding_to_tip(tip_id, uid, "txid-DIFFERENT")
         .await
         .unwrap_err();
-    assert!(matches!(err, AppError::ValidationError(_)), "expected ValidationError, got {err:?}");
+    assert!(
+        matches!(err, AppError::ValidationError(_)),
+        "expected ValidationError, got {err:?}"
+    );
 
     // Not-owned / unknown tip -> NotFound (404).
     let other = app.create_user().await;
@@ -263,7 +307,10 @@ async fn attach_funding_conflicting_txid_is_validation_error() {
         .attach_funding_to_tip(tip_id, other, "txid-x")
         .await
         .unwrap_err();
-    assert!(matches!(err, AppError::NotFound(_)), "expected NotFound, got {err:?}");
+    assert!(
+        matches!(err, AppError::NotFound(_)),
+        "expected NotFound, got {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -344,7 +391,10 @@ async fn mark_mismatch_transitions_to_funding_mismatch() {
         .mark_tip_funding_verified(tip_id, 10)
         .await
         .expect("verify after mismatch");
-    assert!(verify_after.is_none(), "a funding_mismatch row must not become claimable");
+    assert!(
+        verify_after.is_none(),
+        "a funding_mismatch row must not become claimable"
+    );
 }
 
 #[tokio::test]
@@ -385,7 +435,10 @@ async fn get_tips_pending_confirmation_filters() {
         .get_tips_pending_confirmation("xmr")
         .await
         .expect("xmr pending");
-    assert!(xmr_pending.iter().any(|t| t.id == xmr_id), "funded xmr tip must be returned");
+    assert!(
+        xmr_pending.iter().any(|t| t.id == xmr_id),
+        "funded xmr tip must be returned"
+    );
     assert!(
         !xmr_pending.iter().any(|t| t.id == xmr_draft),
         "unfunded xmr draft must be excluded"
@@ -477,45 +530,96 @@ async fn mark_tip_claiming_double_claim_guard() {
 
     // Fresh claimable tip: first claim locks it into 'claiming'.
     let id = make_pending(&app, sender, "fund-claim-1").await;
-    let first = app.state.db.mark_tip_claiming(id, claimant).await.expect("claim");
+    let first = app
+        .state
+        .db
+        .mark_tip_claiming(id, claimant)
+        .await
+        .expect("claim");
     assert!(first.is_some(), "first claim on a pending tip must succeed");
     assert_eq!(first.unwrap().status, "claiming");
 
     // Re-claim on a 'claiming' public tip is INTENTIONALLY allowed: the claim
     // state is a UX signal, not a lock — the reconciler resolves the on-chain
     // sweep-race winner. (Verbatim audit-T1 retry semantics.)
-    let reclaim = app.state.db.mark_tip_claiming(id, claimant).await.expect("reclaim");
-    assert!(reclaim.is_some(), "re-claim on a claiming public tip is allowed");
+    let reclaim = app
+        .state
+        .db
+        .mark_tip_claiming(id, claimant)
+        .await
+        .expect("reclaim");
+    assert!(
+        reclaim.is_some(),
+        "re-claim on a claiming public tip is allowed"
+    );
 
     // None on funding_mismatch (audit-T1 fund-loss guard).
     let mm = make_draft(&app, sender, "btc", 1_000_000, 0, None).await;
-    app.state.db.attach_funding_to_tip(mm, sender, "fund-mm").await.expect("attach");
-    app.state.db.mark_tip_funding_mismatch(mm, 10).await.expect("mismatch").expect("row");
+    app.state
+        .db
+        .attach_funding_to_tip(mm, sender, "fund-mm")
+        .await
+        .expect("attach");
+    app.state
+        .db
+        .mark_tip_funding_mismatch(mm, 10)
+        .await
+        .expect("mismatch")
+        .expect("row");
     assert!(
-        app.state.db.mark_tip_claiming(mm, claimant).await.expect("claim mm").is_none(),
+        app.state
+            .db
+            .mark_tip_claiming(mm, claimant)
+            .await
+            .expect("claim mm")
+            .is_none(),
         "a funding_mismatch tip must never be claimable"
     );
 
     // None on an unverified (pending_confirmation) tip.
     let pc = make_draft(&app, sender, "btc", 100_000, 0, None).await;
-    app.state.db.attach_funding_to_tip(pc, sender, "fund-pc").await.expect("attach");
+    app.state
+        .db
+        .attach_funding_to_tip(pc, sender, "fund-pc")
+        .await
+        .expect("attach");
     assert!(
-        app.state.db.mark_tip_claiming(pc, claimant).await.expect("claim pc").is_none(),
+        app.state
+            .db
+            .mark_tip_claiming(pc, claimant)
+            .await
+            .expect("claim pc")
+            .is_none(),
         "an unverified tip must not be claimable"
     );
 
     // None on a clawed_back tip.
     let cb = make_pending(&app, sender, "fund-cb").await;
-    app.state.db.clawback_social_tip(cb, sender).await.expect("clawback").expect("row");
+    app.state
+        .db
+        .clawback_social_tip(cb, sender)
+        .await
+        .expect("clawback")
+        .expect("row");
     assert!(
-        app.state.db.mark_tip_claiming(cb, claimant).await.expect("claim cb").is_none(),
+        app.state
+            .db
+            .mark_tip_claiming(cb, claimant)
+            .await
+            .expect("claim cb")
+            .is_none(),
         "a clawed_back tip must not be claimable"
     );
 
     // None on an already-swept (settled) tip.
     let swept = make_claimed(&app, sender, claimant, "fund-swept").await;
     assert!(
-        app.state.db.mark_tip_claiming(swept, claimant).await.expect("claim swept").is_none(),
+        app.state
+            .db
+            .mark_tip_claiming(swept, claimant)
+            .await
+            .expect("claim swept")
+            .is_none(),
         "a settled tip must not be re-claimable"
     );
 }
@@ -531,12 +635,27 @@ async fn confirm_tip_sweep_first_recorder_wins() {
     let id = make_claiming(&app, sender, claimant, "fund-sweep").await;
 
     // First recorder writes txid-A; the row STAYS 'claiming' (record, not settle).
-    let r1 = app.state.db.confirm_tip_sweep(id, claimant, "txid-A").await.expect("record").expect("row");
+    let r1 = app
+        .state
+        .db
+        .confirm_tip_sweep(id, claimant, "txid-A")
+        .await
+        .expect("record")
+        .expect("row");
     assert_eq!(r1.sweep_txid.as_deref(), Some("txid-A"));
-    assert_eq!(r1.status, "claiming", "confirm_tip_sweep records, never settles");
+    assert_eq!(
+        r1.status, "claiming",
+        "confirm_tip_sweep records, never settles"
+    );
 
     // A DIFFERENT txid does not overwrite; fallthrough returns the live row (A).
-    let r2 = app.state.db.confirm_tip_sweep(id, claimant, "txid-B").await.expect("second").expect("live row");
+    let r2 = app
+        .state
+        .db
+        .confirm_tip_sweep(id, claimant, "txid-B")
+        .await
+        .expect("second")
+        .expect("live row");
     assert_eq!(
         r2.sweep_txid.as_deref(),
         Some("txid-A"),
@@ -545,13 +664,24 @@ async fn confirm_tip_sweep_first_recorder_wins() {
     assert_eq!(r2.status, "claiming");
 
     // Same txid again is an idempotent no-op returning A.
-    let r3 = app.state.db.confirm_tip_sweep(id, claimant, "txid-A").await.expect("idem").expect("row");
+    let r3 = app
+        .state
+        .db
+        .confirm_tip_sweep(id, claimant, "txid-A")
+        .await
+        .expect("idem")
+        .expect("row");
     assert_eq!(r3.sweep_txid.as_deref(), Some("txid-A"));
 
     // A never-claimed (pending) tip → None.
     let pending = make_pending(&app, sender, "fund-cs-pending").await;
     assert!(
-        app.state.db.confirm_tip_sweep(pending, claimant, "txid-x").await.expect("cs pending").is_none(),
+        app.state
+            .db
+            .confirm_tip_sweep(pending, claimant, "txid-x")
+            .await
+            .expect("cs pending")
+            .is_none(),
         "confirm-sweep on a non-claiming tip returns None"
     );
 }
@@ -585,7 +715,12 @@ async fn confirm_sweep_onchain_settles_claiming_only() {
 
     // Second settle is a no-op (one-way lock).
     assert!(
-        app.state.db.confirm_sweep_onchain(id, "swp-2", 501, None, None).await.expect("resettle").is_none(),
+        app.state
+            .db
+            .confirm_sweep_onchain(id, "swp-2", 501, None, None)
+            .await
+            .expect("resettle")
+            .is_none(),
         "an already-claimed row cannot be re-settled"
     );
 
@@ -593,11 +728,25 @@ async fn confirm_sweep_onchain_settles_claiming_only() {
     // entry into 'claimed'.
     let pending = make_pending(&app, sender, "fund-settle-pending").await;
     assert!(
-        app.state.db.confirm_sweep_onchain(pending, "swp", 1, None, None).await.expect("settle pending").is_none(),
+        app.state
+            .db
+            .confirm_sweep_onchain(pending, "swp", 1, None, None)
+            .await
+            .expect("settle pending")
+            .is_none(),
         "confirm_sweep_onchain requires status='claiming'"
     );
-    let still = app.state.db.get_social_tip(pending).await.expect("get").expect("row");
-    assert_eq!(still.status, "pending", "a pending tip must not be flipped to claimed");
+    let still = app
+        .state
+        .db
+        .get_social_tip(pending)
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(
+        still.status, "pending",
+        "a pending tip must not be flipped to claimed"
+    );
 }
 
 /// (d) revert_sweep_on_reorg reverts 'claimed' -> 'claiming' ONLY, clearing the
@@ -612,7 +761,13 @@ async fn revert_sweep_on_reorg_only_from_claimed() {
     let claimant = app.create_user().await;
 
     let id = make_claimed(&app, sender, claimant, "fund-reorg").await;
-    let reverted = app.state.db.revert_sweep_on_reorg(id).await.expect("revert").expect("reverted row");
+    let reverted = app
+        .state
+        .db
+        .revert_sweep_on_reorg(id)
+        .await
+        .expect("revert")
+        .expect("reverted row");
     assert_eq!(reverted.status, "claiming");
     assert!(reverted.sweep_confirmed_at.is_none());
     assert_eq!(
@@ -624,14 +779,24 @@ async fn revert_sweep_on_reorg_only_from_claimed() {
 
     // Second revert is a no-op (now 'claiming', not 'claimed').
     assert!(
-        app.state.db.revert_sweep_on_reorg(id).await.expect("re-revert").is_none(),
+        app.state
+            .db
+            .revert_sweep_on_reorg(id)
+            .await
+            .expect("re-revert")
+            .is_none(),
         "revert requires status='claimed'"
     );
 
     // Revert on a plain pending tip → None.
     let pending = make_pending(&app, sender, "fund-reorg-pending").await;
     assert!(
-        app.state.db.revert_sweep_on_reorg(pending).await.expect("revert pending").is_none(),
+        app.state
+            .db
+            .revert_sweep_on_reorg(pending)
+            .await
+            .expect("revert pending")
+            .is_none(),
         "a pending tip cannot be reorg-reverted"
     );
 }
@@ -647,41 +812,105 @@ async fn clawback_status_matrix_and_settled_block() {
 
     // pending → clawable.
     let pending = make_pending(&app, sender, "cb-pending").await;
-    assert!(app.state.db.clawback_social_tip(pending, sender).await.expect("cb").is_some());
+    assert!(app
+        .state
+        .db
+        .clawback_social_tip(pending, sender)
+        .await
+        .expect("cb")
+        .is_some());
 
     // pending_confirmation → clawable.
     let pc = make_draft(&app, sender, "btc", 100_000, 0, None).await;
-    app.state.db.attach_funding_to_tip(pc, sender, "cb-pc").await.expect("attach");
-    assert!(app.state.db.clawback_social_tip(pc, sender).await.expect("cb").is_some());
+    app.state
+        .db
+        .attach_funding_to_tip(pc, sender, "cb-pc")
+        .await
+        .expect("attach");
+    assert!(app
+        .state
+        .db
+        .clawback_social_tip(pc, sender)
+        .await
+        .expect("cb")
+        .is_some());
 
     // claiming → clawable (sender racing a claimer).
     let claiming = make_claiming(&app, sender, claimant, "cb-claiming").await;
-    assert!(app.state.db.clawback_social_tip(claiming, sender).await.expect("cb").is_some());
+    assert!(app
+        .state
+        .db
+        .clawback_social_tip(claiming, sender)
+        .await
+        .expect("cb")
+        .is_some());
 
     // funding_mismatch → clawable.
     let mm = make_draft(&app, sender, "btc", 1_000_000, 0, None).await;
-    app.state.db.attach_funding_to_tip(mm, sender, "cb-mm").await.expect("attach");
-    app.state.db.mark_tip_funding_mismatch(mm, 10).await.expect("mismatch").expect("row");
-    assert!(app.state.db.clawback_social_tip(mm, sender).await.expect("cb").is_some());
+    app.state
+        .db
+        .attach_funding_to_tip(mm, sender, "cb-mm")
+        .await
+        .expect("attach");
+    app.state
+        .db
+        .mark_tip_funding_mismatch(mm, 10)
+        .await
+        .expect("mismatch")
+        .expect("row");
+    assert!(app
+        .state
+        .db
+        .clawback_social_tip(mm, sender)
+        .await
+        .expect("cb")
+        .is_some());
 
     // cancelled (GC'd but still-funded draft) → clawable.
     let cancelled = make_draft(&app, sender, "btc", 100_000, 0, None).await;
-    app.state.db.cancel_draft_social_tip(cancelled, sender).await.expect("cancel").expect("id");
-    assert!(app.state.db.clawback_social_tip(cancelled, sender).await.expect("cb").is_some());
+    app.state
+        .db
+        .cancel_draft_social_tip(cancelled, sender)
+        .await
+        .expect("cancel")
+        .expect("id");
+    assert!(app
+        .state
+        .db
+        .clawback_social_tip(cancelled, sender)
+        .await
+        .expect("cb")
+        .is_some());
 
     // Owner-scoped: a stranger cannot claw back; the real sender can.
     let owned = make_pending(&app, sender, "cb-owner").await;
     let stranger = app.create_user().await;
     assert!(
-        app.state.db.clawback_social_tip(owned, stranger).await.expect("cb stranger").is_none(),
+        app.state
+            .db
+            .clawback_social_tip(owned, stranger)
+            .await
+            .expect("cb stranger")
+            .is_none(),
         "only the sender can claw back"
     );
-    assert!(app.state.db.clawback_social_tip(owned, sender).await.expect("cb owner").is_some());
+    assert!(app
+        .state
+        .db
+        .clawback_social_tip(owned, sender)
+        .await
+        .expect("cb owner")
+        .is_some());
 
     // BLOCKED once the sweep confirmed (sweep_confirmed_at IS NOT NULL).
     let swept = make_claimed(&app, sender, claimant, "cb-swept").await;
     assert!(
-        app.state.db.clawback_social_tip(swept, sender).await.expect("cb swept").is_none(),
+        app.state
+            .db
+            .clawback_social_tip(swept, sender)
+            .await
+            .expect("cb swept")
+            .is_none(),
         "a settled tip must not be clawed back"
     );
 }
@@ -698,14 +927,39 @@ async fn reconciler_poll_queries_select_the_right_rows() {
     let pending = make_pending(&app, sender, "poll-pending").await;
     let claimed = make_claimed(&app, sender, claimant, "poll-claimed").await;
 
-    let awaiting = app.state.db.get_tips_awaiting_sweep_confirmation(1_000_000).await.expect("awaiting");
-    assert!(awaiting.iter().any(|t| t.id == claiming), "a claiming tip awaits sweep confirmation");
-    assert!(!awaiting.iter().any(|t| t.id == pending), "a pending tip does not await sweep confirmation");
-    assert!(!awaiting.iter().any(|t| t.id == claimed), "a settled tip does not await sweep confirmation");
+    let awaiting = app
+        .state
+        .db
+        .get_tips_awaiting_sweep_confirmation(1_000_000)
+        .await
+        .expect("awaiting");
+    assert!(
+        awaiting.iter().any(|t| t.id == claiming),
+        "a claiming tip awaits sweep confirmation"
+    );
+    assert!(
+        !awaiting.iter().any(|t| t.id == pending),
+        "a pending tip does not await sweep confirmation"
+    );
+    assert!(
+        !awaiting.iter().any(|t| t.id == claimed),
+        "a settled tip does not await sweep confirmation"
+    );
 
-    let reorg = app.state.db.get_settled_tips_for_reorg_check(1_000_000).await.expect("reorg");
-    assert!(reorg.iter().any(|t| t.id == claimed), "a settled tip with a height witness is reorg-checked");
-    assert!(!reorg.iter().any(|t| t.id == claiming), "a claiming tip is not reorg-checked");
+    let reorg = app
+        .state
+        .db
+        .get_settled_tips_for_reorg_check(1_000_000)
+        .await
+        .expect("reorg");
+    assert!(
+        reorg.iter().any(|t| t.id == claimed),
+        "a settled tip with a height witness is reorg-checked"
+    );
+    assert!(
+        !reorg.iter().any(|t| t.id == claiming),
+        "a claiming tip is not reorg-checked"
+    );
 }
 
 // ── Stage 5: lifecycle + draft garbage-collection DB tests ────────────────────
@@ -737,13 +991,36 @@ async fn cancel_old_drafts_flips_stale_draft_only() {
     backdate_created_at(&app, stale, "8 days").await;
     let fresh = make_draft(&app, uid, "btc", 100_000, 0, None).await;
 
-    let cancelled = app.state.db.cancel_old_drafts().await.expect("cancel_old_drafts");
-    assert!(cancelled.iter().any(|r| r.id == stale), "a > 7d draft must be cancelled");
-    assert!(!cancelled.iter().any(|r| r.id == fresh), "a fresh draft must NOT be cancelled");
+    let cancelled = app
+        .state
+        .db
+        .cancel_old_drafts()
+        .await
+        .expect("cancel_old_drafts");
+    assert!(
+        cancelled.iter().any(|r| r.id == stale),
+        "a > 7d draft must be cancelled"
+    );
+    assert!(
+        !cancelled.iter().any(|r| r.id == fresh),
+        "a fresh draft must NOT be cancelled"
+    );
 
-    let stale_row = app.state.db.get_social_tip(stale).await.expect("get").expect("row");
+    let stale_row = app
+        .state
+        .db
+        .get_social_tip(stale)
+        .await
+        .expect("get")
+        .expect("row");
     assert_eq!(stale_row.status, "cancelled");
-    let fresh_row = app.state.db.get_social_tip(fresh).await.expect("get").expect("row");
+    let fresh_row = app
+        .state
+        .db
+        .get_social_tip(fresh)
+        .await
+        .expect("get")
+        .expect("row");
     assert_eq!(fresh_row.status, "draft", "a fresh draft stays draft");
 }
 
@@ -755,11 +1032,19 @@ async fn cancel_stuck_pending_confirmation_flips_stale_only() {
     let uid = app.create_user().await;
 
     let stale = make_draft(&app, uid, "btc", 100_000, 0, None).await;
-    app.state.db.attach_funding_to_tip(stale, uid, "gc-stale-pc").await.expect("attach");
+    app.state
+        .db
+        .attach_funding_to_tip(stale, uid, "gc-stale-pc")
+        .await
+        .expect("attach");
     backdate_created_at(&app, stale, "8 days").await;
 
     let fresh = make_draft(&app, uid, "btc", 100_000, 0, None).await;
-    app.state.db.attach_funding_to_tip(fresh, uid, "gc-fresh-pc").await.expect("attach");
+    app.state
+        .db
+        .attach_funding_to_tip(fresh, uid, "gc-fresh-pc")
+        .await
+        .expect("attach");
 
     let cancelled = app
         .state
@@ -776,9 +1061,21 @@ async fn cancel_stuck_pending_confirmation_flips_stale_only() {
         "a fresh pending_confirmation must NOT be cancelled"
     );
 
-    let stale_row = app.state.db.get_social_tip(stale).await.expect("get").expect("row");
+    let stale_row = app
+        .state
+        .db
+        .get_social_tip(stale)
+        .await
+        .expect("get")
+        .expect("row");
     assert_eq!(stale_row.status, "cancelled");
-    let fresh_row = app.state.db.get_social_tip(fresh).await.expect("get").expect("row");
+    let fresh_row = app
+        .state
+        .db
+        .get_social_tip(fresh)
+        .await
+        .expect("get")
+        .expect("row");
     assert_eq!(fresh_row.status, "pending_confirmation");
 }
 
@@ -798,14 +1095,37 @@ async fn log_stuck_claiming_returns_backdated_and_mutates_nothing() {
         .expect("backdate claimed_at");
     let fresh = make_claiming(&app, sender, claimant, "gc-fresh-claiming").await;
 
-    let stuck = app.state.db.log_stuck_claiming().await.expect("log_stuck_claiming");
-    assert!(stuck.iter().any(|r| r.id == stale), "a > 15m claiming row must be surfaced");
-    assert!(!stuck.iter().any(|r| r.id == fresh), "a fresh claiming row must NOT be surfaced");
+    let stuck = app
+        .state
+        .db
+        .log_stuck_claiming()
+        .await
+        .expect("log_stuck_claiming");
+    assert!(
+        stuck.iter().any(|r| r.id == stale),
+        "a > 15m claiming row must be surfaced"
+    );
+    assert!(
+        !stuck.iter().any(|r| r.id == fresh),
+        "a fresh claiming row must NOT be surfaced"
+    );
 
     // READ-ONLY: the surfaced row is untouched — still 'claiming', no sweep confirm.
-    let row = app.state.db.get_social_tip(stale).await.expect("get").expect("row");
-    assert_eq!(row.status, "claiming", "log_stuck_claiming must not mutate status");
-    assert!(row.sweep_confirmed_at.is_none(), "log_stuck_claiming must not settle the sweep");
+    let row = app
+        .state
+        .db
+        .get_social_tip(stale)
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(
+        row.status, "claiming",
+        "log_stuck_claiming must not mutate status"
+    );
+    assert!(
+        row.sweep_confirmed_at.is_none(),
+        "log_stuck_claiming must not settle the sweep"
+    );
 }
 
 // ── Grin (voucher asset) tests ────────────────────────────────────────────────
@@ -865,7 +1185,13 @@ async fn grin_public_tip_create_returns_draft_and_share_url() {
     // Migration applied: the grin_commitment column round-trips, tip_address
     // mirrors it, and the grin funding threshold is 10.
     let uuid = tip_id.parse::<uuid::Uuid>().unwrap();
-    let row = app.state.db.get_social_tip(uuid).await.expect("get").expect("row");
+    let row = app
+        .state
+        .db
+        .get_social_tip(uuid)
+        .await
+        .expect("get")
+        .expect("row");
     assert_eq!(row.asset, "grin");
     assert_eq!(row.grin_commitment.as_deref(), Some(commit.as_str()));
     assert_eq!(row.tip_address.as_deref(), Some(commit.as_str()));
@@ -874,7 +1200,9 @@ async fn grin_public_tip_create_returns_draft_and_share_url() {
 
 #[tokio::test]
 async fn grin_create_falls_back_to_tip_address_for_commitment() {
-    let Some(app) = grin_tips_app().await else { return };
+    let Some(app) = grin_tips_app().await else {
+        return;
+    };
     let (_uid, token, _refresh) = app.mint_session().await;
     let commit = grin_commit();
 
@@ -890,22 +1218,38 @@ async fn grin_create_falls_back_to_tip_address_for_commitment() {
     let (status, resp) = app
         .request("POST", "/api/v1/tips/social", Some(&token), Some(body))
         .await;
-    assert_eq!(status, StatusCode::OK, "create grin (no commit field): {resp}");
-    let uuid = resp["tip_id"].as_str().unwrap().parse::<uuid::Uuid>().unwrap();
-    let row = app.state.db.get_social_tip(uuid).await.expect("get").expect("row");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "create grin (no commit field): {resp}"
+    );
+    let uuid = resp["tip_id"]
+        .as_str()
+        .unwrap()
+        .parse::<uuid::Uuid>()
+        .unwrap();
+    let row = app
+        .state
+        .db
+        .get_social_tip(uuid)
+        .await
+        .expect("get")
+        .expect("row");
     assert_eq!(row.grin_commitment.as_deref(), Some(commit.as_str()));
 }
 
 #[tokio::test]
 async fn grin_create_rejects_junk_commitment() {
-    let Some(app) = grin_tips_app().await else { return };
+    let Some(app) = grin_tips_app().await else {
+        return;
+    };
     let (_uid, token, _refresh) = app.mint_session().await;
 
     // tip_address that isn't a 66-hex commitment -> clean 400.
     for bad in [
-        "deadbeef".to_string(),               // too short
-        "z".repeat(66),                       // right length, not hex
-        format!("09{}", "a1".repeat(33)),     // 68 chars, too long
+        "deadbeef".to_string(),           // too short
+        "z".repeat(66),                   // right length, not hex
+        format!("09{}", "a1".repeat(33)), // 68 chars, too long
     ] {
         let body = json!({
             "asset": "grin",
@@ -917,7 +1261,11 @@ async fn grin_create_rejects_junk_commitment() {
         let (status, resp) = app
             .request("POST", "/api/v1/tips/social", Some(&token), Some(body))
             .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "junk grin address must 400: {resp}");
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "junk grin address must 400: {resp}"
+        );
     }
 
     // A valid tip_address but a junk explicit grin_commitment is also rejected
@@ -933,7 +1281,11 @@ async fn grin_create_rejects_junk_commitment() {
     let (status, resp) = app
         .request("POST", "/api/v1/tips/social", Some(&token), Some(body))
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "junk grin_commitment must 400: {resp}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "junk grin_commitment must 400: {resp}"
+    );
 }
 
 #[tokio::test]
@@ -945,7 +1297,8 @@ async fn grin_create_rejected_when_chain_disabled() {
         c.features.chains.grin = false;
         c.tip_share_base = Some("https://tips.example".into());
     })
-    .await else {
+    .await
+    else {
         return;
     };
     let (_uid, token, _refresh) = app.mint_session().await;
@@ -961,7 +1314,11 @@ async fn grin_create_rejected_when_chain_disabled() {
     let (status, resp) = app
         .request("POST", "/api/v1/tips/social", Some(&token), Some(body))
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "grin disabled must 400: {resp}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "grin disabled must 400: {resp}"
+    );
 }
 
 /// The grin voucher flows through the SAME draft -> attach-funding -> claiming
@@ -971,7 +1328,9 @@ async fn grin_create_rejected_when_chain_disabled() {
 /// the grin worker arms depend on.
 #[tokio::test]
 async fn grin_tip_db_lifecycle_columns() {
-    let Some(app) = grin_tips_app().await else { return };
+    let Some(app) = grin_tips_app().await else {
+        return;
+    };
     let uid = app.create_user().await;
     let commit = grin_commit();
 
@@ -988,7 +1347,13 @@ async fn grin_tip_db_lifecycle_columns() {
         confirmations_required: 10,
         grin_commitment: Some(&commit),
     };
-    let tip_id = app.state.db.create_draft_social_tip(new).await.expect("create draft").id;
+    let tip_id = app
+        .state
+        .db
+        .create_draft_social_tip(new)
+        .await
+        .expect("create draft")
+        .id;
 
     // attach-funding with the client's bookkeeping id (grin has no real txid).
     let r = app
@@ -1001,7 +1366,11 @@ async fn grin_tip_db_lifecycle_columns() {
     assert_eq!(r.grin_commitment.as_deref(), Some(commit.as_str()));
 
     // Simulate the funding worker: 10 confs reached + amount auto-verified.
-    app.state.db.update_tip_confirmations(tip_id, 10).await.expect("confs");
+    app.state
+        .db
+        .update_tip_confirmations(tip_id, 10)
+        .await
+        .expect("confs");
     let verified = app
         .state
         .db
@@ -1014,7 +1383,12 @@ async fn grin_tip_db_lifecycle_columns() {
 
     // Claim, then record the sweep's kernel excess as sweep_txid.
     let claimant = app.create_user().await;
-    app.state.db.mark_tip_claiming(tip_id, claimant).await.expect("claim").expect("row");
+    app.state
+        .db
+        .mark_tip_claiming(tip_id, claimant)
+        .await
+        .expect("claim")
+        .expect("row");
     let excess = format!("08{}", "bc".repeat(32)); // kernel excess (66 hex)
     let swept = app
         .state

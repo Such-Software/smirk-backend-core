@@ -28,13 +28,7 @@ fn canonical_json(v: &Value) -> String {
             keys.sort();
             let inner: Vec<String> = keys
                 .into_iter()
-                .map(|k| {
-                    format!(
-                        "{}:{}",
-                        Value::String(k.clone()),
-                        canonical_json(&map[k])
-                    )
-                })
+                .map(|k| format!("{}:{}", Value::String(k.clone()), canonical_json(&map[k])))
                 .collect();
             format!("{{{}}}", inner.join(","))
         }

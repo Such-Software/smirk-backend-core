@@ -554,10 +554,9 @@ mod tests {
     #[test]
     fn overlay_parses_sparse_json_ignoring_absent_and_unknown_sections() {
         // Absent sections stay None; unknown sections are ignored (forward-compat).
-        let ov: SettingsOverlay = serde_json::from_str(
-            r#"{"restore":{"policy":"unlimited"},"future_section":{"x":1}}"#,
-        )
-        .expect("sparse overlay parses");
+        let ov: SettingsOverlay =
+            serde_json::from_str(r#"{"restore":{"policy":"unlimited"},"future_section":{"x":1}}"#)
+                .expect("sparse overlay parses");
         assert!(ov.landing.is_none());
         assert!(ov.retention.is_none());
         assert_eq!(ov.restore.unwrap().policy.as_deref(), Some("unlimited"));
@@ -565,7 +564,10 @@ mod tests {
 
     #[test]
     fn runtime_class_classifies_known_and_defaults_restart_for_unknown() {
-        assert_eq!(runtime_class("landing", "enabled"), RuntimeClass::RuntimeSafe);
+        assert_eq!(
+            runtime_class("landing", "enabled"),
+            RuntimeClass::RuntimeSafe
+        );
         assert_eq!(
             runtime_class("restore", "max_depth_days"),
             RuntimeClass::RuntimeSafe
@@ -579,7 +581,10 @@ mod tests {
             runtime_class("console", "restart_apply_mode"),
             RuntimeClass::RuntimeSafe
         );
-        assert_eq!(runtime_class("mystery", "field"), RuntimeClass::RestartRequired);
+        assert_eq!(
+            runtime_class("mystery", "field"),
+            RuntimeClass::RestartRequired
+        );
     }
 
     #[test]
@@ -598,6 +603,8 @@ mod tests {
         for (section, field) in EDITABLE_FIELDS {
             let _ = runtime_class(section, field); // no panic / all covered
         }
-        assert!(EDITABLE_FIELDS.iter().any(|(s, f)| *s == "console" && *f == "restart_apply_mode"));
+        assert!(EDITABLE_FIELDS
+            .iter()
+            .any(|(s, f)| *s == "console" && *f == "restart_apply_mode"));
     }
 }

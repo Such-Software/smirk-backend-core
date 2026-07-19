@@ -838,15 +838,18 @@ pub async fn admin_config_put(
     let mut merged_json =
         serde_json::to_value(&persisted).map_err(|e| AppError::Internal(e.to_string()))?;
     json_merge_skip_null(&mut merged_json, &patch_json);
-    let merged: crate::config_overlay::SettingsOverlay = serde_json::from_value(merged_json.clone())
-        .map_err(|e| AppError::ValidationError(format!("bad settings: {e}")))?;
+    let merged: crate::config_overlay::SettingsOverlay =
+        serde_json::from_value(merged_json.clone())
+            .map_err(|e| AppError::ValidationError(format!("bad settings: {e}")))?;
     let candidate = state.config_base.apply_overlay(&merged)?; // ValidationError -> 400
 
     // Classify the CHANGED fields: which sections changed + does any need a restart?
     let mut any_restart = false;
     let mut changed_sections: Vec<String> = Vec::new();
     for (section, fields) in &patch_obj {
-        let Some(fields) = fields.as_object() else { continue };
+        let Some(fields) = fields.as_object() else {
+            continue;
+        };
         let touched: Vec<&String> = fields
             .iter()
             .filter(|(_, v)| !v.is_null())
@@ -907,7 +910,9 @@ pub async fn admin_config_put(
             let shutdown = state.shutdown.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-                tracing::info!("config auto-apply: self-restart to apply a restart-required change");
+                tracing::info!(
+                    "config auto-apply: self-restart to apply a restart-required change"
+                );
                 shutdown.notify_one();
             });
         }
@@ -933,10 +938,7 @@ fn json_merge_skip_null(base: &mut serde_json::Value, patch: &serde_json::Value)
                 if pv.is_null() {
                     continue;
                 }
-                json_merge_skip_null(
-                    b.entry(k.clone()).or_insert(serde_json::Value::Null),
-                    pv,
-                );
+                json_merge_skip_null(b.entry(k.clone()).or_insert(serde_json::Value::Null), pv);
             }
         }
         (b, p) => *b = p.clone(),
@@ -1076,7 +1078,11 @@ pub async fn admin_asset(Path(path): Path<String>) -> Response {
             } else {
                 "application/octet-stream"
             };
-            ([(axum::http::header::CONTENT_TYPE, mime)], f.data.into_owned()).into_response()
+            (
+                [(axum::http::header::CONTENT_TYPE, mime)],
+                f.data.into_owned(),
+            )
+                .into_response()
         }
         None => StatusCode::NOT_FOUND.into_response(),
     }
@@ -1097,7 +1103,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/admin/keys/:id", delete(admin_keys_revoke))
         .route("/admin/keys/:id/rotate", post(admin_keys_rotate))
         .route("/admin/config", get(admin_config_get).put(admin_config_put))
-        .route("/admin/invites", post(admin_invites_mint).get(admin_invites_list))
+        .route(
+            "/admin/invites",
+            post(admin_invites_mint).get(admin_invites_list),
+        )
 }
 
 #[cfg(test)]
@@ -1111,9 +1120,15 @@ mod tests {
     fn admin_console_is_embedded() {
         let index = AdminAssets::get("index.html").expect("admin-ui/dist/index.html embedded");
         let html = std::str::from_utf8(&index.data).expect("index.html is utf-8");
-        assert!(html.contains("Smirk Operator Console"), "console title missing");
+        assert!(
+            html.contains("Smirk Operator Console"),
+            "console title missing"
+        );
         // Vite rewrites asset URLs to the /admin/ base; the served route matches.
-        assert!(html.contains("/admin/assets/"), "asset base not rewritten to /admin/");
+        assert!(
+            html.contains("/admin/assets/"),
+            "asset base not rewritten to /admin/"
+        );
         assert!(
             AdminAssets::iter().any(|p| p.starts_with("assets/")),
             "no built JS/CSS assets embedded",
@@ -1145,8 +1160,12 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), axum::http::StatusCode::OK);
         assert_eq!(res.headers()["content-type"], "text/html; charset=utf-8");
-        let body = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
-        assert!(std::str::from_utf8(&body).unwrap().contains("Smirk Operator Console"));
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert!(std::str::from_utf8(&body)
+            .unwrap()
+            .contains("Smirk Operator Console"));
 
         // GET /admin/assets/<real built asset> -> served with a sane content-type.
         let asset = AdminAssets::iter()

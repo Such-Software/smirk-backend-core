@@ -133,9 +133,17 @@ fn parse_asset(asset: &str) -> Result<AssetType, AppError> {
 
 /// Parse the wire key list into the `(AssetType, public_key, public_spend_key)`
 /// tuples the atomic-registration DB path binds directly. A bad asset is a 400.
-fn parse_keys(keys: &[AssetPublicKey]) -> Result<Vec<(AssetType, String, Option<String>)>, AppError> {
+fn parse_keys(
+    keys: &[AssetPublicKey],
+) -> Result<Vec<(AssetType, String, Option<String>)>, AppError> {
     keys.iter()
-        .map(|k| Ok((parse_asset(&k.asset)?, k.public_key.clone(), k.public_spend_key.clone())))
+        .map(|k| {
+            Ok((
+                parse_asset(&k.asset)?,
+                k.public_key.clone(),
+                k.public_spend_key.clone(),
+            ))
+        })
         .collect()
 }
 
@@ -178,14 +186,10 @@ fn pow_applies(state: &AppState, pubkey_hash_lc: &str) -> bool {
 /// request Host. Fail closed when unset (Nostr identity is disabled).
 fn nip98_url(state: &AppState, path: &str) -> Result<String, AppError> {
     let cfg = state.cfg();
-    let base = cfg
-        .identity
-        .public_api_url
-        .as_deref()
-        .ok_or_else(|| {
-            warn!("Nostr endpoint reached but PUBLIC_API_URL is unset; refusing");
-            AppError::AuthError("Nostr authentication is not enabled".into())
-        })?;
+    let base = cfg.identity.public_api_url.as_deref().ok_or_else(|| {
+        warn!("Nostr endpoint reached but PUBLIC_API_URL is unset; refusing");
+        AppError::AuthError("Nostr authentication is not enabled".into())
+    })?;
     Ok(format!("{}{}", base.trim_end_matches('/'), path))
 }
 
@@ -540,7 +544,10 @@ pub async fn extension_register(
             .db
             .create_user_consuming_gates(
                 gates.invite_code_hash.as_deref(),
-                gates.payment.as_ref().map(|(id, pkh)| (id.as_str(), pkh.as_str())),
+                gates
+                    .payment
+                    .as_ref()
+                    .map(|(id, pkh)| (id.as_str(), pkh.as_str())),
                 NewUser {
                     username: req.username.clone(),
                     pubkey_hash: Some(pubkey_hash.clone()),
@@ -699,9 +706,14 @@ struct GatedRegistration {
 /// Require an invite code and return its hash, erroring if the gate needs one but
 /// none was supplied (the presence check + literal the old `enforce_invite` used).
 fn require_invite_hash(invite_code: Option<&str>) -> Result<String, AppError> {
-    let code = invite_code.map(str::trim).filter(|c| !c.is_empty()).ok_or_else(|| {
-        AppError::ValidationError("An invite code is required to register on this instance.".into())
-    })?;
+    let code = invite_code
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .ok_or_else(|| {
+            AppError::ValidationError(
+                "An invite code is required to register on this instance.".into(),
+            )
+        })?;
     Ok(crate::core::invite::hash_invite_code(code))
 }
 
@@ -729,7 +741,10 @@ async fn plan_gate_consume(
         has_invite,
         has_payment,
     ) {
-        GatePlan::Open => Ok(GatedRegistration { invite_code_hash: None, payment: None }),
+        GatePlan::Open => Ok(GatedRegistration {
+            invite_code_hash: None,
+            payment: None,
+        }),
         GatePlan::All => {
             let invite_code_hash = if state.cfg().registration.require_invite {
                 Some(require_invite_hash(invite_code)?)
@@ -1711,7 +1726,10 @@ pub async fn nostr_register(
             .db
             .create_user_consuming_gates(
                 gates.invite_code_hash.as_deref(),
-                gates.payment.as_ref().map(|(id, pkh)| (id.as_str(), pkh.as_str())),
+                gates
+                    .payment
+                    .as_ref()
+                    .map(|(id, pkh)| (id.as_str(), pkh.as_str())),
                 NewUser {
                     username: req.username.clone(),
                     pubkey_hash: None,
@@ -1771,7 +1789,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/auth/logout", post(logout))
         .route("/auth/me", get(get_me))
         .route("/auth/nostr", post(nostr_login))
-        .route("/auth/nostr/register-challenge", get(nostr_register_challenge))
+        .route(
+            "/auth/nostr/register-challenge",
+            get(nostr_register_challenge),
+        )
         .route("/auth/nostr/register", post(nostr_register))
         .route("/auth/nostr/link-challenge", get(nostr_link_challenge))
         .route("/auth/nostr/link", post(nostr_link))
@@ -1832,7 +1853,10 @@ mod tests {
         #[test]
         fn any_mode_single_gate_is_just_that_gate() {
             assert_eq!(plan_gates(Any, true, false, false, false), GatePlan::Invite);
-            assert_eq!(plan_gates(Any, false, true, false, false), GatePlan::Payment);
+            assert_eq!(
+                plan_gates(Any, false, true, false, false),
+                GatePlan::Payment
+            );
         }
 
         #[test]

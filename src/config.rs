@@ -43,7 +43,10 @@ fn looks_placeholder(s: &str) -> bool {
 /// never leaves the host (e.g. a payment processor reached over an SSH tunnel or
 /// a local reverse proxy), so the https requirement is relaxed for it.
 fn is_loopback_url(s: &str) -> bool {
-    match url::Url::parse(s).ok().and_then(|u| u.host().map(|h| h.to_owned())) {
+    match url::Url::parse(s)
+        .ok()
+        .and_then(|u| u.host().map(|h| h.to_owned()))
+    {
         Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
         Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
         Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
@@ -1052,7 +1055,10 @@ impl Config {
         // booting a feed that can never populate (which would still advertise
         // prices:true and silently serve nothing).
         if self.features.prices {
-            if !matches!(self.features.prices_provider.as_str(), "coingecko" | "kraken") {
+            if !matches!(
+                self.features.prices_provider.as_str(),
+                "coingecko" | "kraken"
+            ) {
                 return Err(cfg_err(format!(
                     "PRICES_PROVIDER {:?} is not supported; supported: coingecko, kraken",
                     self.features.prices_provider
@@ -1300,7 +1306,8 @@ impl Config {
             if p.provider_url.trim().is_empty() {
                 return Err(cfg_err("PREMIUM_ENABLED needs PAYMENT_PROVIDER_URL"));
             }
-            if prod && !p.provider_url.starts_with("https://") && !is_loopback_url(&p.provider_url) {
+            if prod && !p.provider_url.starts_with("https://") && !is_loopback_url(&p.provider_url)
+            {
                 return Err(cfg_err(
                     "PAYMENT_PROVIDER_URL must be https:// in production (loopback exempt)",
                 ));
@@ -1606,11 +1613,12 @@ mod tests {
     #[test]
     fn overlay_toggles_registration_gates() {
         use crate::config_overlay::SettingsOverlay;
-        let ov: SettingsOverlay = serde_json::from_str(
-            r#"{"registration":{"require_invite":true,"gate_mode":"any"}}"#,
-        )
-        .unwrap();
-        let applied = valid().apply_overlay(&ov).expect("valid registration overlay applies");
+        let ov: SettingsOverlay =
+            serde_json::from_str(r#"{"registration":{"require_invite":true,"gate_mode":"any"}}"#)
+                .unwrap();
+        let applied = valid()
+            .apply_overlay(&ov)
+            .expect("valid registration overlay applies");
         assert!(applied.registration.require_invite);
         assert_eq!(applied.registration.gate_mode, GateMode::Any);
     }
@@ -1697,7 +1705,10 @@ mod tests {
         c.features.tips = true;
         c.features.chains.btc = true;
         c.tip_share_base = None;
-        assert!(c.validate().is_err(), "tips on without a share base must fail");
+        assert!(
+            c.validate().is_err(),
+            "tips on without a share base must fail"
+        );
     }
 
     #[test]
