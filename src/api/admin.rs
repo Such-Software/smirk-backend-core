@@ -760,6 +760,26 @@ pub struct AdminConfigResponse {
     restart_pending: bool,
 }
 
+/// `restart_pending`: the persisted overlay, applied to the boot base, differs from
+/// the currently-RUNNING effective config in at least one field — i.e. a
+/// restart-required change was saved but has not been applied by a restart yet.
+/// Shared by GET and PUT so both report the identical signal. A persisted overlay
+/// that no longer validates is treated as not-pending (the running config is the
+/// authority; GET/PUT surface the validation error separately).
+fn overlay_restart_pending(
+    config_base: &crate::config::Config,
+    persisted: &crate::config_overlay::SettingsOverlay,
+    running: &crate::config::Config,
+) -> bool {
+    match config_base.apply_overlay(persisted) {
+        Ok(p) => {
+            serde_json::to_value(p.editable_overlay()).ok()
+                != serde_json::to_value(running.editable_overlay()).ok()
+        }
+        Err(_) => false,
+    }
+}
+
 #[instrument(skip(state, headers))]
 pub async fn admin_config_get(
     State(state): State<Arc<AppState>>,
@@ -770,17 +790,11 @@ pub async fn admin_config_get(
 
     let overlay = state.db.load_settings_overlay(&secret).await?;
     let versions = state.db.settings_versions().await?;
-    let effective = state.cfg().editable_overlay();
+    let running = state.cfg();
+    let effective = running.editable_overlay();
 
-    // restart_pending: the persisted overlay's effective view differs from the RUNNING
-    // effective view (a restart-required field was saved but not yet applied).
-    let restart_pending = match state.config_base.apply_overlay(&overlay) {
-        Ok(persisted) => {
-            serde_json::to_value(persisted.editable_overlay()).ok()
-                != serde_json::to_value(&effective).ok()
-        }
-        Err(_) => false,
-    };
+    // A restart-required field was saved but not yet applied (see the shared helper).
+    let restart_pending = overlay_restart_pending(&state.config_base, &overlay, &running);
 
     let runtime_class = crate::config_overlay::EDITABLE_FIELDS
         .iter()
@@ -841,7 +855,9 @@ pub async fn admin_config_put(
     let merged: crate::config_overlay::SettingsOverlay =
         serde_json::from_value(merged_json.clone())
             .map_err(|e| AppError::ValidationError(format!("bad settings: {e}")))?;
-    let candidate = state.config_base.apply_overlay(&merged)?; // ValidationError -> 400
+    // Validate the FULL merged overlay with the same rules boot uses; a bad edit is a
+    // 400 and nothing persists. (The hot-swap below re-validates the narrower change.)
+    state.config_base.apply_overlay(&merged)?; // ValidationError -> 400
 
     // Classify the CHANGED fields: which sections changed + does any need a restart?
     let mut any_restart = false;
@@ -921,10 +937,25 @@ pub async fn admin_config_put(
             restart_pending: true,
         }))
     } else {
-        state.config.store(std::sync::Arc::new(candidate));
+        // Hot-swap ONLY the runtime-safe patch onto the currently-RUNNING config.
+        // Rebuilding from the full persisted overlay (the old behavior) would drag a
+        // restart-required section persisted by an EARLIER PUT into the live config
+        // while the boot-built clients still run the old value — the exact desync
+        // RuntimeClass exists to prevent. Every field in this patch is runtime-safe
+        // (any_restart == false), so applying it to the running config is sound and
+        // re-validates the change.
+        let running = state.cfg();
+        let hot = running
+            .apply_overlay(&req.patch)
+            .map_err(|e| AppError::Internal(format!("hot-swap re-validate failed: {e}")))?;
+        drop(running);
+        // A restart-required change from an EARLIER PUT may still be pending; report it
+        // honestly rather than clearing the signal just because THIS edit was live.
+        let restart_pending = overlay_restart_pending(&state.config_base, &merged, &hot);
+        state.config.store(std::sync::Arc::new(hot));
         Ok(Json(PutConfigResponse {
             applied: "runtime".into(),
-            restart_pending: false,
+            restart_pending,
         }))
     }
 }

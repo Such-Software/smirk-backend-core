@@ -1624,6 +1624,43 @@ mod tests {
     }
 
     #[test]
+    fn runtime_safe_put_does_not_drag_pending_restart_required_change_live() {
+        // Reproduces the hot-swap desync: an earlier PUT persists a restart-required
+        // change (chain toggle) that is NOT yet applied to the running config; a later
+        // runtime-safe PUT must hot-swap ONLY its own change onto the RUNNING config,
+        // never rebuild from the full persisted overlay (which would drag the pending
+        // restart-required change live while boot-built clients still run the old one).
+        use crate::config_overlay::SettingsOverlay;
+        let base = valid();
+        assert!(!base.features.chains.btc, "precondition: btc off at boot");
+        let running = base.clone(); // boot state; the restart-required change is NOT here
+
+        // The FIX: hot-swap applies only the runtime-safe patch to the running config.
+        let safe_patch: SettingsOverlay =
+            serde_json::from_str(r#"{"landing":{"title":"hello"}}"#).unwrap();
+        let hot = running.apply_overlay(&safe_patch).unwrap();
+        assert!(
+            !hot.features.chains.btc,
+            "restart-required chain toggle must NOT leak into the runtime-safe hot-swap"
+        );
+        assert_eq!(
+            hot.landing.title.as_deref(),
+            Some("hello"),
+            "runtime-safe change applies"
+        );
+
+        // Regression guard: the OLD path (base + full persisted overlay) WOULD drag it.
+        let buggy_merged: SettingsOverlay =
+            serde_json::from_str(r#"{"features":{"chain_btc":true},"landing":{"title":"hello"}}"#)
+                .unwrap();
+        let buggy = base.apply_overlay(&buggy_merged).unwrap();
+        assert!(
+            buggy.features.chains.btc,
+            "sanity: the old rebuild-from-full-overlay path drags the pending change"
+        );
+    }
+
+    #[test]
     fn overlay_enabling_pow_without_hmac_key_is_rejected() {
         // Fail-closed: turning the PoW gate on via the console with no HMAC key
         // (a secret that stays in env) must be rejected at PUT, not boot a disarmed

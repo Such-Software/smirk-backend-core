@@ -73,11 +73,13 @@ pub struct ConsoleOverlay {
     pub restart_apply_mode: Option<String>,
 }
 
-/// Registration gating POLICY knobs (read per-request → runtime-safe). The
-/// processor WIRING (provider, provider_url, store_id) and the SECRET api_key stay
-/// in env by design: they pair with the secret and are set-once infra, so they are
-/// deliberately absent here. Toggling `require_payment` on with incomplete wiring
-/// is rejected by `Config::validate` at PUT time (fail-closed).
+/// Registration gating POLICY knobs. Most are read per-request → runtime-safe; the
+/// exception is `require_payment`, which gates the boot-built payment client and is
+/// therefore restart-required (see `runtime_class`). The processor WIRING (provider,
+/// provider_url, store_id) and the SECRET api_key stay in env by design: they pair
+/// with the secret and are set-once infra, so they are deliberately absent here.
+/// Toggling `require_payment` on with incomplete wiring is rejected by
+/// `Config::validate` at PUT time (fail-closed).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RegistrationOverlay {
@@ -174,9 +176,14 @@ pub fn runtime_class(section: &str, field: &str) -> RuntimeClass {
         ("retention", _) => RuntimeSafe,
         ("restore", _) => RuntimeSafe,
         ("console", _) => RuntimeSafe,
-        // Registration gates + PoW are read via `state.cfg()` on the registration
-        // path (auth.rs / capabilities.rs), so an overlay change lands on the next
-        // request — hot-swappable.
+        // require_payment gates the BOOT-built payment client (main.rs: the provider is
+        // None unless require_payment || premium.enabled at boot), so hot-enabling it
+        // would 500 every registration until restart — restart-required, like premium.
+        ("registration", "require_payment") => RestartRequired,
+        // The other registration gates + PoW are read via `state.cfg()` on the
+        // registration path (auth.rs / capabilities.rs), so an overlay change lands on
+        // the next request — hot-swappable. (payment_amount/currency/etc. are read per
+        // invoice; they only matter once the boot-built client exists.)
         ("registration", _) => RuntimeSafe,
         ("pow", _) => RuntimeSafe,
         // Feature flags / chain enablement / relay / premium all gate boot-built
@@ -579,6 +586,16 @@ mod tests {
         );
         assert_eq!(
             runtime_class("console", "restart_apply_mode"),
+            RuntimeClass::RuntimeSafe
+        );
+        // require_payment gates the boot-built payment client -> restart-required,
+        // while its sibling registration gates hot-swap.
+        assert_eq!(
+            runtime_class("registration", "require_payment"),
+            RuntimeClass::RestartRequired
+        );
+        assert_eq!(
+            runtime_class("registration", "require_invite"),
             RuntimeClass::RuntimeSafe
         );
         assert_eq!(
