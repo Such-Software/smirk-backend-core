@@ -11,6 +11,10 @@
 !.env.example
 *.key
 *.pem
+# Bare-hex secret files (e.g. `smirk-admin create-admin-wallet --out admin-key.hex`)
+# so an operator running inside the checkout cannot commit the raw admin key.
+*.hex
+admin-key*
 *.p12
 secrets/
 secret_store/
