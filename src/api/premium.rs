@@ -52,7 +52,7 @@ pub struct StatusResp {
 
 /// Reject when the premium tier is not enabled on this instance.
 fn ensure_enabled(state: &AppState) -> Result<(), AppError> {
-    if state.config.premium.enabled {
+    if state.cfg().premium.enabled {
         Ok(())
     } else {
         Err(AppError::ValidationError(
@@ -83,8 +83,8 @@ pub async fn invoice(
     let user_id = extract_user_id_from_token(&state, &headers).await?;
     ensure_enabled(&state)?;
 
-    let plan = state
-        .config
+    let cfg = state.cfg();
+    let plan = cfg
         .premium
         .plans
         .iter()
@@ -106,8 +106,8 @@ pub async fn invoice(
         .as_ref()
         .ok_or_else(|| AppError::Internal("payment provider not configured".into()))?;
 
-    let pay = &state.config.registration.payment;
-    let currency = state.config.premium.currency.clone();
+    let pay = &state.cfg().registration.payment;
+    let currency = state.cfg().premium.currency.clone();
     let invoice = provider
         .create_invoice(&InvoiceRequest {
             amount: plan.amount.clone(),

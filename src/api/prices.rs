@@ -37,7 +37,7 @@ pub struct PricesResponse {
 )]
 #[instrument(skip(state))]
 pub async fn prices(State(state): State<Arc<AppState>>) -> Result<Json<PricesResponse>, AppError> {
-    if !state.config.features.prices {
+    if !state.cfg().features.prices {
         return Err(AppError::NotFound(
             "price feed is not enabled on this server".into(),
         ));

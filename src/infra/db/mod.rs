@@ -15,6 +15,7 @@ mod erasure;
 mod grin_slatepacks;
 mod invite_codes;
 mod login_events;
+mod operator_settings;
 mod payment_invoices;
 mod premium_invoices;
 mod restore_attempts;

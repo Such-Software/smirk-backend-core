@@ -108,7 +108,7 @@ pub async fn well_known_nostr(
         let name = raw.to_lowercase();
         if let Some(user) = state.db.get_user_by_username(&name).await? {
             if let Some(pubkey) = user.nostr_pubkey {
-                relays.insert(pubkey.clone(), relay_hints(&state.config));
+                relays.insert(pubkey.clone(), relay_hints(&state.cfg()));
                 names.insert(name, pubkey);
             }
         }

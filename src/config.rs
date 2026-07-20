@@ -43,7 +43,10 @@ fn looks_placeholder(s: &str) -> bool {
 /// never leaves the host (e.g. a payment processor reached over an SSH tunnel or
 /// a local reverse proxy), so the https requirement is relaxed for it.
 fn is_loopback_url(s: &str) -> bool {
-    match url::Url::parse(s).ok().and_then(|u| u.host().map(|h| h.to_owned())) {
+    match url::Url::parse(s)
+        .ok()
+        .and_then(|u| u.host().map(|h| h.to_owned()))
+    {
         Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
         Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
         Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
@@ -171,6 +174,32 @@ pub struct Config {
     pub messaging: MessagingConfig,
     pub premium: PremiumConfig,
     pub feed: FeedConfig,
+    pub console: ConsoleConfig,
+}
+
+/// How a restart-required config change is applied.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RestartApplyMode {
+    /// Persist + flag; the operator applies it with a graceful restart.
+    Manual,
+    /// The instance self-restarts after saving (the console warns first). Requires the
+    /// service to be brought back on exit (systemd `Restart=always`).
+    Auto,
+}
+
+impl RestartApplyMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RestartApplyMode::Manual => "manual",
+            RestartApplyMode::Auto => "auto",
+        }
+    }
+}
+
+/// Operator-console preferences (runtime-safe, DB-overridable via /admin/config).
+#[derive(Clone)]
+pub struct ConsoleConfig {
+    pub restart_apply_mode: RestartApplyMode,
 }
 
 #[derive(Clone)]
@@ -912,6 +941,12 @@ impl Config {
                 allowlist_npubs: env_list("FEED_ALLOWLIST_NPUBS"),
                 extra_relays: env_list("FEED_EXTRA_RELAYS"),
             },
+            console: ConsoleConfig {
+                restart_apply_mode: match env_or("RESTART_APPLY_MODE", "manual").as_str() {
+                    "auto" => RestartApplyMode::Auto,
+                    _ => RestartApplyMode::Manual,
+                },
+            },
         };
 
         cfg.validate()?;
@@ -1020,7 +1055,10 @@ impl Config {
         // booting a feed that can never populate (which would still advertise
         // prices:true and silently serve nothing).
         if self.features.prices {
-            if !matches!(self.features.prices_provider.as_str(), "coingecko" | "kraken") {
+            if !matches!(
+                self.features.prices_provider.as_str(),
+                "coingecko" | "kraken"
+            ) {
                 return Err(cfg_err(format!(
                     "PRICES_PROVIDER {:?} is not supported; supported: coingecko, kraken",
                     self.features.prices_provider
@@ -1268,7 +1306,8 @@ impl Config {
             if p.provider_url.trim().is_empty() {
                 return Err(cfg_err("PREMIUM_ENABLED needs PAYMENT_PROVIDER_URL"));
             }
-            if prod && !p.provider_url.starts_with("https://") && !is_loopback_url(&p.provider_url) {
+            if prod && !p.provider_url.starts_with("https://") && !is_loopback_url(&p.provider_url)
+            {
                 return Err(cfg_err(
                     "PAYMENT_PROVIDER_URL must be https:// in production (loopback exempt)",
                 ));
@@ -1502,6 +1541,9 @@ mod tests {
                 allowlist_npubs: Vec::new(),
                 extra_relays: Vec::new(),
             },
+            console: ConsoleConfig {
+                restart_apply_mode: RestartApplyMode::Manual,
+            },
         }
     }
 
@@ -1518,6 +1560,117 @@ mod tests {
             confirmations: 1,
             expires_minutes: 60,
         }
+    }
+
+    // ── operator settings overlay (config_overlay.rs) ───────────────────────
+    // These live here (not in config_overlay's own test mod) because they need the
+    // fully-populated `valid()` Config to exercise apply_overlay/editable_overlay.
+
+    #[test]
+    fn editable_overlay_round_trips_as_identity() {
+        // Applying the effective overlay back onto the config must be a no-op: it
+        // proves every field editable_overlay() READS is the same field
+        // apply_overlay() WRITES. A single mismatched wire diverges the two views.
+        use crate::config_overlay::SettingsOverlay;
+        let base = valid();
+        let effective = base.editable_overlay();
+        let ov: SettingsOverlay =
+            serde_json::from_value(serde_json::to_value(&effective).unwrap()).unwrap();
+        let applied = base.apply_overlay(&ov).expect("identity overlay applies");
+        assert_eq!(
+            serde_json::to_value(applied.editable_overlay()).unwrap(),
+            serde_json::to_value(&effective).unwrap(),
+        );
+    }
+
+    #[test]
+    fn editable_overlay_never_exposes_a_secret() {
+        // The overlay is the read+write surface of the admin plane. No secret may
+        // ever appear in it — secrets are excluded BY CONSTRUCTION (no overlay
+        // field maps to one), and this asserts that structurally.
+        let mut c = valid();
+        c.registration.payment.api_key = "LEAKMARK_PAYMENT_APIKEY".into();
+        c.pow.hmac_key = "LEAKMARK_ALTCHA_HMAC".into();
+        c.admin.jwt_secret = "LEAKMARK_ADMIN_JWT".into();
+        c.admin.key_integrity_secret = "LEAKMARK_ADMIN_MAC".into();
+        c.auth.jwt_secret = "LEAKMARK_AUTH_JWT".into();
+        c.secrets.seed_fingerprint_pepper = "LEAKMARK_SEED_PEPPER".into();
+        let json = serde_json::to_string(&c.editable_overlay()).unwrap();
+        assert!(
+            !json.contains("LEAKMARK"),
+            "a secret leaked into the editable overlay: {json}"
+        );
+    }
+
+    #[test]
+    fn overlay_gate_mode_rejects_a_typo() {
+        use crate::config_overlay::SettingsOverlay;
+        let ov: SettingsOverlay =
+            serde_json::from_str(r#"{"registration":{"gate_mode":"nonsense"}}"#).unwrap();
+        assert!(valid().apply_overlay(&ov).is_err());
+    }
+
+    #[test]
+    fn overlay_toggles_registration_gates() {
+        use crate::config_overlay::SettingsOverlay;
+        let ov: SettingsOverlay =
+            serde_json::from_str(r#"{"registration":{"require_invite":true,"gate_mode":"any"}}"#)
+                .unwrap();
+        let applied = valid()
+            .apply_overlay(&ov)
+            .expect("valid registration overlay applies");
+        assert!(applied.registration.require_invite);
+        assert_eq!(applied.registration.gate_mode, GateMode::Any);
+    }
+
+    #[test]
+    fn runtime_safe_put_does_not_drag_pending_restart_required_change_live() {
+        // Reproduces the hot-swap desync: an earlier PUT persists a restart-required
+        // change (chain toggle) that is NOT yet applied to the running config; a later
+        // runtime-safe PUT must hot-swap ONLY its own change onto the RUNNING config,
+        // never rebuild from the full persisted overlay (which would drag the pending
+        // restart-required change live while boot-built clients still run the old one).
+        use crate::config_overlay::SettingsOverlay;
+        let base = valid();
+        assert!(!base.features.chains.btc, "precondition: btc off at boot");
+        let running = base.clone(); // boot state; the restart-required change is NOT here
+
+        // The FIX: hot-swap applies only the runtime-safe patch to the running config.
+        let safe_patch: SettingsOverlay =
+            serde_json::from_str(r#"{"landing":{"title":"hello"}}"#).unwrap();
+        let hot = running.apply_overlay(&safe_patch).unwrap();
+        assert!(
+            !hot.features.chains.btc,
+            "restart-required chain toggle must NOT leak into the runtime-safe hot-swap"
+        );
+        assert_eq!(
+            hot.landing.title.as_deref(),
+            Some("hello"),
+            "runtime-safe change applies"
+        );
+
+        // Regression guard: the OLD path (base + full persisted overlay) WOULD drag it.
+        let buggy_merged: SettingsOverlay =
+            serde_json::from_str(r#"{"features":{"chain_btc":true},"landing":{"title":"hello"}}"#)
+                .unwrap();
+        let buggy = base.apply_overlay(&buggy_merged).unwrap();
+        assert!(
+            buggy.features.chains.btc,
+            "sanity: the old rebuild-from-full-overlay path drags the pending change"
+        );
+    }
+
+    #[test]
+    fn overlay_enabling_pow_without_hmac_key_is_rejected() {
+        // Fail-closed: turning the PoW gate on via the console with no HMAC key
+        // (a secret that stays in env) must be rejected at PUT, not boot a disarmed
+        // gate that /capabilities reports as active.
+        use crate::config_overlay::SettingsOverlay;
+        let mut base = valid();
+        base.pow.hmac_key = String::new();
+        let ov: SettingsOverlay =
+            serde_json::from_str(r#"{"pow":{"enabled":true,"required":true}}"#).unwrap();
+        assert!(base.apply_overlay(&ov).is_err());
     }
 
     #[test]
@@ -1589,7 +1742,10 @@ mod tests {
         c.features.tips = true;
         c.features.chains.btc = true;
         c.tip_share_base = None;
-        assert!(c.validate().is_err(), "tips on without a share base must fail");
+        assert!(
+            c.validate().is_err(),
+            "tips on without a share base must fail"
+        );
     }
 
     #[test]

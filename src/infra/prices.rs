@@ -27,7 +27,11 @@ const KRAKEN_URL: &str = "https://api.kraken.com/0/public/Ticker";
 /// Nonlogs markets — WOW/GRIN, which Kraken doesn't list (priced via BTC/USDT).
 const NONLOGS_URL: &str = "https://api.nonlogs.io/api/markets";
 /// Our majors → Kraken USD pair. WOW/GRIN come from nonlogs instead.
-const KRAKEN_PAIRS: &[(&str, &str)] = &[("btc", "XXBTZUSD"), ("ltc", "XLTCZUSD"), ("xmr", "XXMRZUSD")];
+const KRAKEN_PAIRS: &[(&str, &str)] = &[
+    ("btc", "XXBTZUSD"),
+    ("ltc", "XLTCZUSD"),
+    ("xmr", "XXMRZUSD"),
+];
 /// Lower bound on the refresh interval, to stay within free-tier rate limits.
 const MIN_INTERVAL_SECS: u64 = 60;
 /// Upper bound on the price response body. The real payload is a handful of
@@ -146,7 +150,12 @@ impl PriceClient {
             .collect();
         if !pairs.is_empty() {
             let joined = pairs.iter().map(|(_, p)| *p).collect::<Vec<_>>().join(",");
-            if let Ok(resp) = self.http.get(KRAKEN_URL).query(&[("pair", joined.as_str())]).send().await
+            if let Ok(resp) = self
+                .http
+                .get(KRAKEN_URL)
+                .query(&[("pair", joined.as_str())])
+                .send()
+                .await
             {
                 if resp.status().is_success() {
                     let body = read_capped(resp, MAX_PRICE_BODY_BYTES).await?;

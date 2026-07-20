@@ -354,7 +354,7 @@ fn tips_advertised(config: &Config) -> bool {
 )]
 #[instrument(skip(state))]
 pub async fn capabilities(State(state): State<Arc<AppState>>) -> Json<CapabilitiesResponse> {
-    Json(effective_capabilities(&state.config))
+    Json(effective_capabilities(&state.cfg()))
 }
 
 /// Capability route, RELATIVE to the `/api/v1` mount point. Public (no auth).

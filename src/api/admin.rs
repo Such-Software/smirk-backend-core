@@ -66,14 +66,14 @@ fn admin_manager(state: &AppState) -> Result<&AdminSessionManager, AppError> {
 fn admin_verify_url(state: &AppState) -> String {
     format!(
         "{}/admin/auth/verify",
-        state.config.admin.public_url.trim_end_matches('/')
+        state.cfg().admin.public_url.trim_end_matches('/')
     )
 }
 
 /// A stable per-instance id bound into the signed action, so a challenge signed
 /// for this instance cannot be relayed to another.
 fn admin_instance_id(state: &AppState) -> String {
-    hex::encode(Sha256::digest(state.config.admin.public_url.as_bytes()))[..16].to_string()
+    hex::encode(Sha256::digest(state.cfg().admin.public_url.as_bytes()))[..16].to_string()
 }
 
 fn pubkey_prefix(pubkey: &str) -> String {
@@ -121,7 +121,7 @@ pub async fn admin_plane_guard(
         .unwrap_or("");
     // Compute the response on both paths, then apply the security headers once so
     // the 403 Host-reject carries them too.
-    let mut resp = if host_allowed(host, state.config.admin.onion.as_deref()) {
+    let mut resp = if host_allowed(host, state.cfg().admin.onion.as_deref()) {
         next.run(req).await
     } else {
         (StatusCode::FORBIDDEN, "forbidden").into_response()
@@ -190,7 +190,7 @@ pub async fn admin_guard(
 
     // Live, uncached allowlist re-check (MAC re-verified inside): must be active
     // AND activated (a pending key is not yet authorized for protected routes).
-    let secret = &state.config.admin.key_integrity_secret;
+    let secret = &state.cfg().admin.key_integrity_secret;
     let key = state
         .db
         .get_active_admin_key(&info.pubkey, secret)
@@ -279,7 +279,7 @@ pub async fn admin_verify(
 ) -> Result<Json<AdminTokenResponse>, AppError> {
     let mgr = admin_manager(&state)?;
     let ip = client_ip(&state, &headers, peer);
-    let secret = &state.config.admin.key_integrity_secret;
+    let secret = &state.cfg().admin.key_integrity_secret;
 
     // 1. Prove the signature + bindings (purpose/nonce/descriptor/instance). The
     // descriptor binds the verify URL with an EMPTY body (the proof rides in the
@@ -335,7 +335,7 @@ pub async fn admin_verify(
     let pair = mgr.create_token_pair(&pubkey, session_id)?;
     let refresh_hash = hash_refresh_token(
         &pair.refresh_token,
-        &state.config.secrets.refresh_token_pepper,
+        &state.cfg().secrets.refresh_token_pepper,
     );
     let audit = NewAdminAudit {
         action: "admin_login".into(),
@@ -386,7 +386,7 @@ pub async fn admin_refresh(
 
     // Re-authorize against the live allowlist (closes the "8h refresh is the real
     // blast radius" gap).
-    let secret = &state.config.admin.key_integrity_secret;
+    let secret = &state.cfg().admin.key_integrity_secret;
     let key = state
         .db
         .get_active_admin_key(&pubkey, secret)
@@ -403,7 +403,7 @@ pub async fn admin_refresh(
         .ok_or_else(admin_auth_fail)?;
     let presented = hash_refresh_token(
         &req.refresh_token,
-        &state.config.secrets.refresh_token_pepper,
+        &state.cfg().secrets.refresh_token_pepper,
     );
     let hash_ok: bool = presented
         .as_bytes()
@@ -435,7 +435,7 @@ pub async fn admin_logout(
 ) -> Result<Json<OkResponse>, AppError> {
     let ctx = admin_guard(&state, &headers).await?;
     state.db.revoke_admin_session(ctx.session_id).await?;
-    let secret = &state.config.admin.key_integrity_secret;
+    let secret = &state.cfg().admin.key_integrity_secret;
     let _ = state
         .db
         .record_admin_audit(
@@ -520,7 +520,7 @@ fn pending_key(state: &AppState, pubkey: String, label: Option<String>) -> NewAd
         scope: "admin".into(),
         created_by_kind: "admin".into(),
         activation_deadline: Some(
-            Utc::now() + Duration::days(state.config.admin.pending_key_ttl_days as i64),
+            Utc::now() + Duration::days(state.cfg().admin.pending_key_ttl_days as i64),
         ),
     }
 }
@@ -536,7 +536,7 @@ pub async fn admin_keys_add(
     let pubkey = req.pubkey.to_lowercase();
     validate_admin_pubkey(&pubkey)?;
 
-    let secret = &state.config.admin.key_integrity_secret;
+    let secret = &state.cfg().admin.key_integrity_secret;
     let audit = NewAdminAudit {
         action: "admin_key_added".into(),
         actor_kind: "admin".into(),
@@ -552,7 +552,7 @@ pub async fn admin_keys_add(
             pending_key(&state, pubkey, req.label),
             &audit,
             secret,
-            state.config.admin.max_keys as i64,
+            state.cfg().admin.max_keys as i64,
         )
         .await?
     {
@@ -593,7 +593,7 @@ pub async fn admin_keys_revoke(
     Path(id): Path<Uuid>,
 ) -> Result<Json<OkResponse>, AppError> {
     let ctx = admin_guard(&state, &headers).await?;
-    let secret = &state.config.admin.key_integrity_secret;
+    let secret = &state.cfg().admin.key_integrity_secret;
     let audit = NewAdminAudit {
         action: "admin_key_revoked".into(),
         actor_kind: "admin".into(),
@@ -632,7 +632,7 @@ pub async fn admin_keys_rotate(
     let ctx = admin_guard(&state, &headers).await?;
     let pubkey = req.pubkey.to_lowercase();
     validate_admin_pubkey(&pubkey)?;
-    let secret = &state.config.admin.key_integrity_secret;
+    let secret = &state.cfg().admin.key_integrity_secret;
     let audit = NewAdminAudit {
         action: "admin_key_rotated".into(),
         actor_kind: "admin".into(),
@@ -679,7 +679,7 @@ pub async fn admin_features(
     headers: HeaderMap,
 ) -> Result<Json<AdminFeaturesResponse>, AppError> {
     admin_guard(&state, &headers).await?;
-    let cfg = &state.config;
+    let cfg = &state.cfg();
     let effective = crate::api::capabilities::effective_capabilities(cfg);
 
     let mut downgrades = Vec::new();
@@ -738,8 +738,392 @@ pub async fn admin_features(
 // ── router ───────────────────────────────────────────────────────────────────
 
 /// Admin-plane routes. Mounted by [`crate::admin_router`] on the loopback socket.
+// ── Operator config (GET + PUT /admin/config) ─────────────────────────────────
+// The editable settings surface, on the effective-config layer (config_overlay.rs).
+// GET reports each field's effective value + the DB overlay + per-section version +
+// runtime_class + restart_pending. PUT validates a patch with the SAME rules boot
+// uses, persists the changed sections (audited, version-guarded), then hot-swaps the
+// effective config for runtime-safe edits or flags restart-required.
+
+#[derive(serde::Serialize)]
+pub struct AdminConfigResponse {
+    /// Effective value of every editable field (all populated).
+    effective: crate::config_overlay::SettingsOverlay,
+    /// DB overlay (operator-set values only): a field present here has source=db;
+    /// absent = env/default.
+    overlay: crate::config_overlay::SettingsOverlay,
+    /// Persisted version per section (echo back as `expected_versions` on PUT).
+    versions: std::collections::HashMap<String, i64>,
+    /// "section.field" -> runtime-safe | restart-required.
+    runtime_class: std::collections::HashMap<String, crate::config_overlay::RuntimeClass>,
+    /// A persisted change hasn't been applied to the running config yet (needs restart).
+    restart_pending: bool,
+}
+
+/// `restart_pending`: the persisted overlay, applied to the boot base, differs from
+/// the currently-RUNNING effective config in at least one field — i.e. a
+/// restart-required change was saved but has not been applied by a restart yet.
+/// Shared by GET and PUT so both report the identical signal. A persisted overlay
+/// that no longer validates is treated as not-pending (the running config is the
+/// authority; GET/PUT surface the validation error separately).
+fn overlay_restart_pending(
+    config_base: &crate::config::Config,
+    persisted: &crate::config_overlay::SettingsOverlay,
+    running: &crate::config::Config,
+) -> bool {
+    match config_base.apply_overlay(persisted) {
+        Ok(p) => {
+            serde_json::to_value(p.editable_overlay()).ok()
+                != serde_json::to_value(running.editable_overlay()).ok()
+        }
+        Err(_) => false,
+    }
+}
+
+#[instrument(skip(state, headers))]
+pub async fn admin_config_get(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<AdminConfigResponse>, AppError> {
+    admin_guard(&state, &headers).await?;
+    let secret = state.cfg().admin.key_integrity_secret.clone();
+
+    let overlay = state.db.load_settings_overlay(&secret).await?;
+    let versions = state.db.settings_versions().await?;
+    let running = state.cfg();
+    let effective = running.editable_overlay();
+
+    // A restart-required field was saved but not yet applied (see the shared helper).
+    let restart_pending = overlay_restart_pending(&state.config_base, &overlay, &running);
+
+    let runtime_class = crate::config_overlay::EDITABLE_FIELDS
+        .iter()
+        .map(|(section, field)| {
+            (
+                format!("{section}.{field}"),
+                crate::config_overlay::runtime_class(section, field),
+            )
+        })
+        .collect();
+
+    Ok(Json(AdminConfigResponse {
+        effective,
+        overlay,
+        versions,
+        runtime_class,
+        restart_pending,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct PutConfigRequest {
+    /// Sparse patch: only the fields to change (unset fields left as-is).
+    patch: crate::config_overlay::SettingsOverlay,
+    /// Optional optimistic-concurrency guard: expected current version per touched
+    /// section. A mismatch is a 409 (another operator edited it first).
+    #[serde(default)]
+    expected_versions: std::collections::HashMap<String, i64>,
+}
+
+#[derive(serde::Serialize)]
+pub struct PutConfigResponse {
+    /// "runtime" = hot-swapped, live now. "restart-required" = persisted, applies on
+    /// the next (graceful) restart.
+    applied: String,
+    restart_pending: bool,
+}
+
+#[instrument(skip(state, headers, req))]
+pub async fn admin_config_put(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<PutConfigRequest>,
+) -> Result<Json<PutConfigResponse>, AppError> {
+    let ctx = admin_guard(&state, &headers).await?;
+    let secret = state.cfg().admin.key_integrity_secret.clone();
+
+    let patch_json = serde_json::to_value(&req.patch)
+        .map_err(|e| AppError::ValidationError(format!("bad patch: {e}")))?;
+    let patch_obj = patch_json.as_object().cloned().unwrap_or_default();
+
+    // merged = persisted overlay + patch (patch's non-null fields win), then validate
+    // with the SAME rules boot uses. Reject the whole PUT if invalid (nothing persists).
+    let persisted = state.db.load_settings_overlay(&secret).await?;
+    let mut merged_json =
+        serde_json::to_value(&persisted).map_err(|e| AppError::Internal(e.to_string()))?;
+    json_merge_skip_null(&mut merged_json, &patch_json);
+    let merged: crate::config_overlay::SettingsOverlay =
+        serde_json::from_value(merged_json.clone())
+            .map_err(|e| AppError::ValidationError(format!("bad settings: {e}")))?;
+    // Validate the FULL merged overlay with the same rules boot uses; a bad edit is a
+    // 400 and nothing persists. (The hot-swap below re-validates the narrower change.)
+    state.config_base.apply_overlay(&merged)?; // ValidationError -> 400
+
+    // Classify the CHANGED fields: which sections changed + does any need a restart?
+    let mut any_restart = false;
+    let mut changed_sections: Vec<String> = Vec::new();
+    for (section, fields) in &patch_obj {
+        let Some(fields) = fields.as_object() else {
+            continue;
+        };
+        let touched: Vec<&String> = fields
+            .iter()
+            .filter(|(_, v)| !v.is_null())
+            .map(|(k, _)| k)
+            .collect();
+        if touched.is_empty() {
+            continue;
+        }
+        changed_sections.push(section.clone());
+        for field in touched {
+            if crate::config_overlay::runtime_class(section, field)
+                == crate::config_overlay::RuntimeClass::RestartRequired
+            {
+                any_restart = true;
+            }
+        }
+    }
+    if changed_sections.is_empty() {
+        return Err(AppError::ValidationError("empty config patch".into()));
+    }
+
+    // Persist each changed section's merged doc, audited + version-guarded.
+    let merged_obj = merged_json.as_object().cloned().unwrap_or_default();
+    for section in &changed_sections {
+        let doc = merged_obj
+            .get(section)
+            .cloned()
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+        let audit = NewAdminAudit {
+            action: "config_updated".into(),
+            actor_kind: "admin".into(),
+            actor_pubkey_prefix: Some(pubkey_prefix(&ctx.pubkey)),
+            target: Some(section.clone()),
+            details: Some(serde_json::json!({ "section": section })),
+            ip_address: None,
+        };
+        state
+            .db
+            .put_setting_audited(
+                section,
+                &doc,
+                Some(ctx.admin_key_id),
+                req.expected_versions.get(section).copied(),
+                &audit,
+                &secret,
+            )
+            .await?;
+    }
+
+    // Apply. Runtime-safe-only edits hot-swap the effective config atomically (live on
+    // the next request); any restart-required field is persisted + flagged so the
+    // operator applies it with a graceful restart.
+    if any_restart {
+        // In `auto` mode, self-restart shortly AFTER responding so the persisted change
+        // takes effect (systemd `Restart=always` brings us back). The console warns the
+        // operator before saving in auto mode; `manual` just flags restart_pending.
+        if state.cfg().console.restart_apply_mode == crate::config::RestartApplyMode::Auto {
+            let shutdown = state.shutdown.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+                tracing::info!(
+                    "config auto-apply: self-restart to apply a restart-required change"
+                );
+                shutdown.notify_one();
+            });
+        }
+        Ok(Json(PutConfigResponse {
+            applied: "restart-required".into(),
+            restart_pending: true,
+        }))
+    } else {
+        // Hot-swap ONLY the runtime-safe patch onto the currently-RUNNING config.
+        // Rebuilding from the full persisted overlay (the old behavior) would drag a
+        // restart-required section persisted by an EARLIER PUT into the live config
+        // while the boot-built clients still run the old value — the exact desync
+        // RuntimeClass exists to prevent. Every field in this patch is runtime-safe
+        // (any_restart == false), so applying it to the running config is sound and
+        // re-validates the change.
+        let running = state.cfg();
+        let hot = running
+            .apply_overlay(&req.patch)
+            .map_err(|e| AppError::Internal(format!("hot-swap re-validate failed: {e}")))?;
+        drop(running);
+        // A restart-required change from an EARLIER PUT may still be pending; report it
+        // honestly rather than clearing the signal just because THIS edit was live.
+        let restart_pending = overlay_restart_pending(&state.config_base, &merged, &hot);
+        state.config.store(std::sync::Arc::new(hot));
+        Ok(Json(PutConfigResponse {
+            applied: "runtime".into(),
+            restart_pending,
+        }))
+    }
+}
+
+/// Recursively merge `patch` into `base` (JSON objects); a `null` in `patch` means
+/// "leave unset" and is skipped, so a sparse overlay patch only sets present fields.
+fn json_merge_skip_null(base: &mut serde_json::Value, patch: &serde_json::Value) {
+    match (base, patch) {
+        (serde_json::Value::Object(b), serde_json::Value::Object(p)) => {
+            for (k, pv) in p {
+                if pv.is_null() {
+                    continue;
+                }
+                json_merge_skip_null(b.entry(k.clone()).or_insert(serde_json::Value::Null), pv);
+            }
+        }
+        (b, p) => *b = p.clone(),
+    }
+}
+
+// ── Invites (POST + GET /admin/invites) ───────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct MintInvitesRequest {
+    #[serde(default)]
+    count: Option<u32>,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct MintInvitesResponse {
+    /// RAW single-use codes — shown ONCE (only the hash is stored, unrecoverable).
+    codes: Vec<String>,
+}
+
+#[instrument(skip(state, headers, req))]
+pub async fn admin_invites_mint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<MintInvitesRequest>,
+) -> Result<Json<MintInvitesResponse>, AppError> {
+    let ctx = admin_guard(&state, &headers).await?;
+    let secret = state.cfg().admin.key_integrity_secret.clone();
+    let count = req.count.unwrap_or(1).clamp(1, 1000);
+    let audit = NewAdminAudit {
+        action: "invites_minted".into(),
+        actor_kind: "admin".into(),
+        actor_pubkey_prefix: Some(pubkey_prefix(&ctx.pubkey)),
+        target: req.label.clone(),
+        details: Some(serde_json::json!({ "count": count })),
+        ip_address: None,
+    };
+    let codes = state
+        .db
+        .mint_invites_audited(count, req.label.as_deref(), &audit, &secret)
+        .await?;
+    Ok(Json(MintInvitesResponse { codes }))
+}
+
+#[derive(serde::Serialize)]
+pub struct InviteView {
+    /// Non-secret: first 12 hex chars of the code hash (operator eyeball only).
+    code_prefix: String,
+    label: Option<String>,
+    created_at: String,
+    /// "unused" | "used" | "expired".
+    status: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct InvitesListResponse {
+    invites: Vec<InviteView>,
+    unused_count: i64,
+}
+
+#[instrument(skip(state, headers))]
+pub async fn admin_invites_list(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<InvitesListResponse>, AppError> {
+    admin_guard(&state, &headers).await?;
+    let rows = state.db.list_invite_codes(200, 0).await?;
+    let now = Utc::now();
+    let invites = rows
+        .into_iter()
+        .map(|r| {
+            let status = if r.used_at.is_some() {
+                "used"
+            } else if r.expires_at.map(|e| e <= now).unwrap_or(false) {
+                "expired"
+            } else {
+                "unused"
+            };
+            InviteView {
+                code_prefix: r.code_hash.chars().take(12).collect(),
+                label: r.label,
+                created_at: r.created_at.to_rfc3339(),
+                status: status.into(),
+            }
+        })
+        .collect();
+    let unused_count = state.db.unused_invite_code_count().await?;
+    Ok(Json(InvitesListResponse {
+        invites,
+        unused_count,
+    }))
+}
+
+// ── Operator console SPA (embedded, served at /admin) ─────────────────────────
+// The Preact console built from admin-ui/ and embedded via rust-embed (single-binary
+// self-host, no separate deploy). Served UNAUTHENTICATED (no admin_guard) — the shell
+// loads without a session and runs the NIP-98 login client-side against the guarded
+// JSON routes. Only exact /admin, /admin/, /admin/assets/*path are added, so the JSON
+// routes (/admin/keys, /admin/config, ...) are never shadowed.
+
+#[derive(rust_embed::RustEmbed)]
+#[folder = "admin-ui/dist/"]
+struct AdminAssets;
+
+pub async fn admin_index() -> Response {
+    match AdminAssets::get("index.html") {
+        Some(f) => (
+            [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            f.data.into_owned(),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            "operator console not built (run: npm --prefix admin-ui run build)",
+        )
+            .into_response(),
+    }
+}
+
+pub async fn admin_asset(Path(path): Path<String>) -> Response {
+    match AdminAssets::get(&format!("assets/{path}")) {
+        Some(f) => {
+            let mime = if path.ends_with(".js") || path.ends_with(".mjs") {
+                "application/javascript; charset=utf-8"
+            } else if path.ends_with(".css") {
+                "text/css; charset=utf-8"
+            } else if path.ends_with(".svg") {
+                "image/svg+xml"
+            } else if path.ends_with(".woff2") {
+                "font/woff2"
+            } else if path.ends_with(".png") {
+                "image/png"
+            } else if path.ends_with(".json") {
+                "application/json"
+            } else {
+                "application/octet-stream"
+            };
+            (
+                [(axum::http::header::CONTENT_TYPE, mime)],
+                f.data.into_owned(),
+            )
+                .into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/admin", get(admin_index))
+        .route("/admin/", get(admin_index))
+        .route("/admin/assets/*path", get(admin_asset))
         .route("/admin/auth/challenge", post(admin_challenge))
         .route("/admin/auth/verify", post(admin_verify))
         .route("/admin/auth/refresh", post(admin_refresh))
@@ -749,11 +1133,91 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/admin/keys", post(admin_keys_add).get(admin_keys_list))
         .route("/admin/keys/:id", delete(admin_keys_revoke))
         .route("/admin/keys/:id/rotate", post(admin_keys_rotate))
+        .route("/admin/config", get(admin_config_get).put(admin_config_put))
+        .route(
+            "/admin/invites",
+            post(admin_invites_mint).get(admin_invites_list),
+        )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::host_allowed;
+    use super::{host_allowed, AdminAssets};
+
+    // The Operator Console SPA must be built into admin-ui/dist/ and embedded at
+    // compile time (rust-embed). If admin-ui was never built, index.html is absent
+    // and /admin serves nothing — this catches that before it reaches an operator.
+    #[test]
+    fn admin_console_is_embedded() {
+        let index = AdminAssets::get("index.html").expect("admin-ui/dist/index.html embedded");
+        let html = std::str::from_utf8(&index.data).expect("index.html is utf-8");
+        assert!(
+            html.contains("Smirk Operator Console"),
+            "console title missing"
+        );
+        // Vite rewrites asset URLs to the /admin/ base; the served route matches.
+        assert!(
+            html.contains("/admin/assets/"),
+            "asset base not rewritten to /admin/"
+        );
+        assert!(
+            AdminAssets::iter().any(|p| p.starts_with("assets/")),
+            "no built JS/CSS assets embedded",
+        );
+    }
+
+    // Exercise the real serve path (routing + content-type + body) without a DB:
+    // admin_index / admin_asset are stateless, so a tiny router reproduces exactly
+    // what an operator's browser hits at GET /admin and GET /admin/assets/<hash>.js.
+    #[tokio::test]
+    async fn admin_console_serves_over_http() {
+        use axum::{body::Body, routing::get, Router};
+        use tower::ServiceExt;
+
+        let app: Router = Router::new()
+            .route("/admin", get(super::admin_index))
+            .route("/admin/assets/*path", get(super::admin_asset));
+
+        // GET /admin -> the console HTML.
+        let res = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::OK);
+        assert_eq!(res.headers()["content-type"], "text/html; charset=utf-8");
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert!(std::str::from_utf8(&body)
+            .unwrap()
+            .contains("Smirk Operator Console"));
+
+        // GET /admin/assets/<real built asset> -> served with a sane content-type.
+        let asset = AdminAssets::iter()
+            .find(|p| p.starts_with("assets/") && p.ends_with(".js"))
+            .expect("a built JS asset exists");
+        let uri = format!("/admin/{asset}"); // asset already carries the "assets/" prefix
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            res.headers()["content-type"],
+            "application/javascript; charset=utf-8",
+        );
+    }
 
     #[test]
     fn host_allowlist() {

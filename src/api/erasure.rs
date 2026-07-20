@@ -41,7 +41,7 @@ const PURPOSE_EXPORT: &str = "erasure_export";
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 fn ensure_enabled(state: &AppState) -> Result<(), AppError> {
-    if state.config.retention.erasure_enabled {
+    if state.cfg().retention.erasure_enabled {
         Ok(())
     } else {
         Err(AppError::NotFound("erasure is not enabled".into()))
@@ -51,8 +51,8 @@ fn ensure_enabled(state: &AppState) -> Result<(), AppError> {
 /// The signed-action `u`-tag base for `path` (e.g. `/account/erasure`), from
 /// `PUBLIC_API_URL` (which already includes the `/api/v1` prefix).
 fn erasure_url(state: &AppState, path: &str) -> Result<String, AppError> {
-    let base = state
-        .config
+    let cfg = state.cfg();
+    let base = cfg
         .identity
         .public_api_url
         .as_deref()
@@ -64,8 +64,8 @@ fn subject_hash(npub: &str) -> String {
     hex::encode(Sha256::digest(npub.as_bytes()))
 }
 
-fn integrity_secret(state: &AppState) -> &str {
-    &state.config.admin.key_integrity_secret
+fn integrity_secret(state: &AppState) -> String {
+    state.cfg().admin.key_integrity_secret.clone()
 }
 
 #[derive(Debug, Deserialize)]
@@ -191,7 +191,7 @@ pub async fn request_erasure(
     Json(body): Json<ProofRequest>,
 ) -> Result<Json<ErasureRequestResponse>, AppError> {
     ensure_enabled(&state)?;
-    let grace = state.config.retention.grace_period_hours as i64;
+    let grace = state.cfg().retention.grace_period_hours as i64;
     let (pubkey, user) = prove(&state, &body, PURPOSE_REQUEST, "/account/erasure", None).await?;
 
     // Constant-shape across present/absent AND across repeated calls: a STABLE
@@ -209,13 +209,13 @@ pub async fn request_erasure(
                 .db
                 .record_admin_audit(
                     &audit("account_erasure_requested", &req.id),
-                    integrity_secret(&state),
+                    &integrity_secret(&state),
                 )
                 .await;
             info!(erasure_id = %req.id, "erasure requested");
             req.id.to_string()
         }
-        None => synthetic_erasure_id(&pubkey, integrity_secret(&state)),
+        None => synthetic_erasure_id(&pubkey, &integrity_secret(&state)),
     };
     Ok(Json(ErasureRequestResponse {
         erasure_id,
@@ -244,7 +244,7 @@ pub async fn confirm_erasure(
     .await?;
     let user = user.ok_or_else(|| AppError::NotFound("no such erasure request".into()))?;
 
-    let grace = state.config.retention.grace_period_hours as i64;
+    let grace = state.cfg().retention.grace_period_hours as i64;
     let req = state
         .db
         .confirm_erasure_request(id, user.id, grace)
@@ -256,7 +256,7 @@ pub async fn confirm_erasure(
         .db
         .record_admin_audit(
             &audit("account_erasure_confirmed", &req.id),
-            integrity_secret(&state),
+            &integrity_secret(&state),
         )
         .await;
     info!(erasure_id = %req.id, "erasure confirmed");
@@ -295,7 +295,7 @@ pub async fn cancel_erasure(
         .db
         .record_admin_audit(
             &audit("account_erasure_cancelled", &req.id),
-            integrity_secret(&state),
+            &integrity_secret(&state),
         )
         .await;
     Ok(Json(StatusResponse {
@@ -359,7 +359,7 @@ pub async fn export(
                 details: None,
                 ip_address: None,
             },
-            integrity_secret(&state),
+            &integrity_secret(&state),
         )
         .await;
     Ok(Json(ExportResponse {
@@ -388,11 +388,11 @@ fn audit(action: &str, erasure_id: &Uuid) -> NewAdminAudit {
 #[instrument(skip(state))]
 pub async fn run_erasure_sweep(state: &Arc<AppState>, batch: i64) -> Result<u64, AppError> {
     let due = state.db.due_erasure_requests(batch).await?;
-    let purge = state.config.retention.purge_login_events;
+    let purge = state.cfg().retention.purge_login_events;
     let secret = integrity_secret(state);
     let mut done = 0;
     for req in due {
-        match state.db.execute_erasure(req.id, purge, secret).await {
+        match state.db.execute_erasure(req.id, purge, &secret).await {
             Ok(true) => done += 1,
             // false = another node/sweep already claimed it, or it was cancelled.
             Ok(false) => {}

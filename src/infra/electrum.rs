@@ -489,7 +489,7 @@ impl ElectrumClient {
         let use_primary = self
             .primary
             .as_ref()
-            .filter(|_| !(self.primary_in_cooldown(now) && !self.fallbacks.is_empty()));
+            .filter(|_| !self.primary_in_cooldown(now) || self.fallbacks.is_empty());
 
         let mut last_err = AppError::NodeError("all Electrum servers failed".into());
 
@@ -536,7 +536,8 @@ impl ElectrumClient {
         let count = self.primary_fail_count.fetch_add(1, Ordering::Relaxed) + 1;
         if count >= PRIMARY_FAIL_THRESHOLD {
             let until = now_ms.saturating_add(PRIMARY_COOLDOWN.as_millis() as u64);
-            self.primary_cooldown_until_ms.store(until, Ordering::Relaxed);
+            self.primary_cooldown_until_ms
+                .store(until, Ordering::Relaxed);
         }
     }
 
@@ -981,7 +982,10 @@ mod tests {
             let client = ElectrumClient::new(UtxoNetwork::BitcoinMainnet, &cfg).unwrap();
             let tip = client.get_tip_height().await;
             assert!(tip.is_ok(), "lenient TLS must connect to {server}: {tip:?}");
-            assert!(tip.unwrap() > 800_000, "sanity: BTC tip height from {server}");
+            assert!(
+                tip.unwrap() > 800_000,
+                "sanity: BTC tip height from {server}"
+            );
         }
     }
 

@@ -219,8 +219,26 @@ mod tests {
     #[test]
     fn author_allowlist_gates_on_author() {
         let m = meta(A, 1, FF);
-        assert!(decide(&m, WritePolicy::AuthorAllowlist, 0, true, false, false, false).is_permit());
-        assert!(!decide(&m, WritePolicy::AuthorAllowlist, 0, false, false, false, false).is_permit());
+        assert!(decide(
+            &m,
+            WritePolicy::AuthorAllowlist,
+            0,
+            true,
+            false,
+            false,
+            false
+        )
+        .is_permit());
+        assert!(!decide(
+            &m,
+            WritePolicy::AuthorAllowlist,
+            0,
+            false,
+            false,
+            false,
+            false
+        )
+        .is_permit());
     }
 
     #[test]

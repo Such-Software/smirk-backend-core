@@ -142,10 +142,7 @@ async fn acquire_advisory_lock(
 /// Release the advisory lock on the SAME connection it was acquired on, then
 /// drop the connection back to the pool. Best-effort — the lock auto-releases
 /// when the connection closes.
-async fn release_advisory_lock(
-    mut conn: sqlx::pool::PoolConnection<sqlx::Postgres>,
-    key: i64,
-) {
+async fn release_advisory_lock(mut conn: sqlx::pool::PoolConnection<sqlx::Postgres>, key: i64) {
     if let Err(e) = sqlx::query("SELECT pg_advisory_unlock($1)")
         .bind(key)
         .execute(&mut *conn)
@@ -172,7 +169,8 @@ pub async fn run_sweep_reconcile_cycle(state: Arc<AppState>) {
 
 #[instrument(skip(state))]
 async fn run_confirm_cycle(state: &AppState) -> Result<(), AppError> {
-    let Some(lock_conn) = acquire_advisory_lock(state, SWEEP_CONFIRM_ADVISORY_LOCK_KEY).await? else {
+    let Some(lock_conn) = acquire_advisory_lock(state, SWEEP_CONFIRM_ADVISORY_LOCK_KEY).await?
+    else {
         debug!("sweep confirm cycle: advisory lock held by another instance — skipping");
         return Ok(());
     };
@@ -184,7 +182,10 @@ async fn run_confirm_cycle(state: &AppState) -> Result<(), AppError> {
 }
 
 async fn confirm_cycle_inner(state: &AppState) -> Result<(), AppError> {
-    let tips = state.db.get_tips_awaiting_sweep_confirmation(BATCH_SIZE).await?;
+    let tips = state
+        .db
+        .get_tips_awaiting_sweep_confirmation(BATCH_SIZE)
+        .await?;
     if tips.is_empty() {
         debug!("no tips awaiting sweep confirmation");
         return Ok(());
@@ -257,7 +258,13 @@ async fn process_awaiting_tip(state: &AppState, tip: &SocialTipRow) -> Result<()
     let settled = if txid_matches {
         state
             .db
-            .confirm_sweep_onchain(tip.id, &winner.txid, winner.block_height as i32, block_hash, None)
+            .confirm_sweep_onchain(
+                tip.id,
+                &winner.txid,
+                winner.block_height as i32,
+                block_hash,
+                None,
+            )
             .await?
     } else {
         debug!(
@@ -267,7 +274,12 @@ async fn process_awaiting_tip(state: &AppState, tip: &SocialTipRow) -> Result<()
         );
         state
             .db
-            .clear_claimed_by_on_settle(tip.id, &winner.txid, winner.block_height as i32, block_hash)
+            .clear_claimed_by_on_settle(
+                tip.id,
+                &winner.txid,
+                winner.block_height as i32,
+                block_hash,
+            )
             .await?
     };
 
@@ -349,8 +361,9 @@ async fn probe_grin_spends(
         .as_ref()
         .ok_or_else(|| AppError::NodeError("grin client disabled".into()))?;
 
-    let commit = grin_commitment(tip)
-        .ok_or_else(|| AppError::ValidationError("grin commitment missing for sweep probe".into()))?;
+    let commit = grin_commitment(tip).ok_or_else(|| {
+        AppError::ValidationError("grin commitment missing for sweep probe".into())
+    })?;
 
     let tip_height = grin.get_height().await? as i64;
 
@@ -402,10 +415,9 @@ async fn probe_electrum_spends(
     }
     .ok_or_else(|| AppError::NodeError(format!("{asset} Electrum client disabled")))?;
 
-    let address = tip
-        .tip_address
-        .as_deref()
-        .ok_or_else(|| AppError::ValidationError("tip_address missing for Electrum probe".into()))?;
+    let address = tip.tip_address.as_deref().ok_or_else(|| {
+        AppError::ValidationError("tip_address missing for Electrum probe".into())
+    })?;
 
     let history = electrum.get_history(address).await?;
     // Chain height comes from ELECTRUM, not a local node (the backend runs none).
@@ -500,7 +512,10 @@ async fn run_reorg_cycle(state: &AppState) -> Result<(), AppError> {
 }
 
 async fn reorg_cycle_inner(state: &AppState) -> Result<(), AppError> {
-    let tips = state.db.get_settled_tips_for_reorg_check(BATCH_SIZE).await?;
+    let tips = state
+        .db
+        .get_settled_tips_for_reorg_check(BATCH_SIZE)
+        .await?;
     if tips.is_empty() {
         debug!("no settled tips to reorg-check");
         return Ok(());
@@ -687,10 +702,22 @@ mod tests {
         // Funding tx: tip address RECEIVES; recv != 0 → not a spend.
         let tx = VerboseTransaction {
             txid: "fund".into(),
-            vin: vec![VerboseVin { txid: Some("alice_prev".into()), vout: Some(0), prevout: None }],
+            vin: vec![VerboseVin {
+                txid: Some("alice_prev".into()),
+                vout: Some(0),
+                prevout: None,
+            }],
             vout: vec![
-                VerboseVout { value: 0.001, n: 0, script_pub_key: spk("ltc1qtip") },
-                VerboseVout { value: 0.296, n: 1, script_pub_key: spk("ltc1qalice") },
+                VerboseVout {
+                    value: 0.001,
+                    n: 0,
+                    script_pub_key: spk("ltc1qtip"),
+                },
+                VerboseVout {
+                    value: 0.296,
+                    n: 1,
+                    script_pub_key: spk("ltc1qalice"),
+                },
             ],
         };
         assert!(!is_verbose_tx_spend_of(&tx, "ltc1qtip").unwrap());
@@ -701,8 +728,16 @@ mod tests {
         // Sweep: tip address absent from outputs (recv == 0) → spend.
         let tx = VerboseTransaction {
             txid: "sweep".into(),
-            vin: vec![VerboseVin { txid: Some("fund".into()), vout: Some(0), prevout: None }],
-            vout: vec![VerboseVout { value: 0.00099, n: 0, script_pub_key: spk("ltc1qbob") }],
+            vin: vec![VerboseVin {
+                txid: Some("fund".into()),
+                vout: Some(0),
+                prevout: None,
+            }],
+            vout: vec![VerboseVout {
+                value: 0.00099,
+                n: 0,
+                script_pub_key: spk("ltc1qbob"),
+            }],
         };
         assert!(is_verbose_tx_spend_of(&tx, "ltc1qtip").unwrap());
     }
@@ -713,10 +748,22 @@ mod tests {
         // recv != 0 → not a spend (guards the funding-with-change case).
         let tx = VerboseTransaction {
             txid: "pay".into(),
-            vin: vec![VerboseVin { txid: Some("payer_prev".into()), vout: Some(0), prevout: None }],
+            vin: vec![VerboseVin {
+                txid: Some("payer_prev".into()),
+                vout: Some(0),
+                prevout: None,
+            }],
             vout: vec![
-                VerboseVout { value: 0.5, n: 0, script_pub_key: spk("ltc1qtip") },
-                VerboseVout { value: 0.3, n: 1, script_pub_key: spk("ltc1qpayer") },
+                VerboseVout {
+                    value: 0.5,
+                    n: 0,
+                    script_pub_key: spk("ltc1qtip"),
+                },
+                VerboseVout {
+                    value: 0.3,
+                    n: 1,
+                    script_pub_key: spk("ltc1qpayer"),
+                },
             ],
         };
         assert!(!is_verbose_tx_spend_of(&tx, "ltc1qtip").unwrap());

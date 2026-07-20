@@ -1,0 +1,6 @@
+# Node deps — reproducible from package-lock.json (`npm ci`).
+node_modules/
+
+# NOTE: dist/ is intentionally NOT ignored. rust-embed bakes admin-ui/dist/ into
+# the server binary at compile time, so the built console is committed. Rebuild it
+# with `npm run build` in this directory whenever src/ changes (CI checks freshness).

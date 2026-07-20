@@ -17,8 +17,12 @@ else
   mapfile -t FILES < <(find . -type f -not -path './.git/*' -not -path './target/*' -printf '%P\n')
 fi
 
-# Secret shapes (not names): PEM/OpenSSH/PGP private-key blocks and seed phrases.
-PATTERNS='(-----BEGIN ([A-Z ]+ )?PRIVATE KEY-----|-----BEGIN PGP PRIVATE KEY|BEGIN OPENSSH PRIVATE KEY|\b(mnemonic|seed[_ ]?phrase)\b\s*[:=])'
+# Secret shapes (not names), covering the classes this backend actually handles:
+#   - PEM/OpenSSH/PGP private-key blocks and seed-phrase markers
+#   - nsec1... Nostr SECRET keys (bech32)
+#   - a *_PEPPER / *_SALT (or admin key/secret) assigned a 32+ hex-char value, i.e.
+#     an `openssl rand -hex 32` peppered secret pasted in cleartext
+PATTERNS='(-----BEGIN ([A-Z ]+ )?PRIVATE KEY-----|-----BEGIN PGP PRIVATE KEY|BEGIN OPENSSH PRIVATE KEY|\b(mnemonic|seed[_ ]?phrase)\b\s*[:=]|nsec1[0-9a-z]{20,}|\b[A-Z_]*(PEPPER|SALT|INTEGRITY_SECRET)[A-Z_]*\s*=\s*[0-9a-fA-F]{32,})'
 
 fail=0
 for f in "${FILES[@]}"; do

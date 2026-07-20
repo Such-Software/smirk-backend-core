@@ -242,8 +242,7 @@ impl LwsClient {
             Some(_) => Ok(()),
             None => {
                 self.admin_add_account(address, view_key).await?;
-                let current =
-                    self.account_scan_height(address).await?.unwrap_or(u64::MAX);
+                let current = self.account_scan_height(address).await?.unwrap_or(u64::MAX);
                 if start_height < current {
                     // The account is now added at the chain tip. If this backfill
                     // rescan fails, the account is stranded at the tip: it reads a

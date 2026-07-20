@@ -92,7 +92,7 @@ async fn admin_login_guard_refresh_logout_flow() {
 
     let app = require_app!();
     let admin = app.admin_router();
-    let secret = app.state.config.admin.key_integrity_secret.clone();
+    let secret = app.state.cfg().admin.key_integrity_secret.clone();
 
     // Seed a PENDING admin key for our signer.
     let sk = random_signer();

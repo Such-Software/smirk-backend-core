@@ -74,7 +74,11 @@ async fn check_asset_confirmations(state: &AppState, asset: &str) -> Result<(), 
         debug!(asset, "no tips awaiting confirmation");
         return Ok(());
     }
-    info!(asset, count = tips.len(), "checking tip funding confirmations");
+    info!(
+        asset,
+        count = tips.len(),
+        "checking tip funding confirmations"
+    );
 
     for tip in &tips {
         let funding_txid = match tip.funding_txid.as_deref() {
@@ -125,7 +129,10 @@ async fn check_grin_confirmations(state: &AppState) -> Result<(), AppError> {
         debug!("no grin tips awaiting confirmation");
         return Ok(());
     }
-    info!(count = tips.len(), "checking grin tip funding confirmations");
+    info!(
+        count = tips.len(),
+        "checking grin tip funding confirmations"
+    );
 
     // One tip-height read for the whole batch. A node error here aborts the pass
     // (logged/swallowed by the caller) leaving every row untouched — never a
@@ -427,7 +434,11 @@ async fn process_pending_verifications(state: &AppState) -> Result<(), AppError>
         match verify_funding_amount(state, tip).await {
             FundingVerification::Verified { observed } => {
                 let observed_i64 = i64::try_from(observed).unwrap_or(i64::MAX);
-                match state.db.mark_tip_funding_verified(tip.id, observed_i64).await {
+                match state
+                    .db
+                    .mark_tip_funding_verified(tip.id, observed_i64)
+                    .await
+                {
                     Ok(Some(_updated)) => {
                         info!(
                             tip_id = %tip.id, asset = %tip.asset,
@@ -437,20 +448,32 @@ async fn process_pending_verifications(state: &AppState) -> Result<(), AppError>
                         // Public tips deliver by share URL: no recipient DM /
                         // announcement side-effect to fire here.
                     }
-                    Ok(None) => debug!(tip_id = %tip.id, "verified: row no longer pending_confirmation — skipping"),
-                    Err(e) => warn!(tip_id = %tip.id, error = %e, "mark_tip_funding_verified DB error"),
+                    Ok(None) => {
+                        debug!(tip_id = %tip.id, "verified: row no longer pending_confirmation — skipping")
+                    }
+                    Err(e) => {
+                        warn!(tip_id = %tip.id, error = %e, "mark_tip_funding_verified DB error")
+                    }
                 }
             }
             FundingVerification::Short { observed } => {
                 let observed_i64 = i64::try_from(observed).unwrap_or(i64::MAX);
-                match state.db.mark_tip_funding_mismatch(tip.id, observed_i64).await {
+                match state
+                    .db
+                    .mark_tip_funding_mismatch(tip.id, observed_i64)
+                    .await
+                {
                     Ok(Some(_updated)) => warn!(
                         tip_id = %tip.id, asset = %tip.asset,
                         declared = tip.amount, observed = observed_i64,
                         "tip funding mismatch — sender funded LESS than declared"
                     ),
-                    Ok(None) => debug!(tip_id = %tip.id, "mismatch: row no longer pending_confirmation — skipping"),
-                    Err(e) => warn!(tip_id = %tip.id, error = %e, "mark_tip_funding_mismatch DB error"),
+                    Ok(None) => {
+                        debug!(tip_id = %tip.id, "mismatch: row no longer pending_confirmation — skipping")
+                    }
+                    Err(e) => {
+                        warn!(tip_id = %tip.id, error = %e, "mark_tip_funding_mismatch DB error")
+                    }
                 }
             }
             FundingVerification::Unfunded => {
@@ -560,7 +583,13 @@ mod tests {
             &resp(vec![tx(1_000, 0, 100, false), tx(0, 1_000, 110, false)]),
             1_000,
         );
-        assert_eq!(r, FundingVerification::Drained { net: 0, total_sent: 1_000 });
+        assert_eq!(
+            r,
+            FundingVerification::Drained {
+                net: 0,
+                total_sent: 1_000
+            }
+        );
     }
 
     #[test]

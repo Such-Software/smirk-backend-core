@@ -170,7 +170,10 @@ impl GrinLwsClient {
     }
 
     fn node_err_status(&self, label: &str, status: reqwest::StatusCode) -> AppError {
-        AppError::NodeError(format!("grin-lws {label} failed (HTTP {})", status.as_u16()))
+        AppError::NodeError(format!(
+            "grin-lws {label} failed (HTTP {})",
+            status.as_u16()
+        ))
     }
 }
 

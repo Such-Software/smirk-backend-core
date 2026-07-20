@@ -50,7 +50,10 @@ pub async fn run_tip_draft_gc_cycle(state: Arc<AppState>) {
                 );
             }
             if !cancelled.is_empty() {
-                info!(count = cancelled.len(), "tip-draft GC: cancelled abandoned drafts");
+                info!(
+                    count = cancelled.len(),
+                    "tip-draft GC: cancelled abandoned drafts"
+                );
             }
         }
         Err(e) => warn!(error = %e, "tip-draft GC cycle failed"),

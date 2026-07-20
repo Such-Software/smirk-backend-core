@@ -36,6 +36,26 @@ jobs:
           cargo run --quiet --bin gen_openapi > /tmp/openapi.json
           diff openapi.json /tmp/openapi.json
 
+  console-drift:
+    name: operator console drift gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Rebuild the admin-ui bundle from source (npm ci = reproducible from the
+      # lockfile) and fail if the committed admin-ui/dist drifts. rust-embed bakes
+      # dist into the server binary, so a stale dist would silently ship an old
+      # console. Same guarantee the openapi-drift job gives the API client.
+      - name: Rebuild admin-ui; fail if dist drifts from committed
+        working-directory: admin-ui
+        run: |
+          npm ci
+          npm run build
+      - name: git diff (dist must be committed and current)
+        run: git diff --exit-code -- admin-ui/dist
+
   rust:
     name: fmt / clippy / build / test / doc-test
     runs-on: ubuntu-latest

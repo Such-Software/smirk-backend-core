@@ -169,11 +169,9 @@ impl Database {
     /// `pending_confirmation` so the funding verifier (not the caller) owns the
     /// transition to `pending`.
     #[instrument(skip(self, new))]
-    pub async fn create_social_tip(
-        &self,
-        new: NewSocialTip<'_>,
-    ) -> Result<SocialTipRow, AppError> {
-        self.insert_social_tip(new, TipStatus::PendingConfirmation).await
+    pub async fn create_social_tip(&self, new: NewSocialTip<'_>) -> Result<SocialTipRow, AppError> {
+        self.insert_social_tip(new, TipStatus::PendingConfirmation)
+            .await
     }
 
     /// All tips this user has sent, newest first (every status).
@@ -858,9 +856,7 @@ impl Database {
     /// cleared the funding verifier and is a real tip the sender expects claimed;
     /// it must NOT be auto-cancelled here.
     #[instrument(skip(self))]
-    pub async fn cancel_stuck_pending_confirmation(
-        &self,
-    ) -> Result<Vec<GcCancelledTip>, AppError> {
+    pub async fn cancel_stuck_pending_confirmation(&self) -> Result<Vec<GcCancelledTip>, AppError> {
         let rows = sqlx::query_as::<_, GcCancelledTip>(
             "UPDATE social_tips \
              SET status = 'cancelled', updated_at = NOW() \

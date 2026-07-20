@@ -89,7 +89,8 @@ pub async fn try_app_with(mutate: impl FnOnce(&mut Config)) -> Option<TestApp> {
         .enabled
         .then(|| AdminSessionManager::new(&config.admin.jwt_secret));
     let state = Arc::new(AppState {
-        config,
+        config: Arc::new(arc_swap::ArcSwap::from_pointee(config.clone())),
+        config_base: Arc::new(config),
         db,
         sessions,
         chains,
@@ -98,6 +99,7 @@ pub async fn try_app_with(mutate: impl FnOnce(&mut Config)) -> Option<TestApp> {
         web_challenges: Arc::default(),
         prices,
         admin_sessions,
+        shutdown: Arc::default(),
     });
 
     Some(TestApp {
@@ -195,13 +197,14 @@ impl TestApp {
         extra_headers: &[(&str, &str)],
         body: Option<Value>,
     ) -> (StatusCode, axum::http::HeaderMap, Value) {
-        let mut builder = Request::builder()
-            .method(method)
-            .uri(uri)
-            .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
-                [127, 0, 0, 1],
-                0,
-            ))));
+        let mut builder =
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                    [127, 0, 0, 1],
+                    0,
+                ))));
         for (k, v) in extra_headers {
             builder = builder.header(*k, *v);
         }
@@ -258,7 +261,7 @@ impl TestApp {
             .expect("mint token pair");
         let hash = hash_refresh_token(
             &pair.refresh_token,
-            &self.state.config.secrets.refresh_token_pepper,
+            &self.state.cfg().secrets.refresh_token_pepper,
         );
         self.state
             .db

@@ -91,13 +91,12 @@ impl Authorization for AdmissionService {
         // Premium membership — only the `premium-post` policy consults it, so skip
         // the (cheap, indexed) lookup entirely under the other policies (and when
         // the author is already write-allowlisted).
-        let author_premium = if !author_allowlisted
-            && self.relay.write_policy() == WritePolicy::PremiumPost
-        {
-            self.db.is_premium_npub(&author_hex).await.unwrap_or(false)
-        } else {
-            false
-        };
+        let author_premium =
+            if !author_allowlisted && self.relay.write_policy() == WritePolicy::PremiumPost {
+                self.db.is_premium_npub(&author_hex).await.unwrap_or(false)
+            } else {
+                false
+            };
 
         // Recipient registration (only when the author isn't already registered /
         // allowlisted): collect up to MAX_P_TAGS distinct `p` tags and resolve them

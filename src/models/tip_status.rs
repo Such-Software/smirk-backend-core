@@ -126,7 +126,10 @@ mod tests {
     #[test]
     fn wire_strings_match_check_constraint() {
         assert_eq!(TipStatus::Draft.as_str(), "draft");
-        assert_eq!(TipStatus::PendingConfirmation.as_str(), "pending_confirmation");
+        assert_eq!(
+            TipStatus::PendingConfirmation.as_str(),
+            "pending_confirmation"
+        );
         assert_eq!(TipStatus::Pending.as_str(), "pending");
         assert_eq!(TipStatus::Claiming.as_str(), "claiming");
         assert_eq!(TipStatus::Claimed.as_str(), "claimed");

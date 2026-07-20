@@ -230,10 +230,7 @@ impl Database {
     /// registered on *this* backend. Used to look up a recipient's linked Nostr
     /// pubkey so a bare-`grin1…`-addressed send can route over Nostr gift-wrap.
     #[instrument(skip(self, address))]
-    pub async fn find_user_by_grin_address(
-        &self,
-        address: &str,
-    ) -> Result<Option<User>, AppError> {
+    pub async fn find_user_by_grin_address(&self, address: &str) -> Result<Option<User>, AppError> {
         let sql = format!(
             "SELECT {USER_COLS} FROM users u \
              JOIN user_keys k ON k.user_id = u.id \

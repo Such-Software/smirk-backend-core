@@ -160,7 +160,7 @@ pub struct ClawbackTipResponse {
 
 /// Reject when tips are not enabled on this instance.
 fn ensure_tips_enabled(state: &AppState) -> Result<(), AppError> {
-    if state.config.features.tips {
+    if state.cfg().features.tips {
         Ok(())
     } else {
         Err(AppError::ValidationError(
@@ -171,7 +171,7 @@ fn ensure_tips_enabled(state: &AppState) -> Result<(), AppError> {
 
 /// Whether `asset` is a tip-capable chain enabled on this instance.
 fn supported_tip_asset(state: &AppState, asset: &str) -> bool {
-    let c = &state.config.features.chains;
+    let c = &state.cfg().features.chains;
     match asset {
         "btc" => c.btc,
         "ltc" => c.ltc,
@@ -321,7 +321,9 @@ pub async fn create_social_tip(
     let encrypted_key: Option<Vec<u8>> = match req.encrypted_key.as_deref() {
         Some(h) if !h.is_empty() => {
             if h.len() > MAX_ENCRYPTED_KEY_HEX {
-                return Err(AppError::ValidationError("encrypted_key is too large.".into()));
+                return Err(AppError::ValidationError(
+                    "encrypted_key is too large.".into(),
+                ));
             }
             Some(
                 hex::decode(h)
@@ -382,7 +384,7 @@ pub async fn create_social_tip(
     };
 
     let share_url = state
-        .config
+        .cfg()
         .tip_share_base
         .as_ref()
         .map(|base| format!("{}/{}", base.trim_end_matches('/'), tip.id));
@@ -560,10 +562,14 @@ pub async fn attach_funding(
     // DB length-overflow 500 (funding_txid is VARCHAR(128)).
     let funding_txid = req.funding_txid.trim();
     if funding_txid.is_empty() {
-        return Err(AppError::ValidationError("funding_txid is required.".into()));
+        return Err(AppError::ValidationError(
+            "funding_txid is required.".into(),
+        ));
     }
     if funding_txid.len() > 128 {
-        return Err(AppError::ValidationError("funding_txid is too long.".into()));
+        return Err(AppError::ValidationError(
+            "funding_txid is too long.".into(),
+        ));
     }
 
     // The DB fn returns Ok(row) / NotFound / ValidationError; just surface it.
@@ -573,7 +579,7 @@ pub async fn attach_funding(
         .await?;
 
     let share_url = state
-        .config
+        .cfg()
         .tip_share_base
         .as_ref()
         .map(|base| format!("{}/{}", base.trim_end_matches('/'), tip.id));
@@ -716,10 +722,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/tips/social/claimable", get(get_claimable_social_tips))
         .route("/tips/social/:tip_id/public", get(get_public_social_tip))
         .route("/tips/social/:tip_id/cancel", post(cancel_social_tip))
-        .route(
-            "/tips/social/:tip_id/attach-funding",
-            post(attach_funding),
-        )
+        .route("/tips/social/:tip_id/attach-funding", post(attach_funding))
         .route("/tips/social/:tip_id/claim", post(claim_social_tip))
         .route("/tips/social/:tip_id/confirm-sweep", post(confirm_sweep))
         .route("/tips/social/:tip_id/clawback", post(clawback_social_tip))

@@ -307,6 +307,19 @@ pub struct ServerConfig {
     pub integrity_mac: String,
 }
 
+/// A row of the operator-editable settings overlay (`operator_settings`). One row
+/// per config section; `doc` is that section's sparse JSON patch over env. MAC'd
+/// with ADMIN_KEY_INTEGRITY_SECRET + audited on every write. Holds no secrets.
+#[derive(Debug, Clone, FromRow)]
+pub struct OperatorSettingRow {
+    pub section: String,
+    pub doc: serde_json::Value,
+    pub version: i64,
+    pub updated_by: Option<Uuid>,
+    pub updated_at: DateTime<Utc>,
+    pub integrity_mac: String,
+}
+
 /// A row in the tamper-evident privileged-action audit chain.
 #[derive(Debug, Clone, FromRow)]
 pub struct AdminAuditLog {
