@@ -48,6 +48,11 @@ pub struct LwsClient {
     admin_key: Secret,
     daemon_url: String,
     http: reqwest::Client,
+    /// First-use probe of the LWS `--max-subaddresses` option, cached for the
+    /// process. Shared across clones (an `AppState` hands out `LwsClient`
+    /// clones), so the probe runs once per network, not once per request. A
+    /// FAILED probe is not cached, so a temporarily unreachable LWS is retried.
+    subaddr_capacity: std::sync::Arc<tokio::sync::OnceCell<u32>>,
 }
 
 impl LwsClient {
@@ -75,6 +80,7 @@ impl LwsClient {
             admin_key: Secret::new(cfg.lws_admin_key.clone()),
             daemon_url: cfg.daemon_url.clone(),
             http,
+            subaddr_capacity: std::sync::Arc::default(),
         })
     }
 
@@ -206,10 +212,219 @@ impl LwsClient {
     // ── admin API ────────────────────────────────────────────────────────────
 
     /// Register + activate an account (admin `add_account`), scanning from the
-    /// current height.
-    #[instrument(skip(self, view_key), fields(net = %self.network))]
-    pub async fn register_account(&self, address: &str, view_key: &str) -> Result<(), AppError> {
-        self.admin_add_account(address, view_key).await
+    /// current height, then provision `provision_minors` subaddress indices for
+    /// account 0 (`0` = provisioning disabled — the dark default).
+    ///
+    /// Provisioning runs AFTER the add so the account exists first. A provision
+    /// failure is a HARD error (money gate G3: never silently skip — a wallet
+    /// that expects subaddress receipts must not be told scanning is set up when
+    /// the subaddresses were not registered).
+    #[instrument(skip(self, view_key), fields(net = %self.network, provision_minors))]
+    pub async fn register_account(
+        &self,
+        address: &str,
+        view_key: &str,
+        provision_minors: u32,
+    ) -> Result<(), AppError> {
+        if provision_minors == 0 {
+            // Provisioning off (the dark default): exactly the call this made
+            // before, including monero-lws answering a duplicate `add_account`
+            // with `account_exists` (an HTTP 500 it maps to a node error).
+            return self.admin_add_account(address, view_key).await;
+        }
+        // Provisioning on: an account that ALREADY exists must still be brought
+        // up to the required ceiling. monero-lws fails a duplicate `add_account`
+        // (`db::storage::do_add_account` returns `lws::error::account_exists`,
+        // served as a 500), so calling it unconditionally would abort before the
+        // provisioning below and make the account permanently unprovisionable
+        // through this path. Existence is checked first instead; nothing about
+        // the account's scan state is touched.
+        if self.account_scan_height(address).await?.is_none() {
+            self.admin_add_account(address, view_key).await?;
+        }
+        self.provision_account0_covering(address, view_key, provision_minors)
+            .await?;
+        Ok(())
+    }
+
+    /// The LWS `--max-subaddresses` ceiling, probed once and cached.
+    ///
+    /// monero-lws exposes it on the USER endpoint `/get_version`
+    /// (`rest_server.cpp` `endpoints[]`, `is_admin = false`), and rejects any
+    /// `provision_subaddrs` whose `n_maj * n_min` exceeds it. It defaults to `0`
+    /// (subaddresses DISABLED), which is exactly the misconfiguration that made
+    /// provisioning fail late and half-way.
+    pub async fn max_subaddresses(&self) -> Result<u32, AppError> {
+        let cached = self
+            .subaddr_capacity
+            .get_or_try_init(|| async {
+                let url = format!("{}/get_version", self.user_url);
+                let resp: LwsVersionResponse = self
+                    .post_json(url, "get_version", &serde_json::json!({}))
+                    .await?;
+                Ok::<u32, AppError>(resp.max_subaddresses)
+            })
+            .await?;
+        Ok(*cached)
+    }
+
+    /// Fail CLOSED unless this LWS can satisfy a `n_min`-wide provision for one
+    /// major index: refuse up front with an operator-legible error rather than
+    /// registering an account that only half-works (scanning set up, subaddress
+    /// receipts silently unattributed).
+    async fn ensure_subaddr_capacity(&self, n_min: u32) -> Result<(), AppError> {
+        let max = self.max_subaddresses().await?;
+        if max < n_min {
+            return Err(AppError::NodeError(format!(
+                "{} LWS cannot provision subaddresses: it allows max_subaddresses={max} \
+                 but {n_min} are required. Start monero-lws with \
+                 --max-subaddresses {n_min} (or higher), or disable \
+                 FEATURE_XMR_SUBADDR_PROVISIONING.",
+                self.network
+            )));
+        }
+        Ok(())
+    }
+
+    /// Provision (`upsert`) subaddress ranges at the LWS so it attributes
+    /// subaddress receipts, via the USER endpoint `/provision_subaddrs`.
+    ///
+    /// CONFIRMED a USER endpoint (keyed by `address` + `view_key`, NOT admin):
+    /// monero-lws registers `/provision_subaddrs` in `src/rest_server.cpp`
+    /// `endpoints[]` with `is_admin = false`, and its wire reader
+    /// (`src/rpc/light_wallet.cpp` `read_bytes(provision_subaddrs_request&)`)
+    /// reads `address` + `view_key` + optional `maj_i/min_i/n_maj/n_min/get_all`.
+    ///
+    /// Provisions the `[min_i .. min_i + n_min)` minor range for ONE major index
+    /// (`maj_i`; `n_maj = 1`). SAFETY/LIVE-GATE: the LWS must be started with
+    /// `--max-subaddresses >= n_min` — it defaults to `0` (subaddresses
+    /// DISABLED), in which case the LWS returns a `max_subaddresses` error.
+    /// Returns the CONFIRMED contiguous minor ceiling for `maj_i` as the LWS
+    /// reports it back, never the ask. `get_all` is sent as `true` because
+    /// `new_subaddrs` carries only the ranges a call newly added (an idempotent
+    /// repeat returns it empty), so `all_subaddrs` is the only field that can
+    /// state the ceiling actually in force. A body from which the ceiling cannot
+    /// be established is an ERROR, never a guess: a ceiling the wallet trusts
+    /// but the LWS is not scanning turns a receive into invisible funds.
+    #[instrument(skip(self, view_key), fields(net = %self.network, maj_i, min_i, n_min))]
+    pub async fn provision_subaddrs(
+        &self,
+        address: &str,
+        view_key: &str,
+        maj_i: u32,
+        min_i: u32,
+        n_min: u32,
+    ) -> Result<u32, AppError> {
+        let url = format!("{}/provision_subaddrs", self.user_url);
+        let body = ProvisionSubaddrsRequest {
+            address: address.to_string(),
+            view_key: view_key.to_string(),
+            maj_i,
+            min_i,
+            n_maj: 1,
+            n_min,
+            get_all: true,
+        };
+        // HTTP success = provisioned: the endpoint returns a non-2xx (mapped to
+        // NodeError) on any failure, incl. `max_subaddresses`, so a 2xx cannot be
+        // a silent no-op.
+        let resp: ProvisionSubaddrsResponse =
+            self.post_json(url, "provision_subaddrs", &body).await?;
+        // Only major 0 has a defined contiguous-from-zero reading today, which is
+        // the only major this client provisions.
+        if maj_i != 0 {
+            return Err(self.node_err(
+                "provision_subaddrs",
+                "only major account 0 can be provisioned",
+            ));
+        }
+        resp.confirmed_minor_max().ok_or_else(|| {
+            self.node_err(
+                "provision_subaddrs",
+                "response did not confirm a contiguous minor range for account 0",
+            )
+        })
+    }
+
+    /// Provision `n_min` minor indices for major account 0, retrying a transient
+    /// failure with the same backoff as the import rescan. `None` when
+    /// `n_min == 0` (provisioning off: the dark default); otherwise the
+    /// LWS-confirmed minor ceiling. The upsert is idempotent, so a retry is safe.
+    ///
+    /// Capacity is probed BEFORE the first attempt so an LWS that cannot satisfy
+    /// the ask fails closed with one legible error instead of three timed-out
+    /// retries of a request that can never succeed.
+    async fn provision_account0_with_retry(
+        &self,
+        address: &str,
+        view_key: &str,
+        n_min: u32,
+    ) -> Result<Option<u32>, AppError> {
+        if n_min == 0 {
+            return Ok(None);
+        }
+        self.ensure_subaddr_capacity(n_min).await?;
+        let mut attempt = 0u32;
+        loop {
+            match self
+                .provision_subaddrs(address, view_key, 0, 0, n_min)
+                .await
+            {
+                Ok(confirmed) => return Ok(Some(confirmed)),
+                Err(e) => {
+                    attempt += 1;
+                    if attempt >= 3 {
+                        return Err(e);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(300 * u64::from(attempt)))
+                        .await;
+                }
+            }
+        }
+    }
+
+    /// Provision account 0 and REQUIRE the confirmed ceiling to cover the ask.
+    ///
+    /// `n_min` indices starting at minor 0 means the ceiling must be at least
+    /// `n_min - 1`. Registration promises the wallet that the whole batch is
+    /// being scanned, so a short ceiling is a hard error rather than a quiet
+    /// downgrade the wallet would never learn about. `None` when provisioning is
+    /// off.
+    pub(crate) async fn provision_account0_covering(
+        &self,
+        address: &str,
+        view_key: &str,
+        n_min: u32,
+    ) -> Result<Option<u32>, AppError> {
+        let Some(confirmed) = self
+            .provision_account0_with_retry(address, view_key, n_min)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if confirmed.saturating_add(1) < n_min {
+            return Err(self.node_err(
+                "provision_subaddrs",
+                "confirmed subaddress range is narrower than requested",
+            ));
+        }
+        Ok(Some(confirmed))
+    }
+
+    /// Provision account 0 for an on-demand request, returning the LWS-confirmed
+    /// minor ceiling verbatim. Unlike [`Self::provision_account0_covering`] a
+    /// ceiling wider than the ask is reported as-is (an account provisioned
+    /// earlier for a larger batch keeps its larger range; the upsert never
+    /// shrinks anything), so the caller always learns the truth.
+    pub async fn provision_account0(
+        &self,
+        address: &str,
+        view_key: &str,
+        n_min: u32,
+    ) -> Result<u32, AppError> {
+        self.provision_account0_with_retry(address, view_key, n_min)
+            .await?
+            .ok_or_else(|| AppError::ValidationError("subaddress count must be at least 1".into()))
     }
 
     /// Register an account and scan it from `start_height` (a wallet birthday).
@@ -219,12 +434,13 @@ impl LwsClient {
     /// rescan. Read the post-add scan height and only rescan when strictly
     /// lowering it — honoring the `rescan` backwards-only invariant (a rescan to
     /// `height >= current` is undefined behavior in monero-lws).
-    #[instrument(skip(self, view_key), fields(net = %self.network, start_height))]
+    #[instrument(skip(self, view_key), fields(net = %self.network, start_height, provision_minors))]
     pub async fn import_account(
         &self,
         address: &str,
         view_key: &str,
         start_height: u64,
+        provision_minors: u32,
     ) -> Result<(), AppError> {
         // Only a NEWLY added account needs the backwards rescan to its birthday
         // (monero-lws `add_account` starts every account at the chain tip). An
@@ -239,35 +455,72 @@ impl LwsClient {
         // birthday goes through the explicit admin `rescan` path, not this one.
         match self.account_scan_height(address).await? {
             // Already registered: never reset an existing account from here.
-            Some(_) => Ok(()),
+            //
+            // It is still brought up to the required subaddress ceiling. The
+            // upsert is idempotent and touches no scan state, so the
+            // anti-reset-loop invariant is untouched, while an account that was
+            // registered before provisioning was enabled (or before the ceiling
+            // was raised) can finally be provisioned instead of being locked out
+            // of the feature forever by this short-circuit.
+            Some(_) => {
+                self.provision_account0_covering(address, view_key, provision_minors)
+                    .await?;
+                Ok(())
+            }
             None => {
                 self.admin_add_account(address, view_key).await?;
-                let current = self.account_scan_height(address).await?.unwrap_or(u64::MAX);
-                if start_height < current {
-                    // The account is now added at the chain tip. If this backfill
-                    // rescan fails, the account is stranded at the tip: it reads a
-                    // 0 balance and the `Some(_)` short-circuit above (which exists
-                    // to prevent the reset loop) means a later re-registration will
-                    // NOT retry it. So retry a transient failure here, where we
-                    // still know this is a fresh account that owes a backwards scan.
-                    let mut attempt = 0u32;
-                    loop {
-                        match self.rescan(vec![address.to_string()], start_height).await {
-                            Ok(()) => break,
-                            Err(e) => {
-                                attempt += 1;
-                                if attempt >= 3 {
-                                    return Err(e);
-                                }
-                                tokio::time::sleep(std::time::Duration::from_millis(
-                                    300 * u64::from(attempt),
-                                ))
-                                .await;
-                            }
-                        }
-                    }
-                }
+                // Provision subaddress ranges BEFORE the backwards rescan (money
+                // gate G3): the rescan re-scans forward from the birthday, so the
+                // subaddresses must ALREADY be registered for the LWS to attribute
+                // historical subaddress receipts in that backfill.
+                //
+                // The result is HELD, not propagated with `?`. The account now
+                // exists at the LWS, so returning early here would strand it at
+                // the chain tip: every later re-registration takes the `Some(_)`
+                // branch above, answers 200, and never runs the backwards scan,
+                // leaving the wallet reading a zero balance forever. The rescan
+                // therefore always runs, and the provisioning failure is surfaced
+                // afterwards.
+                let provisioned = self
+                    .provision_account0_covering(address, view_key, provision_minors)
+                    .await;
+                let rescanned = self.rescan_back_to(address, start_height).await;
+                // A failed backfill is the graver of the two (it is the one a
+                // retry can no longer reach), so it is reported first; otherwise
+                // the provisioning failure is surfaced, never swallowed.
+                rescanned?;
+                provisioned?;
                 Ok(())
+            }
+        }
+    }
+
+    /// Lower a freshly added account's scan cursor to `start_height`, retrying a
+    /// transient failure. A no-op when the account is already at or below it
+    /// (the `rescan` backwards-only invariant).
+    async fn rescan_back_to(&self, address: &str, start_height: u64) -> Result<(), AppError> {
+        let current = self.account_scan_height(address).await?.unwrap_or(u64::MAX);
+        if start_height >= current {
+            return Ok(());
+        }
+        // The account is added at the chain tip. If this backfill rescan fails,
+        // the account is stranded at the tip: it reads a 0 balance and the
+        // `Some(_)` short-circuit in `import_account` (which exists to prevent
+        // the reset loop) means a later re-registration will NOT retry it. So
+        // retry a transient failure here, where we still know this is a fresh
+        // account that owes a backwards scan.
+        let mut attempt = 0u32;
+        loop {
+            match self.rescan(vec![address.to_string()], start_height).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    attempt += 1;
+                    if attempt >= 3 {
+                        return Err(e);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(300 * u64::from(attempt)))
+                        .await;
+                }
             }
         }
     }
@@ -589,6 +842,7 @@ mod tests {
             unlock_time: 0,
             payment_id: None,
             spent_outputs: vec![],
+            recipient: SubaddrIndex::default(),
         }
     }
 
@@ -627,6 +881,46 @@ mod tests {
         assert_eq!(confirmations_from(Some(120), Some(false), 110), Some(0));
         // Confirmed flag absent and no height → unknown.
         assert_eq!(confirmations_from(None, None, 110), None);
+    }
+
+    #[tokio::test]
+    async fn provisioning_off_makes_no_network_call() {
+        // The dark default must stay byte-identical: `n_min == 0` short-circuits
+        // before the capability probe and before any request. The configured URL
+        // points at a closed port, so any attempted call would surface as an
+        // error rather than silently succeed.
+        let client = LwsClient::monero(&cfg()).unwrap();
+        assert_eq!(
+            client
+                .provision_account0_covering("9addr", "vk", 0)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn on_demand_provisioning_rejects_a_zero_count() {
+        // A zero ask can never yield a confirmed ceiling, so it is a request
+        // error rather than a silently successful no-op.
+        let client = LwsClient::monero(&cfg()).unwrap();
+        let err = client
+            .provision_account0("9addr", "vk", 0)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::ValidationError(_)), "{err:?}");
+    }
+
+    #[test]
+    fn confirmed_ceiling_is_read_from_the_response_not_the_ask() {
+        // Regression guard for the echo bug: the value handed back to a client
+        // must come from `all_subaddrs`, so asking for 200 against an LWS that
+        // confirms only [0, 49] can never report 199.
+        let resp: ProvisionSubaddrsResponse = serde_json::from_str(
+            r#"{"new_subaddrs":[],"all_subaddrs":[{"key":0,"value":[[0,49]]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(resp.confirmed_minor_max(), Some(49));
     }
 
     #[tokio::test]

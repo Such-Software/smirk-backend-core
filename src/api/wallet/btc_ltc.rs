@@ -24,12 +24,68 @@ use tracing::instrument;
 
 use crate::api::middleware::extract_user_id_from_token;
 use crate::error::AppError;
-use crate::infra::electrum::ElectrumClient;
+use crate::infra::electrum::{BatchError, ElectrumClient};
 use crate::AppState;
 
 /// Generous cap on a raw transaction hex (~100 KB of tx). Bounds the broadcast
 /// body before it reaches the node; the axum body limit is a second backstop.
 const MAX_TX_HEX_LEN: usize = 200_000;
+
+/// HARD cap on the number of addresses in one batch (`*_multi`) request. Mirrors
+/// the fixed-ceiling discipline of [`MAX_TX_HEX_LEN`]: a client-supplied length
+/// is bounded before any network fan-out so one request cannot fan out
+/// unboundedly. A wallet with more addresses batches in groups of this size.
+const MAX_MULTI_ADDRESSES: usize = 32;
+
+/// Dark feature flag (default OFF): the additive batch (`*_multi`) endpoints are
+/// only mounted when `FEATURE_UTXO_MULTI_ADDRESS` is set truthy in the
+/// environment. OFF ⇒ the routes do not exist (404) and every existing
+/// single-address endpoint is byte-for-byte unchanged. Kept as an environment
+/// read (not a new `Config` field) to stay within this change's file lane.
+pub(crate) fn utxo_multi_enabled() -> bool {
+    crate::api::capabilities::env_flag_enabled("FEATURE_UTXO_MULTI_ADDRESS")
+}
+
+/// HTTP mapping for a batch query outcome.
+///
+/// [`BatchError::Deadline`] is its own status (504) rather than the generic
+/// upstream-unavailable 503: a batch that ran out of time is not a broken node,
+/// and a wallet should back off and re-batch smaller rather than mark the chain
+/// down. Everything else delegates to the shared [`AppError`] mapping, so the
+/// error envelope (`{error, code}`) and the CWE-209 redaction rules are
+/// unchanged.
+impl axum::response::IntoResponse for BatchError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            BatchError::App(e) => e.into_response(),
+            BatchError::Deadline => (
+                axum::http::StatusCode::GATEWAY_TIMEOUT,
+                axum::Json(serde_json::json!({
+                    "error": "Batch address query timed out",
+                    "code": "BATCH_TIMEOUT",
+                })),
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// Bound a batch address list: non-empty and within [`MAX_MULTI_ADDRESSES`].
+/// Rejects (never truncates) an oversized list so the caller's intent is never
+/// silently narrowed.
+fn validate_address_batch(addresses: &[String]) -> Result<(), AppError> {
+    if addresses.is_empty() {
+        return Err(AppError::ValidationError(
+            "addresses must not be empty".into(),
+        ));
+    }
+    if addresses.len() > MAX_MULTI_ADDRESSES {
+        return Err(AppError::ValidationError(format!(
+            "too many addresses (max {MAX_MULTI_ADDRESSES})"
+        )));
+    }
+    Ok(())
+}
 
 /// Resolve the Electrum client for a UTXO asset, or a 400 (unknown / disabled).
 fn electrum_for<'a>(state: &'a AppState, asset: &str) -> Result<&'a ElectrumClient, AppError> {
@@ -115,6 +171,61 @@ pub struct HistoryResponse {
     pub asset: String,
     pub address: String,
     pub transactions: Vec<HistoryEntry>,
+}
+
+/// A batch query for several addresses of one UTXO asset. The list is bounded
+/// server-side (see [`MAX_MULTI_ADDRESSES`]).
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct MultiAddressRequest {
+    /// `btc` or `ltc`.
+    pub asset: String,
+    /// The addresses to query (each validated by the Electrum client).
+    pub addresses: Vec<String>,
+}
+
+/// Confirmed/unconfirmed balance summed across the requested addresses. Summed
+/// with checked arithmetic server-side (a hostile value errors, never wraps);
+/// the wallet computes any grand total from these integer fields.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct MultiBalanceResponse {
+    pub asset: String,
+    pub confirmed: u64,
+    pub unconfirmed: i64,
+}
+
+/// A single unspent output TAGGED with the address it belongs to. The tag is
+/// load-bearing: the wallet never re-derives which address owns a UTXO.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct TaggedUtxo {
+    pub address: String,
+    pub txid: String,
+    pub vout: u64,
+    pub value: u64,
+    /// Block height; `0` if unconfirmed.
+    pub height: u64,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct MultiUtxosResponse {
+    pub asset: String,
+    pub utxos: Vec<TaggedUtxo>,
+}
+
+/// A transaction-history entry TAGGED with its owning address.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct TaggedHistoryEntry {
+    pub address: String,
+    pub txid: String,
+    /// Block height (`0`/negative for unconfirmed).
+    pub height: i64,
+    /// Fee in satoshis (mempool entries only).
+    pub fee: Option<u64>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct MultiHistoryResponse {
+    pub asset: String,
+    pub transactions: Vec<TaggedHistoryEntry>,
 }
 
 /// An asset-only query.
@@ -358,17 +469,147 @@ pub async fn broadcast(
     Ok(Json(BroadcastResponse { txid }))
 }
 
+// ── batch (multi-address) handlers ────────────────────────────────────────────
+
+/// Confirmed/unconfirmed balance summed across a batch of BTC/LTC addresses.
+#[utoipa::path(
+    security(("bearer_auth" = [])),
+    post,
+    path = "/wallet/utxo/balance_multi",
+    request_body = MultiAddressRequest,
+    responses(
+        (status = 200, description = "Summed balance in satoshis", body = MultiBalanceResponse),
+        (status = 400, description = "Invalid/disabled asset, address, or oversized batch"),
+        (status = 401, description = "Missing or invalid token"),
+        (status = 503, description = "Upstream node unavailable"),
+        (status = 504, description = "The batch exceeded its deadline; retry with a smaller batch")
+    ),
+    tag = "btc_ltc"
+)]
+#[instrument(skip(state, headers, req))]
+pub async fn balance_multi(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<MultiAddressRequest>,
+) -> Result<Json<MultiBalanceResponse>, BatchError> {
+    extract_user_id_from_token(&state, &headers).await?;
+    let asset = req.asset.to_lowercase();
+    validate_address_batch(&req.addresses)?;
+    let bal = electrum_for(&state, &asset)?
+        .get_balance_sum(&req.addresses)
+        .await?;
+    Ok(Json(MultiBalanceResponse {
+        asset,
+        confirmed: bal.confirmed,
+        unconfirmed: bal.unconfirmed,
+    }))
+}
+
+/// Unspent outputs across a batch of BTC/LTC addresses, each tagged with its
+/// owning address (the wallet never re-guesses UTXO ownership).
+#[utoipa::path(
+    security(("bearer_auth" = [])),
+    post,
+    path = "/wallet/utxo/utxos_multi",
+    request_body = MultiAddressRequest,
+    responses(
+        (status = 200, description = "Address-tagged unspent outputs", body = MultiUtxosResponse),
+        (status = 400, description = "Invalid/disabled asset, address, or oversized batch"),
+        (status = 401, description = "Missing or invalid token"),
+        (status = 503, description = "Upstream node unavailable"),
+        (status = 504, description = "The batch exceeded its deadline; retry with a smaller batch")
+    ),
+    tag = "btc_ltc"
+)]
+#[instrument(skip(state, headers, req))]
+pub async fn utxos_multi(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<MultiAddressRequest>,
+) -> Result<Json<MultiUtxosResponse>, BatchError> {
+    extract_user_id_from_token(&state, &headers).await?;
+    let asset = req.asset.to_lowercase();
+    validate_address_batch(&req.addresses)?;
+    let tagged = electrum_for(&state, &asset)?
+        .get_utxos_tagged(&req.addresses)
+        .await?;
+    Ok(Json(MultiUtxosResponse {
+        asset,
+        utxos: tagged
+            .into_iter()
+            .map(|(address, u)| TaggedUtxo {
+                address,
+                txid: u.tx_hash,
+                vout: u.tx_pos,
+                value: u.value,
+                height: u.height,
+            })
+            .collect(),
+    }))
+}
+
+/// Confirmed + mempool history across a batch of BTC/LTC addresses, each entry
+/// tagged with its owning address.
+#[utoipa::path(
+    security(("bearer_auth" = [])),
+    post,
+    path = "/wallet/utxo/history_multi",
+    request_body = MultiAddressRequest,
+    responses(
+        (status = 200, description = "Address-tagged transaction history", body = MultiHistoryResponse),
+        (status = 400, description = "Invalid/disabled asset, address, or oversized batch"),
+        (status = 401, description = "Missing or invalid token"),
+        (status = 503, description = "Upstream node unavailable"),
+        (status = 504, description = "The batch exceeded its deadline; retry with a smaller batch")
+    ),
+    tag = "btc_ltc"
+)]
+#[instrument(skip(state, headers, req))]
+pub async fn history_multi(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<MultiAddressRequest>,
+) -> Result<Json<MultiHistoryResponse>, BatchError> {
+    extract_user_id_from_token(&state, &headers).await?;
+    let asset = req.asset.to_lowercase();
+    validate_address_batch(&req.addresses)?;
+    let tagged = electrum_for(&state, &asset)?
+        .get_history_tagged(&req.addresses)
+        .await?;
+    Ok(Json(MultiHistoryResponse {
+        asset,
+        transactions: tagged
+            .into_iter()
+            .map(|(address, e)| TaggedHistoryEntry {
+                address,
+                txid: e.tx_hash,
+                height: e.height,
+                fee: e.fee,
+            })
+            .collect(),
+    }))
+}
+
 // ── router ────────────────────────────────────────────────────────────────────
 
 /// BTC/LTC routes, RELATIVE to the `/api/v1` mount point.
 pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
+    let mut router = Router::new()
         .route("/wallet/utxo/balance", post(balance))
         .route("/wallet/utxo/utxos", post(utxos))
         .route("/wallet/utxo/history", post(history))
         .route("/wallet/utxo/tip", post(tip))
         .route("/wallet/utxo/fee", post(fee))
-        .route("/wallet/utxo/broadcast", post(broadcast))
+        .route("/wallet/utxo/broadcast", post(broadcast));
+
+    // Dark by default: the batch endpoints exist only when explicitly enabled.
+    if utxo_multi_enabled() {
+        router = router
+            .route("/wallet/utxo/balance_multi", post(balance_multi))
+            .route("/wallet/utxo/utxos_multi", post(utxos_multi))
+            .route("/wallet/utxo/history_multi", post(history_multi));
+    }
+    router
 }
 
 #[cfg(test)]
@@ -383,5 +624,29 @@ mod tests {
         assert!(validate_tx_hex("abc").is_err()); // odd length
         assert!(validate_tx_hex("xyz!").is_err()); // non-hex
         assert!(validate_tx_hex(&"a".repeat(MAX_TX_HEX_LEN + 1)).is_err()); // too long
+    }
+
+    #[test]
+    fn multi_address_request_deserializes() {
+        let req: MultiAddressRequest =
+            serde_json::from_str(r#"{"asset":"btc","addresses":["a1","a2","a3"]}"#).unwrap();
+        assert_eq!(req.asset, "btc");
+        assert_eq!(req.addresses.len(), 3);
+    }
+
+    #[test]
+    fn address_batch_bounds() {
+        // A normal batch passes.
+        assert!(validate_address_batch(&["a".into(), "b".into()]).is_ok());
+        // Exactly at the cap passes.
+        let at_cap: Vec<String> = (0..MAX_MULTI_ADDRESSES).map(|i| i.to_string()).collect();
+        assert!(validate_address_batch(&at_cap).is_ok());
+        // Empty is rejected (never a silent no-op).
+        assert!(validate_address_batch(&[]).is_err());
+        // Oversized is rejected (never silently truncated) — money gate G13.
+        let over: Vec<String> = (0..MAX_MULTI_ADDRESSES + 1)
+            .map(|i| i.to_string())
+            .collect();
+        assert!(validate_address_batch(&over).is_err());
     }
 }

@@ -57,6 +57,67 @@ const IO_TIMEOUT: Duration = Duration::from_secs(30);
 /// busy address's full history sits well under this; the cap turns a hostile
 /// unbounded stream into a clean error instead of unbounded memory growth.
 const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+/// In-flight per-address queries within one batch (`*_multi`). Bounded so a
+/// 32-address batch is a handful of connections to the upstream server rather
+/// than 32 at once (which public fallbacks answer by throttling or dropping us),
+/// while still finishing in a fraction of the sequential time.
+const BATCH_CONCURRENCY: usize = 6;
+/// Whole-batch deadline. Deliberately below the per-exchange [`IO_TIMEOUT`], so
+/// one stalled address cannot hold a request open for `n * IO_TIMEOUT`; the
+/// batch fails fast and the caller re-batches instead of hanging.
+const BATCH_DEADLINE: Duration = Duration::from_secs(20);
+
+/// The outcome of a bounded batch query.
+///
+/// Kept distinct from a bare [`AppError`] so the API layer can answer a
+/// deadline breach with its own status (504) instead of folding it into the
+/// generic upstream-unavailable 503.
+#[derive(Debug)]
+pub enum BatchError {
+    /// A validation or upstream failure from one of the addresses.
+    App(AppError),
+    /// The batch as a whole exceeded [`BATCH_DEADLINE`].
+    Deadline,
+}
+
+impl From<AppError> for BatchError {
+    fn from(e: AppError) -> Self {
+        BatchError::App(e)
+    }
+}
+
+impl std::fmt::Display for BatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::App(e) => write!(f, "{e}"),
+            Self::Deadline => f.write_str("batch address query deadline exceeded"),
+        }
+    }
+}
+
+/// Drive per-address queries with bounded concurrency under one whole-batch
+/// deadline, yielding results in INPUT order.
+///
+/// Order preservation is not cosmetic: it keeps every batch response, and the
+/// order the checked balance sum folds in, identical to the sequential
+/// implementation, so concurrency cannot make a response depend on which server
+/// answered first. (`buffered`, not `buffer_unordered`, for exactly that.)
+async fn run_batch<T, I>(queries: I) -> Result<Vec<T>, BatchError>
+where
+    I: IntoIterator,
+    I::Item: std::future::Future<Output = Result<T, AppError>>,
+{
+    use futures::stream::{self, StreamExt, TryStreamExt};
+
+    let work = stream::iter(queries)
+        .buffered(BATCH_CONCURRENCY)
+        .try_collect::<Vec<T>>();
+
+    match timeout(BATCH_DEADLINE, work).await {
+        Ok(res) => res.map_err(BatchError::App),
+        Err(_) => Err(BatchError::Deadline),
+    }
+}
 
 /// Unix time in milliseconds. Used only as the primary circuit-breaker clock, so
 /// a clock glitch at worst re-probes the primary a little early/late.
@@ -322,6 +383,30 @@ fn checked_btc_to_sat(value: f64) -> Result<u64, AppError> {
     Ok(sats as u64)
 }
 
+/// Sum confirmed/unconfirmed balances with CHECKED arithmetic, so a hostile or
+/// corrupt per-address value cannot wrap the total to a wrong number: the sum
+/// errors instead (money gate G13). Mirrors the `checked_add` discipline of the
+/// per-tx amount sums above. Pure over already-fetched balances so it is unit
+/// testable without a live server.
+pub fn sum_balances<'a>(
+    balances: impl IntoIterator<Item = &'a ElectrumBalance>,
+) -> Result<ElectrumBalance, AppError> {
+    let mut confirmed: u64 = 0;
+    let mut unconfirmed: i64 = 0;
+    for b in balances {
+        confirmed = confirmed
+            .checked_add(b.confirmed)
+            .ok_or_else(|| AppError::NodeError("confirmed balance sum overflow".into()))?;
+        unconfirmed = unconfirmed
+            .checked_add(b.unconfirmed)
+            .ok_or_else(|| AppError::NodeError("unconfirmed balance sum overflow".into()))?;
+    }
+    Ok(ElectrumBalance {
+        confirmed,
+        unconfirmed,
+    })
+}
+
 /// Render untrusted upstream text safe for a private (redacted-publicly) log or
 /// error string: drop control characters that could forge log lines, and cap
 /// the length to bound volume. Operates on `chars`, never byte-indexing.
@@ -419,6 +504,74 @@ impl ElectrumClient {
         let sh = self.address_to_scripthash(address)?;
         self.call("blockchain.scripthash.get_history", vec![sh.into()])
             .await
+    }
+
+    /// Confirmed/unconfirmed balance summed across several addresses, using the
+    /// same checked-arithmetic discipline as the single-address paths: a hostile
+    /// or corrupt per-address value cannot overflow the total into a wrong number
+    /// (the sum errors instead: money gate G13). Addresses are queried with
+    /// bounded concurrency under one batch deadline and folded in INPUT order;
+    /// the caller bounds the list length. Persists nothing.
+    #[instrument(skip_all, fields(net = ?self.network, n = addresses.len()))]
+    pub async fn get_balance_sum(
+        &self,
+        addresses: &[String],
+    ) -> Result<ElectrumBalance, BatchError> {
+        // Built as a plain loop rather than `.map(|a| ...)`: a closure returning
+        // a future that borrows its argument cannot be inferred as higher-ranked.
+        let mut queries = Vec::with_capacity(addresses.len());
+        for address in addresses {
+            queries.push(self.get_balance(address));
+        }
+        let acc = run_batch(queries).await?;
+        sum_balances(&acc).map_err(BatchError::App)
+    }
+
+    /// Unspent outputs across several addresses, each tagged with the address it
+    /// belongs to. The tag is load-bearing: the wallet never has to re-derive
+    /// which address owns a UTXO (a wrong guess mis-signs a spend). Queried with
+    /// bounded concurrency under one batch deadline, emitted in input order.
+    /// Persists nothing; the caller bounds the list length.
+    #[instrument(skip_all, fields(net = ?self.network, n = addresses.len()))]
+    pub async fn get_utxos_tagged(
+        &self,
+        addresses: &[String],
+    ) -> Result<Vec<(String, ElectrumUtxo)>, BatchError> {
+        let mut queries = Vec::with_capacity(addresses.len());
+        for address in addresses {
+            queries.push(self.get_utxos(address));
+        }
+        let results = run_batch(queries).await?;
+        let mut out = Vec::new();
+        for (address, utxos) in addresses.iter().zip(results) {
+            for utxo in utxos {
+                out.push((address.clone(), utxo));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Confirmed + mempool history across several addresses, each entry tagged
+    /// with its owning address (so the wallet keeps per-address provenance).
+    /// Queried with bounded concurrency under one batch deadline, emitted in
+    /// input order. Persists nothing; the caller bounds the list length.
+    #[instrument(skip_all, fields(net = ?self.network, n = addresses.len()))]
+    pub async fn get_history_tagged(
+        &self,
+        addresses: &[String],
+    ) -> Result<Vec<(String, ElectrumHistoryEntry)>, BatchError> {
+        let mut queries = Vec::with_capacity(addresses.len());
+        for address in addresses {
+            queries.push(self.get_history(address));
+        }
+        let results = run_batch(queries).await?;
+        let mut out = Vec::new();
+        for (address, entries) in addresses.iter().zip(results) {
+            for entry in entries {
+                out.push((address.clone(), entry));
+            }
+        }
+        Ok(out)
     }
 
     /// Current best-chain tip height via `blockchain.headers.subscribe`.
@@ -1145,6 +1298,55 @@ mod tests {
             checked_btc_to_sat(21_000_000.0).unwrap(),
             2_100_000_000_000_000
         );
+    }
+
+    #[test]
+    fn sum_balances_checked_add() {
+        // A normal set sums exactly.
+        let ok = vec![
+            ElectrumBalance {
+                confirmed: 1000,
+                unconfirmed: -50,
+            },
+            ElectrumBalance {
+                confirmed: 250,
+                unconfirmed: 75,
+            },
+        ];
+        let s = sum_balances(&ok).unwrap();
+        assert_eq!(s.confirmed, 1250);
+        assert_eq!(s.unconfirmed, 25);
+
+        // Confirmed overflow errors instead of wrapping (money gate G13).
+        let conf_overflow = vec![
+            ElectrumBalance {
+                confirmed: u64::MAX,
+                unconfirmed: 0,
+            },
+            ElectrumBalance {
+                confirmed: 1,
+                unconfirmed: 0,
+            },
+        ];
+        assert!(sum_balances(&conf_overflow).is_err());
+
+        // Unconfirmed (i64) overflow errors too.
+        let unconf_overflow = vec![
+            ElectrumBalance {
+                confirmed: 0,
+                unconfirmed: i64::MAX,
+            },
+            ElectrumBalance {
+                confirmed: 0,
+                unconfirmed: 1,
+            },
+        ];
+        assert!(sum_balances(&unconf_overflow).is_err());
+
+        // Empty set is a clean zero.
+        let zero = sum_balances(&[]).unwrap();
+        assert_eq!(zero.confirmed, 0);
+        assert_eq!(zero.unconfirmed, 0);
     }
 
     #[test]

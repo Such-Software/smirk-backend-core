@@ -14,5 +14,5 @@ pub use client::LwsClient;
 pub use types::{
     AccountEntry, AccountStatus, AddressInfo, AddressTx, AddressTxsResponse, AmountOuts,
     CryptoNoteNetwork, ListAccountsResponse, RandomOutput, RandomOutsResponse, SpentOutput,
-    UnspentOutput, UnspentOutsResponse,
+    SubaddrIndex, UnspentOutput, UnspentOutsResponse,
 };

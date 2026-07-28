@@ -508,7 +508,7 @@ mod tests {
     //! Unit tests for the pure `classify_funding_amount` branch logic. The async
     //! DB-backed paths are covered by `tests/tips.rs` (gated on TEST_DATABASE_URL).
     use super::*;
-    use crate::infra::lws::{AddressTx, AddressTxsResponse};
+    use crate::infra::lws::{AddressTx, AddressTxsResponse, SubaddrIndex};
 
     fn tx(received: u64, sent: u64, height: u64, mempool: bool) -> AddressTx {
         AddressTx {
@@ -521,6 +521,7 @@ mod tests {
             unlock_time: 0,
             payment_id: None,
             spent_outputs: Vec::new(),
+            recipient: SubaddrIndex::default(),
         }
     }
 

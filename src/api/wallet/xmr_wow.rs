@@ -37,6 +37,67 @@ use crate::AppState;
 /// are larger than UTXO txs; 2 MiB of hex is well above any real single tx.
 const MAX_CN_TX_HEX_LEN: usize = 2 * 1024 * 1024;
 
+/// Hard cap on the batch of minor subaddress indices provisioned for account 0
+/// at register time. Bounds one registration's ask on the LWS; the LWS's own
+/// `--max-subaddresses` is the ultimate bound (and must be `>=` this to enable
+/// the feature at all).
+const MAX_PROVISION_MINORS: u32 = 200;
+
+/// Dark feature flag (default OFF): whether this instance provisions account-0
+/// subaddress ranges at the LWS. Also advertised on `/capabilities` so a client
+/// can negotiate instead of calling a route that is not mounted.
+///
+/// Kept as an environment read (rather than a new `Config` field) to stay within
+/// this change's file lane. ENABLING IT ALSO REQUIRES the LWS to run with
+/// `--max-subaddresses >= MAX_PROVISION_MINORS` (it defaults to `0` =
+/// subaddresses disabled); the client probes that ceiling and fails closed with
+/// an operator-legible error rather than half-provisioning.
+pub(crate) fn subaddr_provisioning_enabled() -> bool {
+    crate::api::capabilities::env_flag_enabled("FEATURE_XMR_SUBADDR_PROVISIONING")
+}
+
+/// The number of account-0 minor subaddress indices to provision at the LWS.
+/// `0` (no provisioning; behavior identical to before) unless the flag is on.
+fn subaddr_provisioning_minors() -> u32 {
+    if subaddr_provisioning_enabled() {
+        MAX_PROVISION_MINORS
+    } else {
+        0
+    }
+}
+
+/// The batch width to provision for one register call.
+///
+/// A client-supplied `subaddr_count` may RAISE the instance default (clamped to
+/// [`MAX_PROVISION_MINORS`]) but can never enable provisioning: with the flag
+/// off this returns `0` for every input, so the dark path stays byte-identical.
+/// A money-gating field is never silently dropped, which is what an absent
+/// `deny_unknown_fields` used to do to it.
+fn effective_provision_minors(requested: Option<u32>) -> u32 {
+    let base = subaddr_provisioning_minors();
+    if base == 0 {
+        return 0;
+    }
+    base.max(requested.unwrap_or(0).min(MAX_PROVISION_MINORS))
+}
+
+/// The LWS batch width for an on-demand `max_minor` ask.
+///
+/// `max_minor` is the highest minor INDEX the caller wants, so the width is
+/// `max_minor + 1`, clamped so one call never provisions more than
+/// [`MAX_PROVISION_MINORS`] indices (i.e. an ask above `MAX_PROVISION_MINORS - 1`
+/// is clamped down, never rejected). An absent ask uses the instance default.
+/// `0` whenever provisioning is off, so this can never turn the feature on.
+fn provision_width_for(max_minor: Option<u32>) -> u32 {
+    if !subaddr_provisioning_enabled() {
+        return 0;
+    }
+    match max_minor {
+        Some(m) => m.saturating_add(1).min(MAX_PROVISION_MINORS),
+        None => subaddr_provisioning_minors(),
+    }
+}
+
 /// Resolve the LWS client for a CryptoNote asset, or a 400 (unknown / disabled).
 fn lws_for<'a>(state: &'a AppState, asset: &str) -> Result<&'a LwsClient, AppError> {
     let client = match asset {
@@ -83,6 +144,40 @@ pub struct RegisterRequest {
     /// otherwise. Bound to `(asset, address, start_height)` (see `restore_pow`).
     #[serde(default)]
     pub restore_pow_nonce: Option<u64>,
+    /// How many account-0 minor subaddress indices to provision at the LWS.
+    /// Clamped to the server ceiling, and may only RAISE this instance's
+    /// default; it can never enable provisioning on an instance that has it off.
+    /// Omit to use the instance default.
+    #[serde(default)]
+    pub subaddr_count: Option<u32>,
+}
+
+/// Provision a batch of account-0 subaddress indices for an account. Additive to
+/// `register`; the identity comes from the bearer token, so any `user_id` on the
+/// wire is ignored.
+// Omits `Debug` (carries the private `view_key`) - see `ViewRequest`.
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct ProvisionRequest {
+    /// `xmr` or `wow`.
+    pub asset: String,
+    pub address: String,
+    /// Private view key (64 hex). Forwarded to the LWS; never stored or logged.
+    pub view_key: String,
+    /// Highest minor index wanted for account 0. Clamped to the server ceiling.
+    /// Omit for the instance default.
+    #[serde(default)]
+    pub max_minor: Option<u32>,
+}
+
+/// The subaddress ceiling the LWS CONFIRMED for account 0.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ProvisionResponse {
+    pub asset: String,
+    /// Highest minor index the LWS confirmed it is scanning for account 0, read
+    /// back from its response - never an echo of the request. Every index in
+    /// `0..=provisioned_minor_max` is provisioned; the wallet must not hand out
+    /// an index above it.
+    pub provisioned_minor_max: u32,
 }
 
 /// Request decoy outputs for ring construction.
@@ -157,6 +252,15 @@ pub struct LwsBalanceResponse {
     pub spent_outputs: Vec<SpentOutputDto>,
 }
 
+/// A subaddress index `(major, minor)` an output/tx was received at. Nested to
+/// match the wallet's wasm `LwsOutput` shape (`subaddr_index: {major, minor}`);
+/// mapped from the LWS `recipient` field. `(0, 0)` is the primary address.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct SubaddrIndexDto {
+    pub major: u32,
+    pub minor: u32,
+}
+
 /// A candidate spent output (verify with the spend key before trusting).
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SpentOutputDto {
@@ -167,6 +271,17 @@ pub struct SpentOutputDto {
     pub tx_pub_key: String,
     pub out_index: u64,
     pub mixin: u64,
+    /// Subaddress index of the output BEING SPENT (`(0, 0)` = primary address),
+    /// taken from the spend record itself.
+    ///
+    /// Load-bearing for the balance: the wallet recomputes this output's key
+    /// image to tell a real spend from a ring decoy, and the key image depends
+    /// on the subaddress index. Without it a subaddress spend is recomputed
+    /// against the primary index, the key images never match, the spend is
+    /// dismissed as a decoy, and the amount is never subtracted - the balance
+    /// over-reports forever. It is deliberately NOT the enclosing transaction's
+    /// `subaddr_index`, which is the change index and would be just as wrong.
+    pub subaddr_index: SubaddrIndexDto,
 }
 
 /// A transaction in the account's history.
@@ -186,6 +301,8 @@ pub struct TxDto {
     pub unlock_time: u64,
     pub payment_id: Option<String>,
     pub spent_outputs: Vec<SpentOutputDto>,
+    /// Subaddress index this tx was received at (`(0, 0)` = primary address).
+    pub subaddr_index: SubaddrIndexDto,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -210,6 +327,8 @@ pub struct UnspentOutputDto {
     pub rct: String,
     /// Key images seen on-chain that may correspond to this output being spent.
     pub spend_key_images: Vec<String>,
+    /// Subaddress index this output was received at (`(0, 0)` = primary address).
+    pub subaddr_index: SubaddrIndexDto,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -268,6 +387,12 @@ fn spent_dto(s: SpentOutput) -> SpentOutputDto {
         tx_pub_key: s.tx_pub_key,
         out_index: s.out_index,
         mixin: s.mixin,
+        // From the SPEND RECORD (monero-lws `sender`), never from the enclosing
+        // tx's `recipient` - that is the change index.
+        subaddr_index: SubaddrIndexDto {
+            major: s.sender.maj_i,
+            minor: s.sender.min_i,
+        },
     }
 }
 
@@ -282,6 +407,10 @@ fn tx_dto(t: AddressTx) -> TxDto {
         unlock_time: t.unlock_time,
         payment_id: t.payment_id,
         spent_outputs: t.spent_outputs.into_iter().map(spent_dto).collect(),
+        subaddr_index: SubaddrIndexDto {
+            major: t.recipient.maj_i,
+            minor: t.recipient.min_i,
+        },
     }
 }
 
@@ -297,6 +426,10 @@ fn unspent_dto(u: UnspentOutput) -> UnspentOutputDto {
         tx_hash: u.tx_hash,
         rct: u.rct,
         spend_key_images: u.spend_key_images,
+        subaddr_index: SubaddrIndexDto {
+            major: u.recipient.maj_i,
+            minor: u.recipient.min_i,
+        },
     }
 }
 
@@ -337,6 +470,14 @@ pub async fn register(
     validate_cn_address(&req.address)?;
     validate_view_key(&req.view_key)?;
 
+    // Dark by default: 0 ⇒ no subaddress provisioning (register behaves exactly
+    // as before). When the flag is on, both paths provision a bounded batch of
+    // account-0 minor indices and HARD-error on provision failure (the `?`
+    // propagates) — never silently skipping so a wallet is not told scanning is
+    // ready when the subaddresses were not registered. A client-supplied
+    // `subaddr_count` may raise the batch within the server ceiling.
+    let provision_minors = effective_provision_minors(req.subaddr_count);
+
     match req.start_height {
         Some(h) => {
             // Restore: gate the scan depth against this instance's policy (the
@@ -351,12 +492,63 @@ pub async fn register(
                 req.restore_pow_nonce,
             )?;
             client
-                .import_account(&req.address, &req.view_key, h)
+                .import_account(&req.address, &req.view_key, h, provision_minors)
                 .await?
         }
-        None => client.register_account(&req.address, &req.view_key).await?,
+        None => {
+            client
+                .register_account(&req.address, &req.view_key, provision_minors)
+                .await?
+        }
     }
     Ok(Json(OkResponse { ok: true }))
+}
+
+/// Provision account-0 subaddress indices at the LWS for an already-registered
+/// account, and report the ceiling the LWS confirmed.
+///
+/// Mounted only when `FEATURE_XMR_SUBADDR_PROVISIONING` is on (see
+/// `/capabilities` → `features.xmr_subaddr_provisioning`); otherwise the route
+/// does not exist and the request 404s.
+#[utoipa::path(
+    security(("bearer_auth" = [])),
+    post,
+    path = "/wallet/lws/provision_subaddrs",
+    request_body = ProvisionRequest,
+    responses(
+        (status = 200, description = "LWS-confirmed subaddress ceiling for account 0", body = ProvisionResponse),
+        (status = 400, description = "Invalid/disabled asset, address, or view key"),
+        (status = 401, description = "Missing or invalid token"),
+        (status = 404, description = "Subaddress provisioning is not enabled on this instance"),
+        (status = 503, description = "Upstream node unavailable, or it cannot provision subaddresses")
+    ),
+    tag = "xmr_wow"
+)]
+#[instrument(skip(state, headers, req), fields(asset = %req.asset))]
+pub async fn provision_subaddrs(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<ProvisionRequest>,
+) -> Result<Json<ProvisionResponse>, AppError> {
+    // Identity comes from the bearer token alone. Any `user_id` on the wire is
+    // ignored (unknown fields are dropped), so it can never select an account.
+    extract_user_id_from_token(&state, &headers).await?;
+    let asset = req.asset.to_lowercase();
+    let client = lws_for(&state, &asset)?;
+    validate_cn_address(&req.address)?;
+    validate_view_key(&req.view_key)?;
+
+    // Clamped to the hard server ceiling; an absent ask uses the instance
+    // default. The route is only mounted with the flag on, so the width is
+    // never 0 here, but `provision_account0` rejects a 0 ask regardless.
+    let n_min = provision_width_for(req.max_minor);
+    let provisioned_minor_max = client
+        .provision_account0(&req.address, &req.view_key, n_min)
+        .await?;
+    Ok(Json(ProvisionResponse {
+        asset,
+        provisioned_minor_max,
+    }))
 }
 
 /// Balance + scan state for an account.
@@ -616,7 +808,7 @@ pub async fn confirmations(
 
 /// Monero/Wownero routes, RELATIVE to the `/api/v1` mount point.
 pub fn routes() -> Router<Arc<AppState>> {
-    Router::new()
+    let mut router = Router::new()
         .route("/wallet/lws/register", post(register))
         .route("/wallet/lws/balance", post(balance))
         .route("/wallet/lws/history", post(history))
@@ -629,7 +821,14 @@ pub fn routes() -> Router<Arc<AppState>> {
             post(submit_tx).layer(DefaultBodyLimit::max(MAX_CN_TX_HEX_LEN + 64 * 1024)),
         )
         .route("/wallet/lws/height", post(height))
-        .route("/wallet/lws/confirmations", post(confirmations))
+        .route("/wallet/lws/confirmations", post(confirmations));
+
+    // Dark by default: the provisioning endpoint exists only when enabled, so a
+    // client that has not negotiated the capability gets a clean 404.
+    if subaddr_provisioning_enabled() {
+        router = router.route("/wallet/lws/provision_subaddrs", post(provision_subaddrs));
+    }
+    router
 }
 
 #[cfg(test)]
@@ -653,12 +852,39 @@ mod amount_wire_tests {
             tx_hash: "h".into(),
             rct: String::new(),
             spend_key_images: vec![],
+            subaddr_index: SubaddrIndexDto { major: 0, minor: 7 },
         };
         let v = serde_json::to_value(&dto).unwrap();
         assert_eq!(v["amount"], serde_json::json!("9007199254740993"));
         assert!(v["amount"].is_string(), "amount must be a JSON string");
         // A non-amount field stays a number.
         assert!(v["global_index"].is_number());
+        // The subaddress index is nested `{major, minor}` (wasm LwsOutput shape).
+        assert_eq!(v["subaddr_index"]["major"], serde_json::json!(0));
+        assert_eq!(v["subaddr_index"]["minor"], serde_json::json!(7));
+    }
+
+    // The LWS `recipient` field maps straight into the nested `subaddr_index`
+    // DTO — including the fail-open `(0, 0)` for a primary-address receive.
+    #[test]
+    fn unspent_recipient_maps_to_nested_subaddr_index() {
+        use crate::infra::lws::{SubaddrIndex, UnspentOutput};
+        let infra = UnspentOutput {
+            amount: 1,
+            public_key: "aa".into(),
+            tx_pub_key: "bb".into(),
+            index: 0,
+            global_index: 1,
+            height: 2,
+            timestamp: String::new(),
+            tx_hash: "h".into(),
+            rct: String::new(),
+            spend_key_images: vec![],
+            recipient: SubaddrIndex { maj_i: 1, min_i: 9 },
+        };
+        let dto = unspent_dto(infra);
+        assert_eq!(dto.subaddr_index.major, 1);
+        assert_eq!(dto.subaddr_index.minor, 9);
     }
 
     #[test]
@@ -678,5 +904,141 @@ mod amount_wire_tests {
         assert_eq!(v["total_received"], serde_json::json!("9007199254740993"));
         assert!(v["locked_balance"].is_string() && v["pending_balance"].is_string());
         assert!(v["blockchain_height"].is_number(), "heights stay numbers");
+    }
+
+    // A spend's subaddress index comes from the SPEND RECORD, so a subaddress
+    // spend's key image can be recomputed. Taking it from the enclosing tx (the
+    // change index) would mislabel it, the key image would never match, and the
+    // spend would be dismissed as a decoy - the balance would over-report.
+    #[test]
+    fn spent_output_index_comes_from_the_spend_record_not_the_tx() {
+        use crate::infra::lws::{SpentOutput as InfraSpent, SubaddrIndex};
+        let tx = AddressTx {
+            hash: "h".into(),
+            height: 5,
+            timestamp: String::new(),
+            total_received: 1,
+            total_sent: 9,
+            mempool: false,
+            unlock_time: 0,
+            payment_id: None,
+            spent_outputs: vec![InfraSpent {
+                amount: 9,
+                key_image: "ki".into(),
+                tx_pub_key: "tp".into(),
+                out_index: 2,
+                mixin: 15,
+                sender: SubaddrIndex { maj_i: 0, min_i: 7 },
+            }],
+            // The tx-level index is the CHANGE index and must not leak into the
+            // spend's index.
+            recipient: SubaddrIndex { maj_i: 0, min_i: 1 },
+        };
+        let dto = tx_dto(tx);
+        assert_eq!(dto.subaddr_index.minor, 1, "tx keeps its own index");
+        assert_eq!(dto.spent_outputs[0].subaddr_index.major, 0);
+        assert_eq!(
+            dto.spent_outputs[0].subaddr_index.minor, 7,
+            "the spend's index must be the spent output's own"
+        );
+        // It also crosses the wire under the nested `{major, minor}` shape.
+        let v = serde_json::to_value(&dto.spent_outputs[0]).unwrap();
+        assert_eq!(v["subaddr_index"]["minor"], serde_json::json!(7));
+    }
+}
+
+#[cfg(test)]
+mod provision_gate_tests {
+    use super::*;
+
+    // These read a process-wide env var, so they run under one lock and always
+    // restore the previous value.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_flag<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("FEATURE_XMR_SUBADDR_PROVISIONING").ok();
+        match value {
+            Some(v) => std::env::set_var("FEATURE_XMR_SUBADDR_PROVISIONING", v),
+            None => std::env::remove_var("FEATURE_XMR_SUBADDR_PROVISIONING"),
+        }
+        let out = f();
+        match prev {
+            Some(v) => std::env::set_var("FEATURE_XMR_SUBADDR_PROVISIONING", v),
+            None => std::env::remove_var("FEATURE_XMR_SUBADDR_PROVISIONING"),
+        }
+        out
+    }
+
+    #[test]
+    fn flag_parsing_is_case_insensitive_and_trimmed() {
+        for on in ["1", "true", "TRUE", "True", "on", "ON", "Yes", " yes "] {
+            assert!(with_flag(Some(on), subaddr_provisioning_enabled), "{on}");
+        }
+        for off in ["0", "false", "no", "off", "", "maybe"] {
+            assert!(!with_flag(Some(off), subaddr_provisioning_enabled), "{off}");
+        }
+        assert!(!with_flag(None, subaddr_provisioning_enabled));
+    }
+
+    #[test]
+    fn subaddr_count_is_ignored_while_the_flag_is_off() {
+        // Flag OFF must stay byte-identical: no client-supplied count can turn
+        // provisioning on.
+        with_flag(None, || {
+            assert_eq!(effective_provision_minors(None), 0);
+            assert_eq!(effective_provision_minors(Some(200)), 0);
+            assert_eq!(effective_provision_minors(Some(u32::MAX)), 0);
+            assert_eq!(provision_width_for(Some(50)), 0);
+        });
+    }
+
+    #[test]
+    fn subaddr_count_is_accepted_and_clamped_when_enabled() {
+        with_flag(Some("1"), || {
+            // Absent => the instance default.
+            assert_eq!(effective_provision_minors(None), MAX_PROVISION_MINORS);
+            // Never below the instance default (a client cannot narrow it).
+            assert_eq!(effective_provision_minors(Some(1)), MAX_PROVISION_MINORS);
+            // Never above the hard server ceiling.
+            assert_eq!(
+                effective_provision_minors(Some(u32::MAX)),
+                MAX_PROVISION_MINORS
+            );
+        });
+    }
+
+    #[test]
+    fn provision_width_treats_max_minor_as_an_index() {
+        with_flag(Some("yes"), || {
+            // `max_minor` is the highest wanted INDEX, so the width is +1.
+            assert_eq!(provision_width_for(Some(0)), 1);
+            assert_eq!(provision_width_for(Some(49)), 50);
+            // Clamped to the ceiling, never rejected, and never overflowing.
+            assert_eq!(provision_width_for(Some(10_000)), MAX_PROVISION_MINORS);
+            assert_eq!(provision_width_for(Some(u32::MAX)), MAX_PROVISION_MINORS);
+            // Absent => the instance default.
+            assert_eq!(provision_width_for(None), MAX_PROVISION_MINORS);
+        });
+    }
+
+    #[test]
+    fn register_request_accepts_and_ignores_extra_wire_fields() {
+        // `subaddr_count` is read (never silently dropped) and an unknown
+        // `user_id` on the provision request is ignored - identity comes from
+        // the bearer token.
+        let r: RegisterRequest = serde_json::from_str(
+            r#"{"asset":"xmr","address":"9a","view_key":"vk","subaddr_count":64}"#,
+        )
+        .unwrap();
+        assert_eq!(r.subaddr_count, Some(64));
+        let r2: RegisterRequest =
+            serde_json::from_str(r#"{"asset":"xmr","address":"9a","view_key":"vk"}"#).unwrap();
+        assert_eq!(r2.subaddr_count, None);
+        let p: ProvisionRequest = serde_json::from_str(
+            r#"{"asset":"xmr","address":"9a","view_key":"vk","max_minor":31,"user_id":"attacker"}"#,
+        )
+        .unwrap();
+        assert_eq!(p.max_minor, Some(31));
     }
 }

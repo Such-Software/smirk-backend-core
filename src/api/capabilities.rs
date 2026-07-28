@@ -19,6 +19,20 @@ use crate::AppState;
 /// soft-notice a higher value and ignore unknown (additive) keys.
 pub const CAPABILITIES_CONTRACT_VERSION: u32 = 1;
 
+/// The one parser for the environment-held feature flags, so every reader of a
+/// flag agrees on what "on" means. Accepts `1` / `true` / `on` / `yes`, trimmed
+/// and ASCII-case-insensitive; anything else (including an unset variable) is
+/// off. A flag that gates a money path must never mean one thing where it is
+/// enforced and another where it is advertised.
+pub(crate) fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|raw| {
+        let v = raw.trim();
+        ["1", "true", "on", "yes"]
+            .iter()
+            .any(|truthy| v.eq_ignore_ascii_case(truthy))
+    })
+}
+
 /// Per-chain availability. `network` is the configured network for UTXO chains
 /// (so the wallet derives addresses for the right one); `null` for chains whose
 /// network isn't a backend setting.
@@ -60,6 +74,15 @@ pub struct FeatureCapabilities {
     pub feed: bool,
     /// Tipping (parked).
     pub tips: bool,
+    /// Monero/Wownero subaddress provisioning: this instance registers a batch
+    /// of account-0 subaddress indices with its LWS and serves
+    /// `POST /wallet/lws/provision_subaddrs`. Off ⇒ that route is not mounted
+    /// (404) and the wallet must keep receiving on the primary address only.
+    pub xmr_subaddr_provisioning: bool,
+    /// Batch (multi-address) BTC/LTC queries: this instance serves
+    /// `POST /wallet/utxo/{balance,utxos,history}_multi`. Off ⇒ those routes are
+    /// not mounted (404) and the wallet must query one address at a time.
+    pub utxo_multi_address: bool,
 }
 
 /// First-party Nostr relay details (present only when `features.nostr_relay`).
@@ -251,6 +274,15 @@ pub fn effective_capabilities(config: &Config) -> CapabilitiesResponse {
             premium_relay: premium_advertised(config),
             feed: feed_advertised(config),
             tips: tips_advertised(config),
+            // Advertised through the SAME predicates the routers gate on, so a
+            // client can never be told a route exists that would 404 (or the
+            // reverse). Both are environment flags, and both are chain-gated:
+            // never advertise subaddress provisioning on an instance with no
+            // CryptoNote chain, or batch UTXO queries with no UTXO chain.
+            xmr_subaddr_provisioning: crate::api::wallet::xmr_wow::subaddr_provisioning_enabled()
+                && (chain_serviceable(config, "xmr") || chain_serviceable(config, "wow")),
+            utxo_multi_address: crate::api::wallet::btc_ltc::utxo_multi_enabled()
+                && (chain_serviceable(config, "btc") || chain_serviceable(config, "ltc")),
         },
         restore: RestoreCapability {
             policy: config.restore.policy.as_str().to_string(),
