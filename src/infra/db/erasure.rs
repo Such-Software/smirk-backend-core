@@ -187,14 +187,12 @@ impl Database {
 
         // audit_logs: retained for the security trail, but scrub this user's PII
         // (the cascade de-links user_id on the user delete below).
-        sqlx::query(
-            "UPDATE audit_logs SET ip_address = NULL, user_agent = NULL WHERE user_id = $1",
-        )
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("UPDATE audit_logs SET user_agent = NULL WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
 
-        // Structural delete: cascades wallets/sessions/user_keys/owned slatepacks;
+        // Structural delete: cascades sessions/user_keys/owned slatepacks;
         // SET NULL on counterparty/audit/login links (incl. this row's user_id,
         // leaving it a completed tombstone with the link scrubbed).
         sqlx::query("DELETE FROM users WHERE id = $1")

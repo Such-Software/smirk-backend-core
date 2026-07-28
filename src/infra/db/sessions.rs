@@ -15,7 +15,7 @@ use super::Database;
 
 /// Explicit `sessions` columns (matches `Session` field names; FromRow maps by name).
 const SESSION_COLS: &str = "id, user_id, refresh_token_hash, platform, device_info, \
-     ip_address, created_at, expires_at, revoked_at, last_used_at";
+     created_at, expires_at, revoked_at, last_used_at";
 
 impl Database {
     /// Create a new session. `refresh_token_hash` is already peppered by the caller.
@@ -23,15 +23,14 @@ impl Database {
     pub async fn create_session(&self, input: NewSession) -> Result<Session, AppError> {
         let sql = format!(
             "INSERT INTO sessions \
-             (user_id, refresh_token_hash, platform, device_info, ip_address, expires_at) \
-             VALUES ($1, $2, $3, $4, $5, $6) RETURNING {SESSION_COLS}"
+             (user_id, refresh_token_hash, platform, device_info, expires_at) \
+             VALUES ($1, $2, $3, $4, $5) RETURNING {SESSION_COLS}"
         );
         let session = sqlx::query_as::<_, Session>(&sql)
             .bind(input.user_id)
             .bind(&input.refresh_token_hash)
             .bind(&input.platform)
             .bind(&input.device_info)
-            .bind(input.ip_address)
             .bind(input.expires_at)
             .fetch_one(self.pool())
             .await?;

@@ -4,7 +4,6 @@
 //! wallet registration, broadcasts). Explicit column lists (no `SELECT *`) keep
 //! the row shape pinned to the `AuditLog` struct.
 
-use ipnetwork::IpNetwork;
 use tracing::instrument;
 use uuid::Uuid;
 
@@ -15,7 +14,7 @@ use super::Database;
 
 /// Explicit `audit_logs` columns (matches `AuditLog`; FromRow maps by name).
 const AUDIT_LOG_COLS: &str = "id, user_id, action, resource_type, resource_id, \
-     details, ip_address, user_agent, created_at";
+     details, user_agent, created_at";
 
 impl Database {
     /// Insert an audit log entry.
@@ -23,8 +22,8 @@ impl Database {
     pub async fn create_audit_log(&self, input: NewAuditLog) -> Result<AuditLog, AppError> {
         let sql = format!(
             "INSERT INTO audit_logs \
-             (user_id, action, resource_type, resource_id, details, ip_address, user_agent) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING {AUDIT_LOG_COLS}"
+             (user_id, action, resource_type, resource_id, details, user_agent) \
+             VALUES ($1, $2, $3, $4, $5, $6) RETURNING {AUDIT_LOG_COLS}"
         );
         let log = sqlx::query_as::<_, AuditLog>(&sql)
             .bind(input.user_id)
@@ -32,7 +31,6 @@ impl Database {
             .bind(&input.resource_type)
             .bind(input.resource_id)
             .bind(&input.details)
-            .bind(input.ip_address)
             .bind(&input.user_agent)
             .fetch_one(self.pool())
             .await?;
@@ -48,7 +46,6 @@ impl Database {
         resource_type: Option<&str>,
         resource_id: Option<Uuid>,
         details: Option<serde_json::Value>,
-        ip_address: Option<IpNetwork>,
         user_agent: Option<&str>,
     ) -> Result<(), AppError> {
         self.create_audit_log(NewAuditLog {
@@ -57,7 +54,6 @@ impl Database {
             resource_type: resource_type.map(String::from),
             resource_id,
             details,
-            ip_address,
             user_agent: user_agent.map(String::from),
         })
         .await?;

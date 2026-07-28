@@ -44,7 +44,6 @@ use axum::{
     Json, Router,
 };
 use chrono::Utc;
-use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
 use tracing::{info, instrument, warn};
 use uuid::Uuid;
@@ -210,7 +209,6 @@ async fn issue_session(
     user_id: Uuid,
     platform: Platform,
     device_info: &str,
-    ip: Option<IpNetwork>,
 ) -> Result<crate::core::session::TokenPair, AppError> {
     let session_id = Uuid::new_v4();
     let pair = state
@@ -230,7 +228,6 @@ async fn issue_session(
             refresh_token_hash,
             platform: platform.to_string(),
             device_info: Some(device_info.to_string()),
-            ip_address: ip,
             expires_at,
         })
         .await?;
@@ -445,14 +442,9 @@ pub async fn extension_register(
                     state.db.update_pubkey_hash(target.id, &pubkey_hash).await?;
                     upsert_all_keys(&state, target.id, &req.keys).await?;
 
-                    let pair = issue_session(
-                        &state,
-                        target.id,
-                        Platform::Extension,
-                        "Browser Extension",
-                        Some(IpNetwork::from(ip)),
-                    )
-                    .await?;
+                    let pair =
+                        issue_session(&state, target.id, Platform::Extension, "Browser Extension")
+                            .await?;
                     let _ = state
                         .db
                         .record_login_event(
@@ -569,14 +561,7 @@ pub async fn extension_register(
         info!(user_id = %user.id, "existing extension user authenticated");
     }
 
-    let pair = issue_session(
-        &state,
-        user.id,
-        Platform::Extension,
-        "Browser Extension",
-        Some(IpNetwork::from(ip)),
-    )
-    .await?;
+    let pair = issue_session(&state, user.id, Platform::Extension, "Browser Extension").await?;
     let _ = state
         .db
         .record_login_event(
@@ -1227,7 +1212,6 @@ pub async fn refresh_token(
         user.id,
         platform,
         session.device_info.as_deref().unwrap_or("unknown"),
-        session.ip_address,
     )
     .await?;
 
@@ -1359,14 +1343,7 @@ pub async fn nostr_login(
             )
         })?;
 
-    let pair = issue_session(
-        &state,
-        user.id,
-        Platform::Nostr,
-        "Nostr",
-        Some(IpNetwork::from(ip)),
-    )
-    .await?;
+    let pair = issue_session(&state, user.id, Platform::Nostr, "Nostr").await?;
     let _ = state
         .db
         .record_login_event(
@@ -1745,14 +1722,7 @@ pub async fn nostr_register(
     };
 
     // 6. Session.
-    let pair = issue_session(
-        &state,
-        user.id,
-        Platform::Nostr,
-        "Nostr",
-        Some(IpNetwork::from(ip)),
-    )
-    .await?;
+    let pair = issue_session(&state, user.id, Platform::Nostr, "Nostr").await?;
     let _ = state
         .db
         .record_login_event(

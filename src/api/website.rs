@@ -56,7 +56,6 @@ use axum::{
     Json, Router,
 };
 use chrono::Utc;
-use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
 use tracing::{info, instrument};
 
@@ -307,7 +306,6 @@ pub async fn website_verify(
             refresh_token_hash,
             platform: Platform::Web.to_string(),
             device_info: Some("Web Browser".to_string()),
-            ip_address: Some(IpNetwork::from(ip)),
             expires_at,
         })
         .await?;

@@ -270,7 +270,6 @@ impl TestApp {
                 refresh_token_hash: hash,
                 platform: "web".to_string(),
                 device_info: None,
-                ip_address: None,
                 expires_at: chrono::Utc::now() + chrono::Duration::days(30),
             })
             .await

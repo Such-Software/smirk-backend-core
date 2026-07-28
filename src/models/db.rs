@@ -91,27 +91,6 @@ pub struct User {
     pub last_seen_at: Option<DateTime<Utc>>,
 }
 
-/// A wallet associated with a user.
-///
-/// Non-custodial: we store the public address and (for XMR/WOW) the view key
-/// for balance scanning. We NEVER store a spend key or seed.
-#[derive(Debug, Clone, FromRow, Serialize)]
-pub struct Wallet {
-    pub id: Uuid,
-    pub user_id: Uuid,
-    pub asset: AssetType,
-    pub address: String,
-    /// View key (XMR/WOW only) for balance scanning.
-    pub view_key: Option<String>,
-    /// HD derivation index (BTC/LTC).
-    pub derivation_index: Option<i32>,
-    pub registered_with_node: bool,
-    pub registration_error: Option<String>,
-    pub label: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
 /// A session backing a JWT refresh token.
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct Session {
@@ -122,7 +101,6 @@ pub struct Session {
     /// Client kind: `extension`, `web`, or `nostr`.
     pub platform: String,
     pub device_info: Option<String>,
-    pub ip_address: Option<IpNetwork>,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
@@ -175,7 +153,6 @@ pub struct AuditLog {
     pub resource_type: Option<String>,
     pub resource_id: Option<Uuid>,
     pub details: Option<serde_json::Value>,
-    pub ip_address: Option<IpNetwork>,
     pub user_agent: Option<String>,
     pub created_at: DateTime<Utc>,
 }
@@ -230,22 +207,11 @@ pub struct NewUser {
 }
 
 #[derive(Debug, Clone)]
-pub struct NewWallet {
-    pub user_id: Uuid,
-    pub asset: AssetType,
-    pub address: String,
-    pub view_key: Option<String>,
-    pub derivation_index: Option<i32>,
-    pub label: Option<String>,
-}
-
-#[derive(Debug, Clone)]
 pub struct NewSession {
     pub user_id: Uuid,
     pub refresh_token_hash: String,
     pub platform: String,
     pub device_info: Option<String>,
-    pub ip_address: Option<IpNetwork>,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -369,6 +335,5 @@ pub struct NewAuditLog {
     pub resource_type: Option<String>,
     pub resource_id: Option<Uuid>,
     pub details: Option<serde_json::Value>,
-    pub ip_address: Option<IpNetwork>,
     pub user_agent: Option<String>,
 }

@@ -85,7 +85,6 @@ async fn session_create_lookup_revoke() {
             refresh_token_hash: hash.clone(),
             platform: "extension".to_string(),
             device_info: None,
-            ip_address: None,
             expires_at: Utc::now() + Duration::days(30),
         })
         .await
