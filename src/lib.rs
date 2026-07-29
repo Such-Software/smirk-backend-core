@@ -138,6 +138,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 .merge(api::erasure::routes())
                 .merge(api::premium::routes())
                 .merge(api::tips::routes())
+                .merge(api::verify::routes())
                 .layer(normal),
         );
 
