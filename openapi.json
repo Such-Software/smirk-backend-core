@@ -4991,12 +4991,18 @@
       "StatusResp": {
         "type": "object",
         "required": [
-          "active"
+          "active",
+          "write_allowlisted",
+          "can_post_general"
         ],
         "properties": {
           "active": {
             "type": "boolean",
             "description": "Whether the caller currently holds active premium."
+          },
+          "can_post_general": {
+            "type": "boolean",
+            "description": "Whether the caller may publish general (non-wallet) events to this\ninstance's relay RIGHT NOW.\n\nThe authority on this is [`crate::infra::relay::policy::decide`], which\nruns server-side at admission. Clients previously re-derived it from\n`write_policy` + premium alone and so had no way to know about the\noperator write-allowlist: an allowlisted operator was told \"premium\nrequired\" and the composer was hidden, even though the relay would have\naccepted the event. Publish the decision instead of the inputs."
           },
           "premium_until": {
             "type": [
@@ -5004,6 +5010,10 @@
               "null"
             ],
             "description": "Premium expiry (RFC3339), or null if never premium / lapsed."
+          },
+          "write_allowlisted": {
+            "type": "boolean",
+            "description": "Whether the caller's linked npub is on the operator write-allowlist\n(`RELAY_WRITE_ALLOWLIST_NPUBS`), which permits publishing ANY kind\nregardless of policy or premium."
           }
         }
       },

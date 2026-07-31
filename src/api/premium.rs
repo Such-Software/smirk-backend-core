@@ -19,6 +19,7 @@ use tracing::{info, instrument};
 use crate::api::middleware::extract_user_id_from_token;
 use crate::error::AppError;
 use crate::infra::payment::{InvoiceRequest, InvoiceStatus};
+use crate::infra::relay::WritePolicy;
 use crate::AppState;
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -48,6 +49,50 @@ pub struct StatusResp {
     pub active: bool,
     /// Premium expiry (RFC3339), or null if never premium / lapsed.
     pub premium_until: Option<String>,
+    /// Whether the caller's linked npub is on the operator write-allowlist
+    /// (`RELAY_WRITE_ALLOWLIST_NPUBS`), which permits publishing ANY kind
+    /// regardless of policy or premium.
+    pub write_allowlisted: bool,
+    /// Whether the caller may publish general (non-wallet) events to this
+    /// instance's relay RIGHT NOW.
+    ///
+    /// The authority on this is [`crate::infra::relay::policy::decide`], which
+    /// runs server-side at admission. Clients previously re-derived it from
+    /// `write_policy` + premium alone and so had no way to know about the
+    /// operator write-allowlist: an allowlisted operator was told "premium
+    /// required" and the composer was hidden, even though the relay would have
+    /// accepted the event. Publish the decision instead of the inputs.
+    pub can_post_general: bool,
+}
+
+/// Whether `user` may publish a general (non-wallet) event to this instance's
+/// relay, and whether they are write-allowlisted.
+///
+/// Deliberately mirrors [`crate::infra::relay::policy::decide`] for the
+/// general-event case, using the SAME `RelayProvider` the admission service
+/// consults, so the answer the client is given cannot drift from the answer the
+/// relay will actually give. Returns `(write_allowlisted, can_post_general)`.
+fn general_posting_rights(state: &AppState, nostr_pubkey: Option<&str>) -> (bool, bool) {
+    let Some(relay) = state.relay.as_ref() else {
+        // No first-party relay on this instance, so there is nothing to post to.
+        return (false, false);
+    };
+    let allowlisted = nostr_pubkey
+        .map(|pk| relay.is_write_allowlisted(&pk.to_ascii_lowercase()))
+        .unwrap_or(false);
+    if allowlisted {
+        return (true, true);
+    }
+    // An unlinked account has no npub, so it cannot author anything.
+    let registered = nostr_pubkey.is_some();
+    let can = match relay.write_policy() {
+        WritePolicy::Open => true,
+        // A general event under premium-post needs premium, full stop; the
+        // free-for-registered carve-out covers wallet kinds only.
+        WritePolicy::PremiumPost => false,
+        WritePolicy::AuthorAllowlist | WritePolicy::InboxOutbox => registered,
+    };
+    (false, can)
 }
 
 /// Reject when the premium tier is not enabled on this instance.
@@ -221,9 +266,15 @@ pub async fn activate(
         "premium invoice settled + activated; window extended"
     );
 
+    // Just activated, so general posting is permitted regardless of policy; still
+    // report the allowlist bit truthfully.
+    let npub = state.db.get_user_by_id(user_id).await?.and_then(|u| u.nostr_pubkey);
+    let (write_allowlisted, _) = general_posting_rights(&state, npub.as_deref());
     Ok(Json(StatusResp {
         active: true,
         premium_until: Some(until.to_rfc3339()),
+        write_allowlisted,
+        can_post_general: true,
     }))
 }
 
@@ -246,9 +297,14 @@ pub async fn status(
     let user_id = extract_user_id_from_token(&state, &headers).await?;
     let until = state.db.get_premium_until(user_id).await?;
     let active = until.map(|u| u > chrono::Utc::now()).unwrap_or(false);
+    let npub = state.db.get_user_by_id(user_id).await?.and_then(|u| u.nostr_pubkey);
+    let (write_allowlisted, can_general) = general_posting_rights(&state, npub.as_deref());
     Ok(Json(StatusResp {
         active,
         premium_until: until.map(|u| u.to_rfc3339()),
+        write_allowlisted,
+        // Premium is one way in; the operator write-allowlist is the other.
+        can_post_general: active || can_general,
     }))
 }
 
