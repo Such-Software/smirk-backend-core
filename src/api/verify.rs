@@ -333,6 +333,15 @@ async fn verify_cryptonote(
 /// `expected_sender` is unenforceable. `dest_address` is meaningless (no addresses)
 /// and is ignored; recipient binding IS the rewind match. Any wallet/node outage is
 /// a `NodeError` (non-2xx, retryable), never a false negative.
+///
+/// PAYER CONTRACT (footgun): `tx_ref` MUST be the recipient's received output
+/// commitment (0x08/0x09-prefixed, 33 bytes). A grin KERNEL excess is ALSO a 66-hex
+/// Pedersen point, so `validate_hex(66)` cannot tell them apart — but a kernel excess
+/// never appears in a rewind scan, so submitting the `kernel_excess_hex` a wallet
+/// conveniently surfaces yields a silent `not_found`. Likewise a send slate carries
+/// both the recipient output AND the sender's CHANGE output; only the recipient's
+/// commitment is recognized by the recipient's rewind_hash. The payer/frontend must
+/// select the non-change received output, not the kernel excess or the change.
 async fn verify_grin(
     state: &AppState,
     coin: &str,
