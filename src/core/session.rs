@@ -32,6 +32,18 @@ pub struct AccessTokenClaims {
     pub exp: i64,
     /// Client kind: extension | web | nostr.
     pub platform: String,
+    /// Session ID, so an access token can be REVOKED.
+    ///
+    /// Without it verification was a pure signature+expiry check, so sign-out and
+    /// even a completed erasure request revoked only the DB session row while the
+    /// bearer token kept working for the rest of its 24h life. The refresh token
+    /// has always carried this; the access token is the one that guards every
+    /// authenticated route.
+    ///
+    /// `Option` so tokens minted before this shipped still verify (they simply
+    /// cannot be revoked) rather than logging every user out on deploy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<String>,
 }
 
 /// JWT claims for refresh tokens.
@@ -52,6 +64,9 @@ pub struct RefreshTokenClaims {
 pub struct TokenInfo {
     pub user_id: Uuid,
     pub platform: String,
+    /// Session this token belongs to, when the token carries one. `None` for
+    /// tokens minted before `sid` shipped; those cannot be revoked early.
+    pub session_id: Option<Uuid>,
 }
 
 /// Session token pair.
@@ -192,6 +207,7 @@ impl SessionManager {
             iat: now.timestamp(),
             exp: access_exp.timestamp(),
             platform: platform.to_string(),
+            sid: Some(session_id.to_string()),
         };
         let access_token = encode(&header, &access_claims, &self.encoding_key)
             .map_err(|e| AppError::Internal(format!("Failed to create access token: {}", e)))?;
@@ -223,6 +239,7 @@ impl SessionManager {
         Ok(TokenInfo {
             user_id,
             platform: data.claims.platform,
+            session_id: data.claims.sid.as_deref().and_then(|s| Uuid::parse_str(s).ok()),
         })
     }
 

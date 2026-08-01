@@ -36,6 +36,16 @@ pub async fn extract_user_id_from_token(
 ) -> Result<Uuid, AppError> {
     let token = bearer_token(headers)?;
     let info = state.sessions.verify_access_token(token)?;
+    // Signature + expiry alone is not enough: it made access tokens
+    // unrevocable, so sign-out and even a completed erasure request left the
+    // bearer token working for the rest of its 24h life. Tokens minted before
+    // `sid` shipped carry no session and keep the old behaviour until they
+    // expire, rather than logging everyone out on deploy.
+    if let Some(sid) = info.session_id {
+        if !state.db.is_session_live(sid).await? {
+            return Err(AppError::AuthError("Invalid or expired token".into()));
+        }
+    }
     Ok(info.user_id)
 }
 

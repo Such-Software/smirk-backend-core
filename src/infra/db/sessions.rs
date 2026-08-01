@@ -56,6 +56,23 @@ impl Database {
             .await?)
     }
 
+    /// Whether a session id is still live: exists, not revoked, not expired.
+    ///
+    /// Used on EVERY authenticated request so an access token stops working the
+    /// moment its session is revoked (sign-out, erasure, admin action) rather
+    /// than at its 24h expiry. A single indexed lookup on the primary key.
+    #[instrument(skip(self))]
+    pub async fn is_session_live(&self, session_id: Uuid) -> Result<bool, AppError> {
+        let live: Option<(bool,)> = sqlx::query_as(
+            "SELECT true FROM sessions \
+             WHERE id = $1 AND revoked_at IS NULL AND expires_at > NOW()",
+        )
+        .bind(session_id)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(live.is_some())
+    }
+
     /// Update a session's `last_used_at` timestamp.
     #[instrument(skip(self))]
     pub async fn touch_session(&self, session_id: Uuid) -> Result<(), AppError> {
