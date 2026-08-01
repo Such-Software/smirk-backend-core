@@ -655,6 +655,15 @@ fn parse_premium_plans(s: &str) -> Vec<PremiumPlan> {
 #[derive(Clone)]
 pub struct MessagingConfig {
     pub relay: RelayConfig,
+    /// Advertise the built-in third-party interop relays (damus, nos.lol) in the
+    /// NIP-05 document. OFF by default: an instance should recommend only what
+    /// its operator chose. Turn on for a public deployment that wants
+    /// cross-wallet delivery to work before correspondents publish their own
+    /// relay lists.
+    pub nip05_interop_hints: bool,
+    /// Additional relay URLs to advertise in the NIP-05 document, comma-separated
+    /// in `NIP05_EXTRA_RELAY_HINTS`. Appended after the instance's own relay.
+    pub nip05_extra_relay_hints: Vec<String>,
 }
 
 /// Optional first-party Nostr relay. When `enabled`, the operator runs a relay
@@ -927,6 +936,8 @@ impl Config {
                     retention_days: env_parse("RELAY_RETENTION_DAYS", 30u32)?,
                     write_allowlist: env_list("RELAY_WRITE_ALLOWLIST_NPUBS"),
                 },
+                nip05_interop_hints: env_bool("NIP05_INTEROP_HINTS", false),
+                nip05_extra_relay_hints: env_list("NIP05_EXTRA_RELAY_HINTS"),
             },
             premium: PremiumConfig {
                 enabled: env_bool("PREMIUM_ENABLED", false),
@@ -1527,6 +1538,8 @@ mod tests {
                     retention_days: 30,
                     write_allowlist: Vec::new(),
                 },
+                nip05_interop_hints: false,
+                nip05_extra_relay_hints: Vec::new(),
             },
             premium: PremiumConfig {
                 enabled: false,

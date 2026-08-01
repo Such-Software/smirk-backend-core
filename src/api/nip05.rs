@@ -40,16 +40,16 @@ use crate::AppState;
 
 // ── constants ─────────────────────────────────────────────────────────────────
 
-/// Default relay hints advertised in the well-known `relays` map.
+/// Fallback interop relay hints, used ONLY when the operator has opted in via
+/// `NIP05_EXTRA_RELAY_HINTS`.
 ///
-/// Public relays shared with other wallets so cross-wallet delivery works before
-/// any per-user relay list is configured. NIP-05 lets a server advertise relay
-/// hints per pubkey in the `relays` object; we serve the same default set for
-/// every resolved name.
-///
-/// TODO(phase-2): make configurable and serve per-user lists (NIP-65 kind 10002
-/// / NIP-17 inbox relays) when private-message delivery lands.
-const DEFAULT_RELAYS: &[&str] = &["wss://relay.damus.io", "wss://nos.lol"];
+/// These are third-party relays. Advertising them unconditionally made every
+/// self-hosted instance publish a document pointing its own users at
+/// damus/nos.lol, so a correspondent would deliver there instead of to the
+/// operator's relay. An operator running a private or air-gapped deployment had
+/// no way to stop their NIP-05 document recommending someone else's
+/// infrastructure. Opt-in only.
+const INTEROP_RELAY_HINTS: &[&str] = &["wss://relay.damus.io", "wss://nos.lol"];
 
 // ── DTOs ──────────────────────────────────────────────────────────────────────
 
@@ -118,18 +118,27 @@ pub async fn well_known_nostr(
 }
 
 /// Relay hints advertised for a resolved pubkey: this instance's own relay (the
-/// user's DM inbox) FIRST when enabled, then the public interop relays so
-/// cross-wallet (e.g. Goblin) delivery still works before any per-user list.
-/// Per-user lists (NIP-65 kind 10002 / NIP-17 inbox relays) remain future work.
+/// user's DM inbox) first, then any interop relays the OPERATOR opted into.
+///
+/// An instance advertises only what its operator chose. Per-user lists (NIP-65
+/// kind 10002 / NIP-17 inbox relays) remain future work.
 fn relay_hints(config: &crate::config::Config) -> Vec<String> {
     let mut hints = Vec::new();
     let r = &config.messaging.relay;
     if r.enabled && !r.advertised_url.trim().is_empty() {
         hints.push(r.advertised_url.clone());
     }
-    for d in DEFAULT_RELAYS {
-        if !hints.iter().any(|h| h == d) {
-            hints.push((*d).to_string());
+    if config.messaging.nip05_interop_hints {
+        for d in INTEROP_RELAY_HINTS {
+            if !hints.iter().any(|h| h == d) {
+                hints.push((*d).to_string());
+            }
+        }
+    }
+    for extra in &config.messaging.nip05_extra_relay_hints {
+        let extra = extra.trim();
+        if !extra.is_empty() && !hints.iter().any(|h| h == extra) {
+            hints.push(extra.to_string());
         }
     }
     hints
