@@ -169,11 +169,11 @@ mod tests {
         assert!(empty.name.is_none());
     }
 
-    /// Default relay hints are well-formed `wss://` URLs.
+    /// Interop relay hints are well-formed `wss://` URLs.
     #[test]
-    fn default_relays_are_wss() {
-        assert!(!DEFAULT_RELAYS.is_empty());
-        assert!(DEFAULT_RELAYS.iter().all(|r| r.starts_with("wss://")));
+    fn interop_relay_hints_are_wss() {
+        assert!(!INTEROP_RELAY_HINTS.is_empty());
+        assert!(INTEROP_RELAY_HINTS.iter().all(|r| r.starts_with("wss://")));
     }
 
     /// The response serializes to the exact NIP-05 wire shape, and an empty
