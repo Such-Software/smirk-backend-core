@@ -2858,6 +2858,13 @@
               }
             ]
           },
+          "nip05_domain": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The domain this instance's handles live at, i.e. the `<domain>` in\n`name@<domain>`, and the host serving `/.well-known/nostr.json`.\n\nAdvertised because the wallet cannot derive it. It used to guess by\nstripping a leading `api.` from the backend URL, which is right only for\na smirk.cash-shaped two-host deployment. An operator serving the API at\n`api.example.org` without also serving `example.org`, or at any other\nname, had their users publish handles that resolve nowhere. Absent when\nthe operator has not set a public URL, in which case the client falls\nback to the old heuristic."
+          },
           "premium": {
             "oneOf": [
               {

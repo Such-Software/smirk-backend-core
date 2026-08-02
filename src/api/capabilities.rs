@@ -186,6 +186,18 @@ pub struct CapabilitiesResponse {
     pub version: String,
     /// Capabilities contract version (additive changes do not bump it).
     pub contract_version: u32,
+    /// The domain this instance's handles live at, i.e. the `<domain>` in
+    /// `name@<domain>`, and the host serving `/.well-known/nostr.json`.
+    ///
+    /// Advertised because the wallet cannot derive it. It used to guess by
+    /// stripping a leading `api.` from the backend URL, which is right only for
+    /// a smirk.cash-shaped two-host deployment. An operator serving the API at
+    /// `api.example.org` without also serving `example.org`, or at any other
+    /// name, had their users publish handles that resolve nowhere. Absent when
+    /// the operator has not set a public URL, in which case the client falls
+    /// back to the old heuristic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nip05_domain: Option<String>,
     pub chains: ChainCapabilities,
     pub features: FeatureCapabilities,
     /// Wallet restore (import) policy for this instance.
@@ -237,9 +249,20 @@ pub fn effective_capabilities(config: &Config) -> CapabilitiesResponse {
         enabled: on,
         network: Some(net.to_string()),
     };
+    // The handle domain is the HOST of the operator's public API URL. No
+    // `api.` stripping here: if the operator wants handles at the bare domain,
+    // they say so by setting PUBLIC_API_URL to the host that actually serves
+    // /.well-known/nostr.json. Guessing is what produced unverifiable handles.
+    let nip05_domain = config
+        .identity
+        .public_api_url
+        .as_deref()
+        .and_then(|u| url::Url::parse(u).ok())
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()));
     CapabilitiesResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         contract_version: CAPABILITIES_CONTRACT_VERSION,
+        nip05_domain,
         chains: ChainCapabilities {
             btc: utxo_net(chain_serviceable(config, "btc"), &config.chains.btc.network),
             ltc: utxo_net(chain_serviceable(config, "ltc"), &config.chains.ltc.network),
