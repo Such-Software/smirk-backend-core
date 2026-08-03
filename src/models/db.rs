@@ -208,6 +208,11 @@ pub struct NewUser {
 
 #[derive(Debug, Clone)]
 pub struct NewSession {
+    /// The session's primary key. Supplied by the caller (NOT defaulted by the
+    /// DB) because the access token embeds it as `sid` for revocation: if the
+    /// row got a different id than the token, every authenticated request would
+    /// fail the liveness check.
+    pub id: Uuid,
     pub user_id: Uuid,
     pub refresh_token_hash: String,
     pub platform: String,

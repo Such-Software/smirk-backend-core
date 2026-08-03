@@ -302,6 +302,7 @@ pub async fn website_verify(
     state
         .db
         .create_session(NewSession {
+            id: session_id,
             user_id: user.id,
             refresh_token_hash,
             platform: Platform::Web.to_string(),

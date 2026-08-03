@@ -224,6 +224,7 @@ async fn issue_session(
     state
         .db
         .create_session(NewSession {
+            id: session_id,
             user_id,
             refresh_token_hash,
             platform: platform.to_string(),

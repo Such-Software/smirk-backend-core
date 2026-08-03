@@ -22,11 +22,15 @@ impl Database {
     #[instrument(skip(self, input), fields(user_id = %input.user_id, platform = %input.platform))]
     pub async fn create_session(&self, input: NewSession) -> Result<Session, AppError> {
         let sql = format!(
+            // `id` is bound explicitly: the access token carries it as `sid`,
+            // so the row and the token must agree or revocation checks reject
+            // every request.
             "INSERT INTO sessions \
-             (user_id, refresh_token_hash, platform, device_info, expires_at) \
-             VALUES ($1, $2, $3, $4, $5) RETURNING {SESSION_COLS}"
+             (id, user_id, refresh_token_hash, platform, device_info, expires_at) \
+             VALUES ($1, $2, $3, $4, $5, $6) RETURNING {SESSION_COLS}"
         );
         let session = sqlx::query_as::<_, Session>(&sql)
+            .bind(input.id)
             .bind(input.user_id)
             .bind(&input.refresh_token_hash)
             .bind(&input.platform)
