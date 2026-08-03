@@ -53,6 +53,28 @@ flag is on but whose source is unconfigured reports `enabled: false` via
 | XMR / WOW | `{XMR,WOW}_LWS_URL`, `{XMR,WOW}_LWS_ADMIN_URL`, `{XMR,WOW}_LWS_ADMIN_KEY`, `{XMR,WOW}_DAEMON_URL`. |
 | Grin | `GRIN_OWNER_API_URL` + `GRIN_OWNER_API_SECRET`, `GRIN_WALLET_PASSWORD`, `GRIN_FOREIGN_API_URL`, and the node's `GRIN_NODE_*`. |
 
+> **Electrum fallbacks are a privacy decision.**
+>
+> `{BTC,LTC}_ELECTRUM_FALLBACKS` are third-party servers. If your own
+> Electrum/Fulcrum becomes unreachable, the backend fails over to them and the
+> queries it sends carry **your users' addresses**.
+>
+> The failover is silent and correct, which is the trap: the only symptom is that
+> balances keep working. Our own Litecoin Fulcrum was dead for 11 days before
+> anyone noticed, with every lookup going to public servers in the meantime.
+>
+> Decide deliberately:
+>
+> - **Keep fallbacks** for availability. Balances survive your node dying. The
+>   backend logs `third-party Electrum fallback(s) configured` at startup so the
+>   choice is visible in your logs, and you should alert on your own Electrum
+>   being down rather than relying on users to notice.
+> - **Leave them empty** to fail closed. Balances break when your node breaks,
+>   and every query stays on infrastructure you control. This is the right
+>   default for a privacy-first or air-gapped instance.
+>
+> There is no third option where a dead node is both invisible and private.
+
 ## 4. Run
 
 ```sh

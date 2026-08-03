@@ -1151,6 +1151,29 @@ impl Config {
             }
         }
 
+        // Electrum fallbacks are a PRIVACY decision, not just an availability one.
+        //
+        // When the operator's own Fulcrum is unreachable the client fails over to
+        // these servers, and the queries it sends carry USER ADDRESSES. On an
+        // instance whose whole pitch is "run your own backend and send us
+        // nothing", that is a posture change the operator should make knowingly.
+        //
+        // It is easy to miss: the failover is silent and correct, so the only
+        // symptom is that balances keep working. A dead Fulcrum went unnoticed
+        // for 11 days on our own fleet for exactly that reason.
+        for (coin, cfg) in [("BTC", &self.chains.btc), ("LTC", &self.chains.ltc)] {
+            if cfg.electrum_fallbacks.is_empty() {
+                continue;
+            }
+            tracing::info!(
+                "{coin}: {} third-party Electrum fallback(s) configured. If your own \
+                 Electrum server becomes unreachable, address queries will go to \
+                 them instead. Set {coin}_ELECTRUM_FALLBACKS= (empty) to fail \
+                 closed and keep every query on infrastructure you control.",
+                cfg.electrum_fallbacks.len()
+            );
+        }
+
         // Public tips escrow on-chain and deliver by share URL, so an instance
         // with FEATURE_TIPS on but no chain to escrow on, or no TIP_SHARE_BASE_URL
         // to build share links from, would advertise a tips subsystem it cannot
