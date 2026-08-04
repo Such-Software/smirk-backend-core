@@ -215,6 +215,11 @@ pub struct IdentityConfig {
     /// Required when Nostr identity is enabled: it is the canonical value the
     /// NIP-98 `u` tag is verified against — never the request `Host` header.
     pub public_api_url: Option<String>,
+    /// The domain handles live at (`name@<domain>`), advertised in
+    /// `/capabilities`. Defaults to `public_api_url`'s host with a leading
+    /// `api.` removed, which is what the wallet used to derive client-side.
+    /// Set explicitly when your `/.well-known/nostr.json` lives elsewhere.
+    pub nip05_domain: Option<String>,
 }
 
 /// HMAC peppers and salts. Fail-closed: required and length-checked. These make
@@ -756,6 +761,7 @@ impl Config {
             },
             identity: IdentityConfig {
                 public_api_url: env_opt("PUBLIC_API_URL"),
+                nip05_domain: env_opt("NIP05_DOMAIN"),
             },
             secrets: SecretConfig {
                 seed_fingerprint_pepper: env_or("SEED_FINGERPRINT_PEPPER", ""),
@@ -1442,6 +1448,7 @@ mod tests {
             },
             identity: IdentityConfig {
                 public_api_url: Some("https://backend.example.org/api/v1".into()),
+                nip05_domain: None,
             },
             secrets: SecretConfig {
                 seed_fingerprint_pepper: "p".repeat(32),

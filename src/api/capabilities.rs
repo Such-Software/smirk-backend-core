@@ -249,16 +249,27 @@ pub fn effective_capabilities(config: &Config) -> CapabilitiesResponse {
         enabled: on,
         network: Some(net.to_string()),
     };
-    // The handle domain is the HOST of the operator's public API URL. No
-    // `api.` stripping here: if the operator wants handles at the bare domain,
-    // they say so by setting PUBLIC_API_URL to the host that actually serves
-    // /.well-known/nostr.json. Guessing is what produced unverifiable handles.
-    let nip05_domain = config
-        .identity
-        .public_api_url
-        .as_deref()
-        .and_then(|u| url::Url::parse(u).ok())
-        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()));
+    // The handle domain. `NIP05_DOMAIN` wins when set; otherwise derive it from
+    // PUBLIC_API_URL's host with a leading `api.` removed.
+    //
+    // The stripping is deliberate and load-bearing: handles have been
+    // `name@smirk.cash` (not `name@api.smirk.cash`) since v0.2, the wallet
+    // stripped `api.` client-side for exactly that reason, and published kind-0
+    // profiles already carry the bare form. Advertising the raw API host would
+    // silently re-render every existing handle and disagree with what is already
+    // on relays.
+    //
+    // It is still only a default. An operator whose well-known lives somewhere
+    // else sets NIP05_DOMAIN explicitly rather than being second-guessed.
+    let nip05_domain = config.identity.nip05_domain.clone().or_else(|| {
+        config
+            .identity
+            .public_api_url
+            .as_deref()
+            .and_then(|u| url::Url::parse(u).ok())
+            .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+            .map(|h| h.strip_prefix("api.").unwrap_or(&h).to_string())
+    });
     CapabilitiesResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         contract_version: CAPABILITIES_CONTRACT_VERSION,
