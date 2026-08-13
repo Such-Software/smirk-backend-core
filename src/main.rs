@@ -184,6 +184,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Retention sweep: age `login_events` and `audit_logs` out per the operator's
+    // configured windows, and scrub any legacy `login_events.ip_hash` earlier
+    // builds wrote. Without this the RETENTION_* settings are advertised but inert,
+    // which is what made the privacy policy's retention promise untrue.
+    //
+    // Both windows are re-read every tick so an operator edit applies without a
+    // restart. `days == 0` means keep forever and is enforced in the DB layer, so
+    // an absent setting can never be read as "delete everything". Each statement is
+    // capped at `RETENTION_BATCH` rows, so a backlog drains over successive ticks
+    // instead of holding row locks for one long pass.
+    {
+        const RETENTION_BATCH: i64 = 1_000;
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                tick.tick().await;
+                // Copy the windows out before any await: never hold a config guard
+                // across one.
+                let (login_days, audit_days) = {
+                    let r = &state.cfg().retention;
+                    (r.login_events_days, r.audit_days)
+                };
+                match state
+                    .db
+                    .run_retention_sweep(login_days, audit_days, RETENTION_BATCH)
+                    .await
+                {
+                    Ok(n) if n > 0 => tracing::info!(rows = n, "retention sweep"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "retention sweep failed"),
+                }
+            }
+        });
+    }
+
     // Background price refresh (only when the feed is enabled). On each tick we
     // fetch the configured feeds and replace the snapshot; a failure logs and
     // keeps the last good values rather than blanking them. The first interval

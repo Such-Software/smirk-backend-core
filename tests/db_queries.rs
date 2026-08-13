@@ -81,6 +81,7 @@ async fn session_create_lookup_revoke() {
 
     let sess = db
         .create_session(NewSession {
+            id: Uuid::new_v4(),
             user_id: user.id,
             refresh_token_hash: hash.clone(),
             platform: "extension".to_string(),

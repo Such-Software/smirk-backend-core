@@ -17,9 +17,32 @@ speak for you. What your instance receives from wallets that connect to it:
 - A one-way **seed fingerprint** (SHA-256) as a non-reversible wallet identifier.
 - If enabled: the **username to npub** mapping published in your NIP-05 directory,
   and, for the relay, encrypted message envelopes (ciphertext only).
-- IP addresses only as a **salted one-way hash**, for rate-limiting.
+- IP addresses **never in raw form**. The per-IP rate limiter keeps its counters
+  in memory, and the only IP-derived value written to disk is a salted one-way
+  hash on `restore_attempts`, which the seed-restore abuse limiter reads back.
+  Login events record no IP at all, and the raw-IP columns that older schemas
+  carried on `sessions` and `audit_logs` were dropped in migration
+  `20260722000001_privacy_drop_pii`. One exception, and it is about you rather
+  than your users: the tamper-evident operator audit chain (`admin_audit_logs`)
+  records the IP of privileged admin actions.
 
 Private keys and seed phrases are never transmitted to the backend.
+
+## Retention
+
+Retention is enforced by the backend, not merely advertised. A background sweep
+deletes `login_events` older than `RETENTION_LOGIN_EVENTS_DAYS` and `audit_logs`
+older than `RETENTION_AUDIT_DAYS`, in bounded batches so a long-running instance
+drains its backlog without stalling writers. Setting either knob to `0` means
+keep indefinitely, so an unset value never destroys data by surprise.
+
+The `admin_audit_logs` chain is deliberately exempt: it is hash-chained and
+MAC'd, so a deleted row reads as tampering to the verifier. Prune it on purpose
+if your policy calls for it.
+
+Self-service erasure (`ERASURE_ENABLED`) is separate and user-initiated: a
+confirmed request deletes the account and its owned rows after a grace window,
+purging or anonymizing that user's login events per `ERASURE_PURGE_LOGIN_EVENTS`.
 
 If you offer your instance to others, publish your own privacy policy describing
 how you handle this data, your retention, and your jurisdiction. The knobs that

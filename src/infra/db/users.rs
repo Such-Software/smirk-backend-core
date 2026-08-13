@@ -80,7 +80,7 @@ impl Database {
     /// The payment invoice's settled-check is non-consuming and already done by the
     /// caller; the invite has no non-consuming check, so it is claimed here and a
     /// failed claim rolls the tx back with the caller-facing literal.
-    #[instrument(skip(self, new_user, keys))]
+    #[instrument(skip(self, invite_code_hash, payment, new_user, keys))]
     pub async fn create_user_consuming_gates(
         &self,
         invite_code_hash: Option<&str>,
@@ -242,7 +242,7 @@ impl Database {
             .await?)
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self, username))]
     pub async fn get_user_by_username(&self, username: &str) -> Result<Option<User>, AppError> {
         let sql = format!("SELECT {USER_COLS} FROM users WHERE username = $1");
         Ok(sqlx::query_as::<_, User>(&sql)
@@ -253,7 +253,7 @@ impl Database {
 
     /// Find a user by their linked Nostr pubkey (x-only hex; not peppered — it is
     /// public and discoverable via NIP-05). `None` if unlinked.
-    #[instrument(skip(self))]
+    #[instrument(skip(self, nostr_pubkey))]
     pub async fn find_user_by_nostr_pubkey(
         &self,
         nostr_pubkey: &str,
@@ -370,7 +370,7 @@ impl Database {
 
     /// Link a Nostr pubkey to a user (NIP-98 sign-in). The UNIQUE constraint is
     /// the atomic claim; a collision surfaces as 409 CONFLICT.
-    #[instrument(skip(self))]
+    #[instrument(skip(self, nostr_pubkey))]
     pub async fn set_nostr_pubkey(
         &self,
         user_id: Uuid,
@@ -390,7 +390,7 @@ impl Database {
     /// Get or create a user by pubkey hash (extension registration). For an
     /// existing user, backfills only NULL `wallet_birthday` / `seed_fingerprint`
     /// / chain start-heights; never overwrites an existing value.
-    #[instrument(skip(self, pubkey_hash, seed_fingerprint))]
+    #[instrument(skip(self, pubkey_hash, username, seed_fingerprint))]
     pub async fn get_or_create_user_by_pubkey_hash(
         &self,
         pubkey_hash: &str,
@@ -458,7 +458,7 @@ impl Database {
     ///      npub onto THAT row. If the row already carries a DIFFERENT npub the
     ///      wallet is already registered under another identity -> fail closed.
     ///   3. else create a fresh npub-keyed row (`pubkey_hash` NULL).
-    #[instrument(skip(self))]
+    #[instrument(skip(self, nostr_pubkey, username, seed_fingerprint))]
     pub async fn get_or_create_user_by_nostr_pubkey(
         &self,
         nostr_pubkey: &str,
@@ -587,7 +587,7 @@ impl Database {
     }
 
     /// Update a user's username. UNIQUE collision -> 409 CONFLICT.
-    #[instrument(skip(self))]
+    #[instrument(skip(self, username))]
     pub async fn update_username(
         &self,
         user_id: Uuid,
