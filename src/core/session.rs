@@ -239,7 +239,11 @@ impl SessionManager {
         Ok(TokenInfo {
             user_id,
             platform: data.claims.platform,
-            session_id: data.claims.sid.as_deref().and_then(|s| Uuid::parse_str(s).ok()),
+            session_id: data
+                .claims
+                .sid
+                .as_deref()
+                .and_then(|s| Uuid::parse_str(s).ok()),
         })
     }
 
