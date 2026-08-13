@@ -186,7 +186,9 @@ impl Database {
         audit_days: u64,
         batch: i64,
     ) -> Result<u64, AppError> {
-        let logins = self.cleanup_old_login_events(login_events_days, batch).await?;
+        let logins = self
+            .cleanup_old_login_events(login_events_days, batch)
+            .await?;
         let audits = self.cleanup_old_audit_logs(audit_days, batch).await?;
         let scrubbed = self.scrub_legacy_login_ip_hashes(batch).await?;
         if scrubbed > 0 {

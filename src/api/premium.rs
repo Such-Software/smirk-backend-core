@@ -268,7 +268,11 @@ pub async fn activate(
 
     // Just activated, so general posting is permitted regardless of policy; still
     // report the allowlist bit truthfully.
-    let npub = state.db.get_user_by_id(user_id).await?.and_then(|u| u.nostr_pubkey);
+    let npub = state
+        .db
+        .get_user_by_id(user_id)
+        .await?
+        .and_then(|u| u.nostr_pubkey);
     let (write_allowlisted, _) = general_posting_rights(&state, npub.as_deref());
     Ok(Json(StatusResp {
         active: true,
@@ -297,7 +301,11 @@ pub async fn status(
     let user_id = extract_user_id_from_token(&state, &headers).await?;
     let until = state.db.get_premium_until(user_id).await?;
     let active = until.map(|u| u > chrono::Utc::now()).unwrap_or(false);
-    let npub = state.db.get_user_by_id(user_id).await?.and_then(|u| u.nostr_pubkey);
+    let npub = state
+        .db
+        .get_user_by_id(user_id)
+        .await?
+        .and_then(|u| u.nostr_pubkey);
     let (write_allowlisted, can_general) = general_posting_rights(&state, npub.as_deref());
     Ok(Json(StatusResp {
         active,
