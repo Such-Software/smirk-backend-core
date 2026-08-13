@@ -2,20 +2,48 @@
 //! create-by-npub path (no BTC signature) and the `seed_fingerprint` handling.
 //! A fingerprint match onto a pre-existing row is REFUSED: the endpoint
 //! proves only npub control, so it must not bind an npub onto an account keyed by
-//! another (on-file) credential without proof. Skips without `TEST_DATABASE_URL`
-//! (see `common`).
+//! another (on-file) credential without proof. The reverse direction is here too:
+//! the same wallet arriving at `/auth/extension` afterwards ADOPTS its npub-native
+//! row (it proves control of the BTC key already on file) instead of splitting the
+//! identity in two. Skips without `TEST_DATABASE_URL` (see `common`).
 
 mod common;
 
 use axum::http::StatusCode;
 use base64::Engine;
+use k256::ecdsa::signature::hazmat::PrehashSigner;
+use k256::ecdsa::{Signature as EcdsaSignature, SigningKey as EcdsaSigningKey};
+use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::schnorr::SigningKey;
+use k256::SecretKey;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use smirk_backend_core::core::crypto::nip98::{descriptor_sha256, request_descriptor};
 
 const KIND: u32 = 27235;
+
+/// A fresh secp256k1 wallet identity: the ECDSA signing key plus its compressed
+/// SEC1 public key hex (the exact string the server hashes into `pubkey_hash`).
+fn btc_identity() -> (EcdsaSigningKey, String) {
+    let secret = SecretKey::random(&mut OsRng);
+    let public = hex::encode(secret.public_key().to_encoded_point(true).as_bytes());
+    (EcdsaSigningKey::from(&secret), public)
+}
+
+/// BIP-137 base64 signature over the Bitcoin signed-message hash of `message`:
+/// 65 bytes, a header byte (which the verifier drops) followed by r||s.
+fn sign_bip137(sk: &EcdsaSigningKey, message: &str) -> String {
+    let mut preimage = Vec::new();
+    preimage.extend_from_slice(b"\x18Bitcoin Signed Message:\n");
+    preimage.push(message.len() as u8); // every message signed here is < 253 bytes
+    preimage.extend_from_slice(message.as_bytes());
+    let hash = Sha256::digest(Sha256::digest(&preimage));
+    let sig: EcdsaSignature = sk.sign_prehash(&hash[..]).expect("sign prehash");
+    let mut out = vec![0x1fu8];
+    out.extend_from_slice(&sig.to_bytes()[..]);
+    base64::engine::general_purpose::STANDARD.encode(out)
+}
 
 fn random_signer() -> SigningKey {
     loop {
@@ -66,17 +94,36 @@ async fn register(
     base: &str,
     seed_fingerprint: Option<&str>,
 ) -> (StatusCode, serde_json::Value) {
+    let pk = hex::encode(sk.verifying_key().to_bytes());
+    register_with_btc(
+        app,
+        sk,
+        base,
+        seed_fingerprint,
+        &format!("btcpub-{}", &pk[..16]),
+    )
+    .await
+}
+
+/// Like [`register`], but with an explicit BTC public key: the adoption test
+/// needs a REAL secp256k1 key it can sign `/auth/extension` with afterwards.
+async fn register_with_btc(
+    app: &common::TestApp,
+    sk: &SigningKey,
+    base: &str,
+    seed_fingerprint: Option<&str>,
+    btc_public_key: &str,
+) -> (StatusCode, serde_json::Value) {
     let (_s, chal) = app
         .request("GET", "/api/v1/auth/nostr/register-challenge", None, None)
         .await;
     let nonce = chal["nonce"].as_str().unwrap().to_string();
     let url = format!("{}/auth/nostr/register", base);
     let token = sign_register(sk, &url, &nonce);
-    let pk = hex::encode(sk.verifying_key().to_bytes());
     let body = serde_json::json!({
         "nostr_token": token,
         "nonce": nonce,
-        "keys": [{ "asset": "btc", "public_key": format!("btcpub-{}", &pk[..16]) }],
+        "keys": [{ "asset": "btc", "public_key": btc_public_key }],
         "seed_fingerprint": seed_fingerprint,
     });
     app.request("POST", "/api/v1/auth/nostr/register", None, Some(body))
@@ -218,5 +265,83 @@ async fn register_refuses_to_bind_npub_onto_existing_seed_fingerprint_row_withou
     assert!(
         after.nostr_pubkey.is_none(),
         "the victim's row must not have gained an npub"
+    );
+}
+
+#[tokio::test]
+async fn extension_login_adopts_the_npub_native_row_instead_of_splitting_it() {
+    // Regression: `nostr_register` mints its row with pubkey_hash NULL, so the
+    // SAME wallet's first /auth/extension matched nothing by pubkey and minted a
+    // SECOND row, stranding the handle, tips and premium state on the first.
+    // Same seed AND the BTC key already on file (whose control the extension
+    // request proves): one wallet, so the row adopts the pubkey_hash.
+    let app = require_app!();
+    let base = app
+        .state
+        .cfg()
+        .identity
+        .public_api_url
+        .clone()
+        .expect("PUBLIC_API_URL");
+
+    let sk = random_signer();
+    let npub = hex::encode(sk.verifying_key().to_bytes());
+    let (btc_sk, btc_pk) = btc_identity();
+    let fp = hex::encode(Sha256::digest(uuid::Uuid::new_v4().as_bytes()));
+
+    // npub-native registration: the row carries the BTC key but no pubkey_hash.
+    let (status, body) = register_with_btc(&app, &sk, &base, Some(&fp), &btc_pk).await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let user_id = body["user"]["id"].as_str().unwrap().to_string();
+    let row = app
+        .state
+        .db
+        .find_user_by_nostr_pubkey(&npub)
+        .await
+        .unwrap()
+        .expect("npub row");
+    assert!(
+        row.pubkey_hash.is_none(),
+        "an npub-native row starts without a pubkey_hash"
+    );
+
+    // The same wallet now signs in through the extension path.
+    let ts = chrono::Utc::now().timestamp();
+    let (s2, b2) = app
+        .request(
+            "POST",
+            "/api/v1/auth/extension",
+            None,
+            Some(serde_json::json!({
+                "keys": [{ "asset": "btc", "public_key": btc_pk }],
+                "seed_fingerprint": fp,
+                "signed_timestamp": ts,
+                "signature": sign_bip137(&btc_sk, &format!("smirk-auth-{ts}")),
+            })),
+        )
+        .await;
+    assert_eq!(s2, StatusCode::OK, "body={b2}");
+    assert_eq!(b2["is_new"], false, "this wallet already had an account");
+    assert_eq!(
+        b2["user"]["id"].as_str().unwrap(),
+        user_id,
+        "the extension login must resolve to the SAME user row"
+    );
+
+    // One identity, not two: the row now answers to the pubkey_hash as well, and
+    // it kept its Nostr identity.
+    let pkh = hex::encode(Sha256::digest(btc_pk.as_bytes()));
+    let by_pubkey = app
+        .state
+        .db
+        .get_user_by_pubkey_hash(&pkh)
+        .await
+        .unwrap()
+        .expect("the pubkey_hash now resolves");
+    assert_eq!(by_pubkey.id.to_string(), user_id);
+    assert_eq!(
+        by_pubkey.nostr_pubkey.as_deref(),
+        Some(npub.as_str()),
+        "the adopted row keeps its Nostr identity"
     );
 }

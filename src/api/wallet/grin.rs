@@ -52,6 +52,12 @@ fn grin_client(state: &AppState) -> Result<&GrinClient, AppError> {
 pub struct GrinScanRequest {
     /// The wallet's `rewind_hash` (64 hex). Forwarded to grin-wallet; not stored.
     pub rewind_hash: String,
+    // Omitting this is NOT a free full-chain scan: `scan` resolves it to the
+    // deepest height this instance permits and gates/prices THAT (see the handler).
+    // A client that must solve the restore PoW should send an explicit height,
+    // because the nonce binds to the height actually scanned. Kept out of the doc
+    // comment so the committed `openapi.json` (drift-gated in CI) stays byte-equal;
+    // regenerate the spec if this is ever promoted to `///`.
     /// Scan from this block height (wallet birthday / last scanned). Omit for full.
     pub start_height: Option<u64>,
     /// Restore proof-of-work nonce. Required when the instance prices the
@@ -200,23 +206,30 @@ pub async fn scan(
     // Restore-depth + PoW gate runs ONCE, before path selection, and is TERMINAL:
     // a policy rejection returns 400 directly. It must never be masked by the
     // grin-wallet fallback, so it is enforced before either scan path is chosen.
-    if let Some(h) = req.start_height {
-        let tip = grin_tip(&state).await?;
-        state.cfg().restore.enforce("grin", h, tip)?;
-        state.cfg().restore.enforce_restore_pow(
-            "grin",
-            &req.rewind_hash,
-            h,
-            tip,
-            req.restore_pow_nonce,
-        )?;
-    }
+    //
+    // An OMITTED start_height used to skip this block entirely, so leaving the
+    // field out bought an unbounded full-chain scan for free while an honest
+    // caller paid for depth. Resolve the omission to the deepest height this
+    // instance permits and gate/price THAT, then scan from it: both callers now
+    // pay the same for the same work.
+    let tip = grin_tip(&state).await?;
+    let start_height = req
+        .start_height
+        .unwrap_or_else(|| state.cfg().restore.min_start_height("grin", tip));
+    state.cfg().restore.enforce("grin", start_height, tip)?;
+    state.cfg().restore.enforce_restore_pow(
+        "grin",
+        &req.rewind_hash,
+        start_height,
+        tip,
+        req.restore_pow_nonce,
+    )?;
 
     // Default to grin-lws when configured. It is trusted ONLY when provably synced
     // to the tip; otherwise (and on any transport error) the scan falls back to
     // the authoritative grin-wallet scan below.
     if let Some(lws) = state.chains.grin_lws.as_ref() {
-        match scan_via_grin_lws(lws, &req).await {
+        match scan_via_grin_lws(lws, &req, start_height).await {
             Ok(Some(resp)) => return Ok(Json(resp)),
             Ok(None) => {} // still backfilling — fall through to grin-wallet
             Err(e) => {
@@ -229,7 +242,7 @@ pub async fn scan(
     // synthesize an empty/zero success.
     let client = grin_client(&state)?;
     let view = client
-        .scan_rewind_hash(&req.rewind_hash, req.start_height)
+        .scan_rewind_hash(&req.rewind_hash, Some(start_height))
         .await?;
     Ok(Json(GrinScanResponse {
         outputs: view.output_result.into_iter().map(output_dto).collect(),
@@ -265,8 +278,9 @@ async fn grin_tip(state: &AppState) -> Result<u64, AppError> {
 async fn scan_via_grin_lws(
     lws: &GrinLwsClient,
     req: &GrinScanRequest,
+    start_height: u64,
 ) -> Result<Option<GrinScanResponse>, AppError> {
-    lws.register(&req.rewind_hash, req.start_height).await?;
+    lws.register(&req.rewind_hash, Some(start_height)).await?;
     let bal = lws.get_balance(&req.rewind_hash).await?;
     // Trust grin-lws only when its scan has effectively reached the tip.
     // `saturating_add` so a hostile/garbled `scanned_height` can never overflow

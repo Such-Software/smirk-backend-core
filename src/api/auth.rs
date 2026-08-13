@@ -9,7 +9,9 @@
 //!   keyed by `pubkey_hash`. A derivation-scheme rotation (a known
 //!   `seed_fingerprint` at a new `pubkey_hash`) re-points an EXISTING user row
 //!   ONLY when the request additionally proves control of the BTC key already on
-//!   file for that user — never on a bare (unauthenticated) fingerprint.
+//!   file for that user — never on a bare (unauthenticated) fingerprint. The same
+//!   rule adopts a `pubkey_hash` onto a row that has none yet (an npub-native
+//!   registration): the BTC key on file must be the submitted one.
 //! * [`nostr_login`] — NIP-98 (login grade) over the `Authorization` header.
 //!   Resolves an already-linked npub to its user; it NEVER creates a user.
 //! * [`refresh_token`] — rotates a valid, still-active refresh token.
@@ -192,6 +194,31 @@ fn nip98_url(state: &AppState, path: &str) -> Result<String, AppError> {
     Ok(format!("{}{}", base.trim_end_matches('/'), path))
 }
 
+/// The message a derivation-rotation proof must sign.
+///
+/// Deliberately DISTINCT from the ordinary login message (`smirk-auth-{ts}`), so
+/// a captured login signature is useless as a rotation proof. It also commits to
+/// the NEW `pubkey_hash` (a proof cannot be re-aimed at a different key) and to
+/// this instance's canonical public API URL (a proof captured by a hostile
+/// self-hosted instance cannot be replayed against another one).
+///
+/// `None` when the instance has no canonical URL configured: the proof cannot be
+/// instance-bound, so we decline to rotate rather than accept a replayable proof.
+fn rotation_message(
+    state: &AppState,
+    new_pubkey_hash: &str,
+    signed_timestamp: i64,
+) -> Option<String> {
+    let cfg = state.cfg();
+    let instance = cfg.identity.public_api_url.as_deref()?;
+    Some(format!(
+        "smirk-rotate-v1|{}|{}|{}",
+        instance.trim_end_matches('/'),
+        new_pubkey_hash,
+        signed_timestamp
+    ))
+}
+
 /// Build [`UserInfo`] from a DB user.
 fn user_info(user: &crate::models::db::User) -> UserInfo {
     UserInfo {
@@ -296,7 +323,9 @@ pub struct ExtensionRegisterRequest {
     pub wallet_birthday: Option<i64>,
     /// Seed fingerprint `hex(SHA256(SHA256(seed))[..])`. Used for restore and to
     /// LOCATE a candidate user row for the derivation-rotation path. By itself it
-    /// is NOT authority: a rotation also requires `rotation_signature` below.
+    /// is NOT authority: re-pointing an existing row additionally requires either
+    /// `rotation_signature` below or that the row's on-file BTC key is exactly the
+    /// one submitted in `keys` (whose control this request already proves).
     pub seed_fingerprint: Option<String>,
     pub xmr_start_height: Option<i64>,
     pub wow_start_height: Option<i64>,
@@ -305,12 +334,18 @@ pub struct ExtensionRegisterRequest {
     /// BIP-137 base64 signature of `smirk-auth-{signed_timestamp}` under the
     /// SUBMITTED (new) BTC key. Proves control of the key in `keys`.
     pub signature: String,
-    /// Derivation-rotation proof: BIP-137 base64 signature of the SAME
-    /// `smirk-auth-{signed_timestamp}` message under the BTC key ALREADY ON FILE
-    /// for the user identified by `seed_fingerprint`. Required to re-point an
-    /// existing user row; without it (or if it does not verify against the stored
-    /// key) a fingerprint match is treated as a brand-new identity and the
-    /// existing row is never touched. See [`extension_register`].
+    /// Derivation-rotation proof: BIP-137 base64 signature under the BTC key
+    /// ALREADY ON FILE for the user identified by `seed_fingerprint`, over the
+    /// DEDICATED rotation message
+    /// `smirk-rotate-v1|{public_api_url}|{pubkey_hash}|{signed_timestamp}`, where
+    /// `public_api_url` is this instance's canonical API base with any trailing
+    /// `/` removed and `pubkey_hash` is `hex(SHA256(submitted btc public_key))`.
+    /// It is deliberately NOT the login message: a captured login signature must
+    /// be useless as a rotation proof, and a proof minted for one instance must
+    /// not verify on another. Required to re-point an existing user row; without
+    /// it (or if it does not verify against the stored key) a fingerprint match is
+    /// treated as a brand-new identity and the existing row is never touched. See
+    /// [`extension_register`].
     #[serde(default)]
     pub rotation_signature: Option<String>,
     /// Optional proof-of-work solution. Required when the PoW gate applies to
@@ -346,10 +381,24 @@ pub struct ExtensionRegisterRequest {
 /// request also carries a `rotation_signature` that verifies against the BTC key
 /// already on file for that user (proving control of the seed-derived key, not
 /// merely knowledge of the fingerprint, which `check_restore` discloses and is
-/// not secret). A bare fingerprint match WITHOUT a valid rotation proof is
-/// treated as a brand-new identity: a fresh user row is created on the new
-/// `pubkey_hash` and the matched victim row is never modified. The rotation path
-/// is gated by PoW exactly like any other new-pubkey registration.
+/// not secret). That proof signs a dedicated message, NOT the login message: see
+/// [`rotation_message`], which binds a rotation-specific prefix, the new
+/// `pubkey_hash`, the timestamp and this instance's canonical public API URL, so
+/// a captured login signature is worthless here and a proof minted for one
+/// instance does not verify on another. A bare fingerprint match WITHOUT a valid
+/// rotation proof is treated as a brand-new identity: a fresh user row is created
+/// on the new `pubkey_hash` and the matched victim row is never modified. The
+/// rotation path is gated by PoW exactly like any other new-pubkey registration.
+///
+/// ## Adopting a `pubkey_hash` onto a keyless row
+///
+/// A row minted by [`nostr_register`] carries no `pubkey_hash`, so that wallet's
+/// first call here matches nothing by pubkey. When the fingerprint matches such a
+/// row AND the BTC key on file for it is exactly the key submitted (whose control
+/// this request already proved), it is the same wallet: the submitted
+/// `pubkey_hash` is adopted onto that row (`is_new=false`) instead of minting a
+/// second identity that would strand the handle, tips and premium state. If the
+/// row already has a `pubkey_hash`, or the BTC keys differ, nothing is adopted.
 #[utoipa::path(
     post,
     path = "/auth/extension",
@@ -395,12 +444,11 @@ pub async fn extension_register(
     // literal-messaged, so this is not an oracle.
     verify_bitcoin_signature(&message, &req.signature, &btc_key.public_key)?;
 
-    // Is the exact pubkey_hash already known? (Plain returning user.)
-    let returning_by_pubkey = state
-        .db
-        .get_user_by_pubkey_hash(&pubkey_hash)
-        .await?
-        .is_some();
+    // Is the exact pubkey_hash already known? (Plain returning user.) Keep the
+    // ROW, not just the boolean: the fingerprint-ownership check below needs its
+    // id to tell this user's own fingerprint from someone else's.
+    let existing_by_pubkey = state.db.get_user_by_pubkey_hash(&pubkey_hash).await?;
+    let returning_by_pubkey = existing_by_pubkey.is_some();
 
     let wallet_birthday = req
         .wallet_birthday
@@ -418,12 +466,66 @@ pub async fn extension_register(
                 // we cannot authenticate a rotation -> fall through to new-identity.
                 let stored_btc = state.db.get_user_key(target.id, AssetType::Btc).await?;
 
-                let rotation_proven = match (&req.rotation_signature, &stored_btc) {
-                    (Some(sig), Some(stored)) => {
+                // Adopt the submitted pubkey_hash onto a row that has none yet.
+                // `nostr_register` mints its row with pubkey_hash NULL, so the
+                // same wallet's first /auth/extension matches nothing by pubkey
+                // and would otherwise mint a SECOND row, stranding the handle,
+                // tips and premium state on the first. Same seed, same BTC key:
+                // it is one wallet, so adopt rather than split the identity.
+                //
+                // The submitted `signature` was already verified against the
+                // submitted BTC key above, so requiring the on-file key to EQUAL
+                // it means the caller proved control of the key this row already
+                // carries. A bare fingerprint (which check_restore discloses, so
+                // it is not a secret) can never claim an account this way.
+                let adoptable = target.pubkey_hash.is_none()
+                    && stored_btc
+                        .as_ref()
+                        .is_some_and(|stored| stored.public_key == btc_key.public_key);
+                if adoptable {
+                    // A move, not a mint (`is_new=false`): this row was already
+                    // gated when it was created, so the invite / pay-to-register
+                    // gates do not re-run here, exactly as on the rotation branch
+                    // below. PoW still applies to the new pubkey.
+                    enforce_pow(&state, &pubkey_hash_lc, false, req.altcha_solution.as_ref())?;
+
+                    info!(user_id = %target.id, "adopting pubkey_hash onto keyless row");
+                    state.db.update_pubkey_hash(target.id, &pubkey_hash).await?;
+                    upsert_all_keys(&state, target.id, &req.keys).await?;
+
+                    let pair =
+                        issue_session(&state, target.id, Platform::Extension, "Browser Extension")
+                            .await?;
+                    let _ = state
+                        .db
+                        .record_login_event(
+                            Some(target.id),
+                            "btc",
+                            Platform::Extension.as_str(),
+                            None,
+                            Some(&ip.to_string()),
+                        )
+                        .await;
+                    return Ok(Json(AuthResponse {
+                        access_token: pair.access_token,
+                        refresh_token: pair.refresh_token,
+                        expires_in: pair.expires_in,
+                        user: user_info(&target),
+                        is_new: false,
+                    }));
+                }
+
+                // The rotation proof signs a DEDICATED message (see
+                // [`rotation_message`]), never the login message: a captured
+                // login signature must be useless as a rotation proof, and a
+                // proof minted for one instance must not verify on another.
+                let rotation_msg = rotation_message(&state, &pubkey_hash, req.signed_timestamp);
+                let rotation_proven = match (&req.rotation_signature, &stored_btc, &rotation_msg) {
+                    (Some(sig), Some(stored), Some(msg)) => {
                         // Control of the on-file (seed-derived) key proves seed
                         // ownership. A bad signature is rejected (not an oracle:
                         // we simply decline to rotate and create a new identity).
-                        verify_bitcoin_signature(&message, sig, &stored.public_key).is_ok()
+                        verify_bitcoin_signature(msg, sig, &stored.public_key).is_ok()
                     }
                     _ => false,
                 };
@@ -489,13 +591,23 @@ pub async fn extension_register(
         req.altcha_solution.as_ref(),
     )?;
     // Never attach a seed_fingerprint that already belongs to ANOTHER user (it
-    // would collide on the UNIQUE or hijack the lookup); a returning user only
-    // backfills NULLs anyway. Used as the new row's fingerprint below.
+    // would collide on the UNIQUE or hijack the lookup). This runs on EVERY path,
+    // returning users included: backfilling a fingerprint owned by another row
+    // violates that UNIQUE and then 500s every later login for this account. A
+    // fingerprint already on THIS user's row is its own, so it is kept.
     let fingerprint_for_row = match &req.seed_fingerprint {
         Some(fp) => {
-            let belongs_to_other =
-                !returning_by_pubkey && state.db.get_user_by_seed_fingerprint(fp).await?.is_some();
+            let owner = state.db.get_user_by_seed_fingerprint(fp).await?;
+            let belongs_to_other = match (&owner, &existing_by_pubkey) {
+                (Some(owner), Some(me)) => owner.id != me.id,
+                (Some(_), None) => true,
+                (None, _) => false,
+            };
             if belongs_to_other {
+                warn!(
+                    "extension_register: submitted seed_fingerprint belongs to another row; \
+                     not attaching it"
+                );
                 None
             } else {
                 Some(fp.clone())

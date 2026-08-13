@@ -254,10 +254,13 @@ impl TestApp {
         use smirk_backend_core::core::session::{hash_refresh_token, Platform};
         use smirk_backend_core::models::db::NewSession;
         let user_id = self.create_user().await;
+        // The access token embeds this as `sid`, so the row MUST carry the same id
+        // or every authenticated request fails the session-liveness check.
+        let session_id = Uuid::new_v4();
         let pair = self
             .state
             .sessions
-            .create_token_pair(user_id, Platform::Web, Uuid::new_v4())
+            .create_token_pair(user_id, Platform::Web, session_id)
             .expect("mint token pair");
         let hash = hash_refresh_token(
             &pair.refresh_token,
@@ -266,6 +269,7 @@ impl TestApp {
         self.state
             .db
             .create_session(NewSession {
+                id: session_id,
                 user_id,
                 refresh_token_hash: hash,
                 platform: "web".to_string(),

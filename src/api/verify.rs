@@ -12,6 +12,13 @@
 //! at deploy time by an nginx allow-list to moon.vote's mesh IP; there is no code
 //! auth here on purpose (adding one would reject the fixed peer client).
 //!
+//! OFF BY DEFAULT (see [`routes`]): unauthenticated plus resource-expensive (it
+//! drives Electrum, the LWS backends and a full grin-wallet rewind scan on
+//! caller-supplied input) makes this an amplifier pointed at the operator's own
+//! infrastructure, so an instance that has not negotiated the moon.vote peering
+//! does not mount the route at all. When it IS enabled it sits on the strict
+//! rate-limit tier; the nginx allow-list remains the primary containment.
+//!
 //! Response discipline: EVERY business outcome — including a failed check — is a
 //! `200 OK` carrying `{verified, sender, amount, reason}`, where `reason` is drawn
 //! from the fixed vocabulary in [`reason`] that the moon.vote client maps to typed
@@ -424,8 +431,24 @@ pub async fn verify_handler(
 
 // ── router ────────────────────────────────────────────────────────────────────
 
-/// The verify route, RELATIVE to the `/api/v1` mount point.
+/// Whether the operator has turned the delegated-verify endpoint on. Default OFF:
+/// the handler is unauthenticated and spends the operator's own Electrum / LWS /
+/// grin-wallet capacity on caller-supplied addresses and view credentials, so an
+/// instance that has not asked for the moon.vote peering must not expose it.
+/// Read through the one flag parser every feature flag uses, so "on" means the
+/// same thing here as everywhere else; an unset or unparseable value is off.
+pub(crate) fn delegated_verify_enabled() -> bool {
+    crate::api::capabilities::env_flag_enabled("FEATURE_DELEGATED_VERIFY")
+}
+
+/// The verify route, RELATIVE to the `/api/v1` mount point. Returns an EMPTY
+/// router unless the operator enabled the feature, so a request to `/verify`
+/// then 404s (the route does not exist) rather than reaching the handler. The
+/// caller mounts this on the strict rate-limit tier.
 pub fn routes() -> Router<Arc<AppState>> {
+    if !delegated_verify_enabled() {
+        return Router::new();
+    }
     Router::new().route("/verify", post(verify_handler))
 }
 

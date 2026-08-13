@@ -18,13 +18,16 @@ pub mod models;
 pub mod tips;
 
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::DefaultBodyLimit;
+use axum::extract::{ConnectInfo, DefaultBodyLimit};
 use axum::http::{header, HeaderValue, Method};
 use axum::{routing::get, Router};
 use tokio::sync::RwLock;
+use tower_governor::errors::GovernorError;
+use tower_governor::key_extractor::KeyExtractor;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
@@ -99,6 +102,33 @@ impl AppState {
     }
 }
 
+/// Rate-limit key: the REAL client IP, resolved exactly like the audit/auth
+/// surface resolves it ([`api::middleware::client_ip`]), so `X-Forwarded-For` is
+/// honoured only when the immediate peer is inside `config.trusted_proxies`.
+///
+/// The default `PeerIpKeyExtractor` keys on the TCP peer, which behind a
+/// TLS-terminating reverse proxy is ALWAYS the proxy: every client on the
+/// internet then shares one bucket, so a few requests per second from one host
+/// throttle everyone and there is no per-client abuse control at all.
+#[derive(Clone)]
+struct ClientIpKeyExtractor(Arc<AppState>);
+
+impl KeyExtractor for ClientIpKeyExtractor {
+    type Key = IpAddr;
+
+    fn extract<T>(&self, req: &axum::http::Request<T>) -> Result<Self::Key, GovernorError> {
+        // No ConnectInfo means the request cannot be attributed to a peer, so we
+        // fail closed rather than silently collapsing every caller into one bucket.
+        let peer = req
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ConnectInfo(addr)| *addr)
+            .or_else(|| req.extensions().get::<SocketAddr>().copied())
+            .ok_or(GovernorError::UnableToExtractKey)?;
+        Ok(api::middleware::client_ip(&self.0, req.headers(), peer))
+    }
+}
+
 /// Assemble the full application router with every route mounted and state
 /// applied. Shared by `main` and the integration-test harness so both exercise
 /// the exact same wiring: `/health` and the NIP-05 directory at the root, the
@@ -106,11 +136,18 @@ impl AppState {
 pub fn build_router(state: Arc<AppState>) -> Router {
     let cors = cors_layer(&state.cfg());
 
-    // Per-IP rate limiting (PeerIpKeyExtractor reads ConnectInfo — `main` serves
-    // with `into_make_service_with_connect_info`; the test harness injects it).
+    // Per-IP rate limiting keyed by [`ClientIpKeyExtractor`], which reads
+    // ConnectInfo (`main` serves with `into_make_service_with_connect_info`; the
+    // test harness injects it) and the trusted-proxy-gated `X-Forwarded-For`, so
+    // each client gets its own bucket even behind the TLS terminator.
     // Tiered: stricter on the unauthenticated auth/website surface (closes the
     // website-challenge growth vector), looser on the wallet/identity API.
-    let mut strict_cfg = GovernorConfigBuilder::default();
+    let client_ip_key = ClientIpKeyExtractor(state.clone());
+
+    // `key_extractor` hands back a NEW builder (the extractor is part of its type),
+    // so it is applied before the tier's period/burst.
+    let mut strict_base = GovernorConfigBuilder::default();
+    let mut strict_cfg = strict_base.key_extractor(client_ip_key.clone());
     strict_cfg
         .per_millisecond(STRICT_PERIOD_MS)
         .burst_size(STRICT_BURST);
@@ -118,7 +155,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         config: Arc::new(strict_cfg.finish().expect("valid strict governor config")),
     };
 
-    let mut normal_cfg = GovernorConfigBuilder::default();
+    let mut normal_base = GovernorConfigBuilder::default();
+    let mut normal_cfg = normal_base.key_extractor(client_ip_key);
     normal_cfg
         .per_millisecond(NORMAL_PERIOD_MS)
         .burst_size(NORMAL_BURST);
@@ -128,6 +166,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     let api_v1 = api::auth::routes()
         .merge(api::website::routes())
+        // Delegated verification is unauthenticated and drives Electrum / the LWS
+        // backends / a grin-wallet scan on caller-supplied input, so it belongs on
+        // the strict tier. It is mounted only when the operator opts in; see
+        // [`api::verify::routes`].
+        .merge(api::verify::routes())
         .layer(strict)
         .merge(
             api::users::routes()
@@ -138,7 +181,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 .merge(api::erasure::routes())
                 .merge(api::premium::routes())
                 .merge(api::tips::routes())
-                .merge(api::verify::routes())
                 .layer(normal),
         );
 
