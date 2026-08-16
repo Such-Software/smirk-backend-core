@@ -780,7 +780,7 @@ impl Config {
                     grin: env_bool("FEATURE_GRIN", true),
                 },
                 prices: env_bool("FEATURE_PRICES", true),
-                prices_provider: env_or("PRICES_PROVIDER", "coingecko").to_lowercase(),
+                prices_provider: env_or("PRICES_PROVIDER", "neroswap").to_lowercase(),
                 prices_interval_secs: env_parse("PRICES_FETCH_INTERVAL_SECS", 300u64)?,
                 // Per-feed control. Distinguish UNSET from PRESENT-BUT-EMPTY:
                 // `env::var` (not `env_opt`, which collapses empty into None) so
@@ -1074,10 +1074,10 @@ impl Config {
         if self.features.prices {
             if !matches!(
                 self.features.prices_provider.as_str(),
-                "coingecko" | "kraken"
+                "neroswap" | "coingecko" | "kraken"
             ) {
                 return Err(cfg_err(format!(
-                    "PRICES_PROVIDER {:?} is not supported; supported: coingecko, kraken",
+                    "PRICES_PROVIDER {:?} is not supported; supported: neroswap, coingecko, kraken",
                     self.features.prices_provider
                 )));
             }

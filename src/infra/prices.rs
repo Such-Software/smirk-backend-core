@@ -26,6 +26,10 @@ const COINGECKO_URL: &str = "https://api.coingecko.com/api/v3/simple/price";
 const KRAKEN_URL: &str = "https://api.kraken.com/0/public/Ticker";
 /// Nonlogs markets — WOW/GRIN, which Kraken doesn't list (priced via BTC/USDT).
 const NONLOGS_URL: &str = "https://api.nonlogs.io/api/markets";
+/// The canonical Such Software price oracle (hash-wallet-prices Worker):
+/// Kraken majors; WOW from Nonlogs + volume-weighted CexSwap, averaged and
+/// KV-cached each minute. One call returns every rate, USD only.
+const NEROSWAP_URL: &str = "https://prices.neroswap.com/v1/prices";
 /// Our majors → Kraken USD pair. WOW/GRIN come from nonlogs instead.
 const KRAKEN_PAIRS: &[(&str, &str)] = &[
     ("btc", "XXBTZUSD"),
@@ -127,6 +131,7 @@ impl PriceClient {
             return Ok(HashMap::new());
         }
         match self.provider.as_str() {
+            "neroswap" => self.fetch_neroswap().await,
             "coingecko" => self.fetch_coingecko().await,
             "kraken" => self.fetch_kraken_nonlogs().await,
             other => Err(AppError::ConfigError(format!(
@@ -260,6 +265,58 @@ impl PriceClient {
             if let Some(&price) = raw.get(*id).and_then(|m| m.get(&self.currency)) {
                 if price.is_finite() && price >= 0.0 {
                     out.insert(asset.clone(), price);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The prices.neroswap.com oracle: one call, uppercase-symbol rate map.
+    /// Assets the oracle doesn't publish (GRIN) fall back to the direct
+    /// nonlogs leg, converted via the oracle's own BTC/USD. USD only — the
+    /// oracle does not serve other quote currencies.
+    async fn fetch_neroswap(&self) -> Result<HashMap<String, f64>, AppError> {
+        let resp = self
+            .http
+            .get(NEROSWAP_URL)
+            .send()
+            .await
+            .map_err(|_| AppError::NodeError("price fetch failed".into()))?;
+        if !resp.status().is_success() {
+            return Err(AppError::NodeError(format!(
+                "price provider returned HTTP {}",
+                resp.status().as_u16()
+            )));
+        }
+        let body = read_capped(resp, MAX_PRICE_BODY_BYTES).await?;
+        #[derive(Deserialize)]
+        struct NeroswapResp {
+            rates: HashMap<String, f64>,
+        }
+        let data: NeroswapResp = serde_json::from_slice(&body)
+            .map_err(|_| AppError::NodeError("invalid price response".into()))?;
+
+        let mut out = HashMap::new();
+        let mut missing = Vec::new();
+        for (asset, _) in &self.feeds {
+            match data.rates.get(&asset.to_uppercase()) {
+                Some(&price) if price.is_finite() && price > 0.0 => {
+                    out.insert(asset.clone(), price);
+                }
+                _ => missing.push(asset.clone()),
+            }
+        }
+        if !missing.is_empty() {
+            let btc_usd = data
+                .rates
+                .get("BTC")
+                .copied()
+                .filter(|p| p.is_finite() && *p > 0.0);
+            if let Some(nonlogs) = self.fetch_nonlogs(btc_usd).await {
+                for asset in missing {
+                    if let Some(&price) = nonlogs.get(&asset) {
+                        out.insert(asset, price);
+                    }
                 }
             }
         }
