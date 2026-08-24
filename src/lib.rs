@@ -47,14 +47,11 @@ const MAX_BODY_BYTES: usize = 1024 * 1024;
 /// so their errors surface first for chain calls; bounds any slow handler).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
-// Per-IP rate-limit tiers (one token replenished per period; `burst` = bucket).
-// STRICT throttles the unauthenticated, abuse-prone surface (auth + website);
-// NORMAL covers the authenticated wallet/identity API. Sane defaults; operator-
-// tunable config can follow.
-const STRICT_PERIOD_MS: u64 = 500; // ~2 req/s sustained
-const STRICT_BURST: u32 = 20;
-const NORMAL_PERIOD_MS: u64 = 100; // ~10 req/s sustained
-const NORMAL_BURST: u32 = 60;
+// Per-IP rate-limit tiers now live in `config::RateLimitConfig`, read from
+// RATE_LIMIT_* with these same values as defaults, so an operator who sets
+// nothing sees exactly the previous behaviour. STRICT throttles the
+// unauthenticated, abuse-prone surface (auth + website); NORMAL covers the
+// authenticated wallet/identity API.
 
 /// Shared application state injected into handlers via `State<Arc<AppState>>`.
 #[derive(Clone)]
@@ -143,14 +140,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // Tiered: stricter on the unauthenticated auth/website surface (closes the
     // website-challenge growth vector), looser on the wallet/identity API.
     let client_ip_key = ClientIpKeyExtractor(state.clone());
+    // Snapshot the tiers once: a governor config is built here and then owned by
+    // the layer, so a later hot-swap of the effective config does not retune a
+    // running limiter either way.
+    let rl = state.cfg().rate_limit.clone();
 
     // `key_extractor` hands back a NEW builder (the extractor is part of its type),
     // so it is applied before the tier's period/burst.
     let mut strict_base = GovernorConfigBuilder::default();
     let mut strict_cfg = strict_base.key_extractor(client_ip_key.clone());
     strict_cfg
-        .per_millisecond(STRICT_PERIOD_MS)
-        .burst_size(STRICT_BURST);
+        .per_millisecond(rl.strict_period_ms)
+        .burst_size(rl.strict_burst);
     let strict = GovernorLayer {
         config: Arc::new(strict_cfg.finish().expect("valid strict governor config")),
     };
@@ -158,8 +159,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let mut normal_base = GovernorConfigBuilder::default();
     let mut normal_cfg = normal_base.key_extractor(client_ip_key);
     normal_cfg
-        .per_millisecond(NORMAL_PERIOD_MS)
-        .burst_size(NORMAL_BURST);
+        .per_millisecond(rl.normal_period_ms)
+        .burst_size(rl.normal_burst);
     let normal = GovernorLayer {
         config: Arc::new(normal_cfg.finish().expect("valid normal governor config")),
     };

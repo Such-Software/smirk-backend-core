@@ -158,6 +158,9 @@ pub struct Config {
     /// Networks whose `X-Forwarded-For` is trusted. Empty (default) means the
     /// real TCP peer is always used for rate-limiting and audit IPs.
     pub trusted_proxies: Vec<IpNetwork>,
+
+    /// Per-IP rate-limit tiers. See [`RateLimitConfig`].
+    pub rate_limit: RateLimitConfig,
     /// Browser origins allowed by CORS (e.g. the web wallet). Empty (default)
     /// allows any origin — safe here because auth is a Bearer token, not cookies,
     /// so no ambient credentials ride a cross-origin request.
@@ -229,6 +232,44 @@ pub struct SecretConfig {
     pub seed_fingerprint_pepper: String,
     pub refresh_token_pepper: String,
     pub ip_salt: String,
+}
+
+/// Per-IP rate-limit tiers, one token replenished per period, `burst` = bucket.
+///
+/// Defaults reproduce the values these were compiled with, so an operator who
+/// sets nothing sees no change.
+///
+/// Why they became configurable: the burst, not the rate, is what users hit.
+/// One wallet session spends FIVE strict tokens (`/auth/check-restore`,
+/// `/auth/pow-challenge`, the two nostr register calls, `/auth/me`), so a
+/// 20-token bucket holds exactly four onboardings. Four people unlocking behind
+/// one NAT, an office, a household, a VPN exit, exhaust it, and the fifth is
+/// throttled with nothing on screen explaining why. Measured 2026-08-24.
+///
+/// Sustained rate is the abuse control and is unchanged by raising the burst:
+/// a flood still converges on `period_ms`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RateLimitConfig {
+    /// Milliseconds per replenished token on the unauthenticated auth/website
+    /// surface. 500 = ~2 req/s sustained.
+    pub strict_period_ms: u64,
+    /// Bucket size for that surface. Sized in WALLET SESSIONS: divide by five.
+    pub strict_burst: u32,
+    /// Milliseconds per replenished token on the authenticated API.
+    pub normal_period_ms: u64,
+    /// Bucket size for the authenticated API.
+    pub normal_burst: u32,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            strict_period_ms: 500,
+            strict_burst: 20,
+            normal_period_ms: 100,
+            normal_burst: 60,
+        }
+    }
 }
 
 /// Assets the price feed can quote. Source of truth for which `PRICES_ASSETS`
@@ -769,6 +810,12 @@ impl Config {
                 ip_salt: env_or("IP_SALT", ""),
             },
             trusted_proxies: parse_networks("TRUSTED_PROXIES")?,
+            rate_limit: RateLimitConfig {
+                strict_period_ms: env_parse("RATE_LIMIT_STRICT_PERIOD_MS", 500u64)?,
+                strict_burst: env_parse("RATE_LIMIT_STRICT_BURST", 20u32)?,
+                normal_period_ms: env_parse("RATE_LIMIT_NORMAL_PERIOD_MS", 100u64)?,
+                normal_burst: env_parse("RATE_LIMIT_NORMAL_BURST", 60u32)?,
+            },
             cors_allowed_origins: env_list("CORS_ALLOWED_ORIGINS"),
 
             features: FeatureFlags {
@@ -977,6 +1024,19 @@ impl Config {
     /// Fail-closed validation. Returns `Err` (aborting startup) on any weak,
     /// missing, or inconsistent security-relevant setting.
     pub fn validate(&self) -> Result<(), AppError> {
+        // A zero period or bucket does not mean "unlimited": the limiter can
+        // never hand out a token and every request is refused. Fail at startup
+        // rather than serve a backend that 429s everything. Checked first,
+        // unconditionally, because it applies to every deployment shape.
+        if self.rate_limit.strict_period_ms == 0 || self.rate_limit.normal_period_ms == 0 {
+            return Err(cfg_err(
+                "RATE_LIMIT_*_PERIOD_MS must be >= 1 (milliseconds per replenished token)",
+            ));
+        }
+        if self.rate_limit.strict_burst == 0 || self.rate_limit.normal_burst == 0 {
+            return Err(cfg_err("RATE_LIMIT_*_BURST must be >= 1"));
+        }
+
         let prod = self.is_production();
 
         // A secret that must be present, long enough, and (in prod) not a placeholder.
@@ -1296,6 +1356,7 @@ impl Config {
             if r.inbound_pow_bits > 40 {
                 return Err(cfg_err("RELAY_INBOUND_POW_BITS must be <= 40 (0 disables)"));
             }
+
             // A non-`open` policy is enforced by the gRPC admission service, which
             // needs a bind address the relay can reach.
             if r.write_policy != "open" && r.admission_bind.trim().is_empty() {
@@ -1456,6 +1517,7 @@ mod tests {
                 ip_salt: "s".repeat(16),
             },
             trusted_proxies: vec![],
+            rate_limit: RateLimitConfig::default(),
             cors_allowed_origins: vec![],
             features: FeatureFlags {
                 chains: ChainFlags {
@@ -2222,6 +2284,52 @@ mod tests {
         c.messaging.relay = valid_relay();
         c.messaging.relay.write_policy = "whitelist-only".into();
         assert!(c.validate().is_err());
+    }
+
+    /// The defaults must reproduce what these were compiled with, or enabling
+    /// configurability silently retunes every existing deployment.
+    #[test]
+    fn rate_limit_defaults_match_the_previous_constants() {
+        let d = RateLimitConfig::default();
+        assert_eq!(d.strict_period_ms, 500, "~2 req/s sustained");
+        assert_eq!(d.strict_burst, 20);
+        assert_eq!(d.normal_period_ms, 100, "~10 req/s sustained");
+        assert_eq!(d.normal_burst, 60);
+    }
+
+    /// The strict bucket is spent in units of WALLET SESSIONS, five tokens each
+    /// (check-restore, pow-challenge, two nostr register calls, /auth/me).
+    /// Recording that here because the number is the whole reason this became
+    /// configurable: the default holds four onboardings, so four people behind
+    /// one NAT exhaust it.
+    #[test]
+    fn strict_burst_is_measured_in_wallet_sessions() {
+        const TOKENS_PER_SESSION: u32 = 5;
+        let d = RateLimitConfig::default();
+        assert_eq!(d.strict_burst / TOKENS_PER_SESSION, 4);
+        // A raised burst buys proportionally more concurrent onboardings while
+        // leaving the sustained rate, which is the actual abuse control, alone.
+        let raised = RateLimitConfig {
+            strict_burst: 60,
+            ..RateLimitConfig::default()
+        };
+        assert_eq!(raised.strict_burst / TOKENS_PER_SESSION, 12);
+        assert_eq!(raised.strict_period_ms, d.strict_period_ms);
+    }
+
+    #[test]
+    fn rate_limit_rejects_zero_period_or_burst() {
+        // Zero is not "unlimited": no token is ever issued and every request 429s.
+        for mutate in [
+            (|c: &mut Config| c.rate_limit.strict_period_ms = 0) as fn(&mut Config),
+            |c: &mut Config| c.rate_limit.normal_period_ms = 0,
+            |c: &mut Config| c.rate_limit.strict_burst = 0,
+            |c: &mut Config| c.rate_limit.normal_burst = 0,
+        ] {
+            let mut c = valid();
+            mutate(&mut c);
+            assert!(c.validate().is_err(), "zero must be refused at startup");
+        }
     }
 
     #[test]
