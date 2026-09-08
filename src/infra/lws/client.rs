@@ -226,22 +226,27 @@ impl LwsClient {
         view_key: &str,
         provision_minors: u32,
     ) -> Result<(), AppError> {
-        if provision_minors == 0 {
-            // Provisioning off (the dark default): exactly the call this made
-            // before, including monero-lws answering a duplicate `add_account`
-            // with `account_exists` (an HTTP 500 it maps to a node error).
-            return self.admin_add_account(address, view_key).await;
-        }
-        // Provisioning on: an account that ALREADY exists must still be brought
-        // up to the required ceiling. monero-lws fails a duplicate `add_account`
-        // (`db::storage::do_add_account` returns `lws::error::account_exists`,
-        // served as a 500), so calling it unconditionally would abort before the
-        // provisioning below and make the account permanently unprovisionable
-        // through this path. Existence is checked first instead; nothing about
-        // the account's scan state is touched.
+        // Registration is idempotent. An account that is already scanning is
+        // success, not a failure.
+        //
+        // This used to call `add_account` unconditionally when provisioning was
+        // off, so re-registering an existing account got `account_exists` back as
+        // an HTTP 500, which maps to a node error and reaches the user as
+        // NODE_UNAVAILABLE. A routine re-registration was indistinguishable from
+        // the node being down: reported 2026-09-08 by a user whose tip failed
+        // with an upstream error while both LWS instances were healthy and had
+        // logged nothing at all.
+        //
+        // The existence check now guards both paths rather than only the
+        // provisioning one, so the two cannot drift apart again.
         if self.account_scan_height(address).await?.is_none() {
             self.admin_add_account(address, view_key).await?;
         }
+        if provision_minors == 0 {
+            return Ok(());
+        }
+        // Provisioning on: an account that already exists must still be brought up
+        // to the required ceiling, so this runs whether or not the add just ran.
         self.provision_account0_covering(address, view_key, provision_minors)
             .await?;
         Ok(())
