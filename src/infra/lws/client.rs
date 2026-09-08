@@ -757,12 +757,29 @@ impl LwsClient {
     }
 }
 
-/// Sum the mempool (unconfirmed) net-received amounts, saturating at each step
-/// so a hostile per-tx value cannot overflow-panic the total.
+/// Sum what the mempool is about to pay us: the received amounts of unconfirmed
+/// transactions, saturating at each step so a hostile per-tx value cannot
+/// overflow-panic the total.
+///
+/// Received only, NOT `received - sent`. Subtracting the sent side looks like it
+/// yields a net figure, but the outputs a transaction spends are already removed
+/// from the confirmed balance: `get_balance` hands every mempool row's
+/// `spent_outputs` to the wallet, which subtracts them after verifying each key
+/// image. Subtracting them here as well counted the spend twice.
+///
+/// The visible symptom was worse than a rounding error. On a send with change,
+/// `sent` exceeds `received` (the whole input is consumed, part comes back), so
+/// `received - sent` underflows and saturates to zero and the change output
+/// disappears from the balance entirely. Reported 2026-09-08: sending 0.3 from a
+/// 7 XMR output showed 6.7 XMR of change nowhere at all until it confirmed, which
+/// reads to the person holding the wallet as money that has gone missing.
+///
+/// Pure receives were unaffected, because their `sent` is zero, which is why the
+/// mempool work looked complete when it was tested against incoming payments.
 pub(crate) fn sum_mempool_received(txs: &[AddressTx]) -> u64 {
     txs.iter()
         .filter(|t| t.mempool)
-        .map(|t| t.total_received.saturating_sub(t.total_sent))
+        .map(|t| t.total_received)
         .fold(0u64, |acc, v| acc.saturating_add(v))
 }
 
@@ -854,15 +871,42 @@ mod tests {
     #[test]
     fn mempool_sum_counts_only_mempool_and_saturates() {
         let txs = vec![
-            tx(true, 1000, 200),   // net 800 (mempool)
+            tx(true, 1000, 200),   // mempool: contributes what it pays us
             tx(false, 9999, 0),    // confirmed — excluded
-            tx(true, 50, 100),     // net 0 via saturating_sub (sent > received)
             tx(true, u64::MAX, 0), // huge — total saturates, never panics
         ];
         assert_eq!(sum_mempool_received(&txs), u64::MAX);
 
         let modest = vec![tx(true, 1000, 200), tx(true, 500, 0), tx(false, 1, 0)];
-        assert_eq!(sum_mempool_received(&modest), 1300);
+        assert_eq!(sum_mempool_received(&modest), 1500);
+    }
+
+    #[test]
+    fn change_from_a_send_still_counts_as_pending() {
+        // The regression: a send consumes a whole output and returns the
+        // remainder as change, so `sent` exceeds `received`. Netting the two
+        // saturated to zero and the change vanished from the balance until it
+        // confirmed. What the holder is owed is the change, and it is pending.
+        let spend_with_change = vec![tx(true, 6_699_968_040_000, 7_000_000_000_000)];
+        assert_eq!(
+            sum_mempool_received(&spend_with_change),
+            6_699_968_040_000,
+            "change on an unconfirmed send must be reported as pending"
+        );
+    }
+
+    #[test]
+    fn a_spend_never_reduces_reported_pending() {
+        // Property, not a fixture: adding an outgoing mempool transaction can
+        // only ever add to what is pending, never subtract from it. The spent
+        // inputs are already removed from the confirmed balance via
+        // `spent_outputs`, so subtracting them here too would double-count.
+        let incoming_only = vec![tx(true, 500, 0)];
+        let plus_a_spend = vec![tx(true, 500, 0), tx(true, 100, 900)];
+        assert!(
+            sum_mempool_received(&plus_a_spend) >= sum_mempool_received(&incoming_only),
+            "a spend must not shrink the pending total"
+        );
     }
 
     #[tokio::test]
