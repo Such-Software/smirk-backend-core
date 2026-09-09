@@ -62,14 +62,33 @@ use crate::AppState;
 
 // ── shared constants ────────────────────────────────────────────────────────
 
-/// Replay window for a NIP-98 LOGIN token (seconds). A captured login token is a
-/// bearer credential within this window, so keep it tight — matched to the
-/// state-change grade below. Still ample for real client clock skew.
-const NIP98_LOGIN_MAX_AGE_SECS: i64 = 30;
+/// Replay window for a NIP-98 LOGIN token (seconds), applied symmetrically to a
+/// clock that is slow OR fast. A captured login token is a bearer credential
+/// within this window and login binds no server nonce, so this window IS the
+/// replay bound here; 120s keeps that bound short while absorbing the drift a
+/// user cannot see (see the incident note on the action window below).
+const NIP98_LOGIN_MAX_AGE_SECS: i64 = 120;
 
 /// Replay window for a NIP-98 STATE-CHANGE (signed action) token (seconds).
-/// Deliberately tighter than login.
-const NIP98_ACTION_MAX_AGE_SECS: i64 = 30;
+///
+/// 2026-09-09: a user creating a wallet on a machine whose clock was off by more
+/// than 30s failed EVERY registration, identically on the desktop app and the
+/// extension (both sign with the one machine clock), and the rejection surfaced
+/// as a cryptographic-sounding error that pointed nowhere. Replay protection on
+/// this grade comes from the server-issued single-use nonce that
+/// `verify_signed_action` binds and the handler atomically consumes, not from
+/// the tightness of this window, so widening it to cover ordinary consumer drift
+/// (sleep/resume, no working NTP) costs essentially nothing.
+const NIP98_ACTION_MAX_AGE_SECS: i64 = 120;
+
+/// One opaque rejection message for every NIP-98 failure on every grade. It is
+/// deliberately identical across login/link/register and across failure modes,
+/// so a rejection is never an oracle (it says nothing about whether an account
+/// exists, or which check failed). It names the device clock because that is the
+/// only cause a user can act on: in the 2026-09-09 incident "Invalid Nostr
+/// proof" sent people hunting a corrupt wallet instead of a wrong time.
+const NIP98_REJECTED_MSG: &str =
+    "Nostr proof rejected. Check that your device date and time are correct, then try again.";
 
 /// TTL for a Nostr-link nonce (seconds): long enough for the wallet to sign and
 /// POST, short enough to bound an unused nonce's lifetime.
@@ -1442,7 +1461,7 @@ pub async fn nostr_login(
         Utc::now().timestamp(),
         NIP98_LOGIN_MAX_AGE_SECS,
     )
-    .map_err(|_| AppError::AuthError("Invalid Nostr auth".into()))?;
+    .map_err(|_| AppError::AuthError(NIP98_REJECTED_MSG.into()))?;
 
     // Resolve to an existing user only. Never create.
     let user = state
@@ -1620,7 +1639,7 @@ pub async fn nostr_link(
         Utc::now().timestamp(),
         NIP98_ACTION_MAX_AGE_SECS,
     )
-    .map_err(|_| AppError::AuthError("Invalid Nostr proof".into()))?;
+    .map_err(|_| AppError::AuthError(NIP98_REJECTED_MSG.into()))?;
 
     // 4. Persist. UNIQUE collision -> 409 CONFLICT (handled in set_nostr_pubkey).
     state.db.set_nostr_pubkey(user_id, &pubkey).await?;
@@ -1751,7 +1770,7 @@ pub async fn nostr_register(
         Utc::now().timestamp(),
         NIP98_ACTION_MAX_AGE_SECS,
     )
-    .map_err(|_| AppError::AuthError("Invalid Nostr proof".into()))?;
+    .map_err(|_| AppError::AuthError(NIP98_REJECTED_MSG.into()))?;
 
     // 3. Returning npub bypasses the abuse gates, exactly like a returning
     //    pubkey_hash on the BTC path.
@@ -2017,5 +2036,134 @@ mod tests {
         let req: ExtensionRegisterRequest =
             serde_json::from_str(with_rot).expect("rotation envelope deserializes");
         assert_eq!(req.rotation_signature.as_deref(), Some("oldsig"));
+    }
+
+    // ── NIP-98 clock skew (2026-09-09 regression) ──────────────────────────
+    // A client signs its NIP-98 event with the LOCAL machine clock, so a device
+    // whose clock has drifted fails verification deterministically, on every
+    // client at once. These assert the PROPERTY, never the constant: drift a
+    // user would not notice must verify in BOTH directions (slow clock and fast
+    // clock), and a wildly wrong clock must still be rejected.
+    mod clock_skew {
+        use super::super::{NIP98_ACTION_MAX_AGE_SECS, NIP98_LOGIN_MAX_AGE_SECS};
+        use crate::core::crypto::nip98::{
+            descriptor_sha256, request_descriptor, verify_nip98, verify_signed_action,
+        };
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
+        use k256::schnorr::SigningKey;
+        use sha2::{Digest, Sha256};
+
+        /// Drift an ordinary consumer machine reaches without its owner noticing
+        /// (sleep/resume, no working NTP). Chosen independently of the windows
+        /// under test so tightening one back down fails here.
+        const ORDINARY_DRIFT_SECS: i64 = 60;
+        /// Skew no honest client produces.
+        const ABSURD_SKEW_SECS: i64 = 6 * 60 * 60;
+
+        const KIND: u32 = 27235;
+        const URL: &str = "https://api.test/api/v1/auth/nostr/register";
+        const NOW: i64 = 1_800_000_000;
+
+        /// Sign a kind-27235 event at `created_at` with a fixed test key.
+        fn sign(tags: Vec<Vec<String>>, created_at: i64) -> String {
+            let sk = SigningKey::from_bytes(&[9u8; 32]).expect("valid scalar");
+            let pk = hex::encode(sk.verifying_key().to_bytes());
+            let serial =
+                serde_json::to_string(&serde_json::json!([0, pk, created_at, KIND, tags, ""]))
+                    .expect("serialize");
+            let id = hex::encode(Sha256::digest(serial.as_bytes()));
+            let sig = sk
+                .sign_raw(&hex::decode(&id).expect("hex id"), &[0u8; 32])
+                .expect("sign");
+            let ev = serde_json::json!({
+                "id": id, "pubkey": pk, "created_at": created_at, "kind": KIND,
+                "tags": tags, "content": "", "sig": hex::encode(sig.to_bytes())
+            });
+            format!(
+                "Nostr {}",
+                STANDARD.encode(serde_json::to_vec(&ev).expect("encode"))
+            )
+        }
+
+        #[test]
+        fn register_proof_survives_ordinary_drift_both_ways() {
+            let payload = descriptor_sha256(&request_descriptor(
+                "POST",
+                "/api/v1/auth/nostr/register",
+                "",
+                b"",
+            ));
+            let tags = |p: &str| -> Vec<Vec<String>> {
+                vec![
+                    vec!["u".to_string(), URL.to_string()],
+                    vec!["method".to_string(), "POST".to_string()],
+                    vec!["purpose".to_string(), "nostr_register".to_string()],
+                    vec!["challenge".to_string(), "nonce-1".to_string()],
+                    vec!["payload".to_string(), p.to_string()],
+                ]
+            };
+            let verify = |signed_at: i64| {
+                verify_signed_action(
+                    &sign(tags(&payload), signed_at),
+                    URL,
+                    "POST",
+                    "nostr_register",
+                    "nonce-1",
+                    &payload,
+                    None,
+                    None,
+                    NOW,
+                    NIP98_ACTION_MAX_AGE_SECS,
+                )
+            };
+            for signed_at in [NOW - ORDINARY_DRIFT_SECS, NOW, NOW + ORDINARY_DRIFT_SECS] {
+                assert!(
+                    verify(signed_at).is_ok(),
+                    "a proof signed {}s from server time must still register",
+                    signed_at - NOW
+                );
+            }
+            for signed_at in [NOW - ABSURD_SKEW_SECS, NOW + ABSURD_SKEW_SECS] {
+                assert!(
+                    verify(signed_at).is_err(),
+                    "a proof signed {}s from server time must be rejected",
+                    signed_at - NOW
+                );
+            }
+        }
+
+        #[test]
+        fn login_proof_survives_ordinary_drift_both_ways() {
+            let tags = || -> Vec<Vec<String>> {
+                vec![
+                    vec!["u".to_string(), URL.to_string()],
+                    vec!["method".to_string(), "POST".to_string()],
+                ]
+            };
+            let verify = |signed_at: i64| {
+                verify_nip98(
+                    &sign(tags(), signed_at),
+                    URL,
+                    "POST",
+                    NOW,
+                    NIP98_LOGIN_MAX_AGE_SECS,
+                )
+            };
+            for signed_at in [NOW - ORDINARY_DRIFT_SECS, NOW, NOW + ORDINARY_DRIFT_SECS] {
+                assert!(
+                    verify(signed_at).is_ok(),
+                    "a login token signed {}s from server time must still sign in",
+                    signed_at - NOW
+                );
+            }
+            for signed_at in [NOW - ABSURD_SKEW_SECS, NOW + ABSURD_SKEW_SECS] {
+                assert!(
+                    verify(signed_at).is_err(),
+                    "a login token signed {}s from server time must be rejected",
+                    signed_at - NOW
+                );
+            }
+        }
     }
 }

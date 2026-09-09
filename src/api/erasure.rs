@@ -32,7 +32,11 @@ use crate::models::db::{NewAdminAudit, User};
 use crate::AppState;
 
 const CHALLENGE_TTL_SECS: i64 = 300;
-const ACTION_MAX_AGE_SECS: i64 = 30;
+const // Matches auth's window. Left at 30 it produced the exact failure this work
+// set out to remove: after the auth fix, a device 60s off could register and
+// log in but silently could not delete or export its own data, which is
+// harder to diagnose than a uniform failure.
+ACTION_MAX_AGE_SECS: i64 = 120;
 const PURPOSE_REQUEST: &str = "erasure_request";
 const PURPOSE_CONFIRM: &str = "erasure_confirm";
 const PURPOSE_CANCEL: &str = "erasure_cancel";

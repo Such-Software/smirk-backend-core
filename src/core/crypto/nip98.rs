@@ -182,9 +182,13 @@ pub fn descriptor_sha256(descriptor: &str) -> String {
 /// an optional explicit target id and instance id — each as a tag that must
 /// appear exactly once, compared constant-time. Returns the verified pubkey.
 ///
-/// Pass a tight `max_age_secs` (e.g. 30). The caller MUST also atomically
-/// consume `expected_nonce` from the challenge store; this proves only that the
-/// signed event commits to it.
+/// `max_age_secs` is a symmetric window (a fast client clock is bounded exactly
+/// like a slow one), so it must cover ordinary consumer clock drift: the client
+/// stamps `created_at` from its own machine clock, and too tight a window
+/// rejects every honest request from a skewed device (2026-09-09 incident).
+/// Replay is prevented by the nonce, which the caller MUST also atomically
+/// consume from the challenge store; this proves only that the signed event
+/// commits to it.
 #[allow(clippy::too_many_arguments)]
 pub fn verify_signed_action(
     header: &str,
