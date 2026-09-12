@@ -319,7 +319,12 @@ pub async fn height(
     headers: HeaderMap,
 ) -> Result<Json<GrinHeightResponse>, AppError> {
     extract_user_id_from_token(&state, &headers).await?;
-    let height = grin_client(&state)?.get_height().await?;
+    // Through grin_tip, which prefers grin-lws and falls back to grin-wallet.
+    // This called grin_client directly, so it was the one Grin endpoint that
+    // could not be served by grin-lws alone. With GRIN_OWNER_API_URL empty, as it
+    // is in production, it failed while scan and broadcast worked, which reads as
+    // Grin being half-broken rather than one path being unwired.
+    let height = grin_tip(&state).await?;
     Ok(Json(GrinHeightResponse { height }))
 }
 
