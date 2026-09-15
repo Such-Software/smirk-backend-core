@@ -6,6 +6,7 @@ pub mod db;
 pub mod electrum;
 pub mod grin;
 pub mod grin_lws;
+pub mod legacy_directory;
 pub mod lws;
 pub mod payment;
 pub mod prices;

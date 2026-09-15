@@ -107,10 +107,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .admin
         .enabled
         .then(|| AdminSessionManager::new(&config.admin.jwt_secret));
+    // Off unless configured. Connecting here (not lazily per request) means an
+    // operator sees "enabled" or "staying disabled" once, at boot, in the log.
+    let legacy = smirk_backend_core::infra::legacy_directory::LegacyDirectory::connect(
+        config_base.legacy_database_url.as_deref(),
+    )
+    .await;
+
     let state = Arc::new(AppState {
         config: Arc::new(arc_swap::ArcSwap::from_pointee(config)),
         config_base: Arc::new(config_base),
         db,
+        legacy,
         sessions,
         chains,
         payment,

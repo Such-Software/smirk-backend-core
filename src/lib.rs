@@ -64,6 +64,9 @@ pub struct AppState {
     /// config on a settings change and to report a field's source (default/env/db).
     pub config_base: Arc<Config>,
     pub db: Database,
+    /// Read-only lookup into the legacy database, for sign-in migration.
+    /// Disabled unless `LEGACY_DATABASE_URL` is configured.
+    pub legacy: crate::infra::legacy_directory::LegacyDirectory,
     pub sessions: SessionManager,
     /// Per-chain data-source clients (present only for enabled chains).
     pub chains: ChainClients,

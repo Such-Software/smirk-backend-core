@@ -147,6 +147,12 @@ pub struct Config {
 
     pub database_url: String,
 
+    /// Legacy (v0.2.x) database, read-only, for sign-in migration. `None` (the
+    /// default) leaves the capability OFF: nothing connects and every legacy
+    /// lookup answers "not found". Set it only for as long as the tail of legacy
+    /// users is still migrating, then remove it again.
+    pub legacy_database_url: Option<String>,
+
     /// Base URL for public-tip share links: a tip's share URL is
     /// `{tip_share_base}/{tip_id}`. Required when `FEATURE_TIPS` is on (checked
     /// in `validate`); never hardcode a host (federation).
@@ -797,6 +803,9 @@ impl Config {
 
             database_url: env_opt("DATABASE_URL")
                 .ok_or_else(|| cfg_err("DATABASE_URL is required"))?,
+            // Absent means off. No default, and no inference from DATABASE_URL:
+            // a second database is a capability an operator opts into.
+            legacy_database_url: env_opt("LEGACY_DATABASE_URL"),
 
             tip_share_base: env_opt("TIP_SHARE_BASE_URL"),
 
@@ -1507,6 +1516,7 @@ mod tests {
             deployment_mode: DeploymentMode::Single,
             environment: "development".into(),
             database_url: "postgres://localhost/smirk".into(),
+            legacy_database_url: None,
             tip_share_base: None,
             auth: AuthConfig {
                 jwt_secret: "a".repeat(32),
