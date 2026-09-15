@@ -305,10 +305,22 @@ pub async fn lookup_username(
     };
 
     let keys = state.db.get_user_keys(user.id).await?;
+    // Pick by key_type, not "first row of this asset". Grin has two rows, so an
+    // unqualified `find` returns whichever the query happened to yield.
     let key_for = |asset: AssetType| {
-        keys.iter()
-            .find(|k| k.asset == asset)
-            .map(|k| k.public_key.clone())
+        let pick = |key_type: &str| {
+            keys.iter()
+                .find(|k| k.asset == asset && k.key_type == key_type)
+                .map(|k| k.public_key.clone())
+        };
+        match asset {
+            // Senders need the payable slatepack address. The `primary` row holds
+            // the key that signs, which is a different derivation and not payable,
+            // so fall back to it only when it still carries a pre-split address.
+            AssetType::Grin => pick(KEY_TYPE_SLATEPACK)
+                .or_else(|| pick(KEY_TYPE_PRIMARY).filter(|v| is_grin_slatepack_address(v))),
+            _ => pick(KEY_TYPE_PRIMARY),
+        }
     };
     let public_keys = PublicKeysInfo {
         btc: key_for(AssetType::Btc),
@@ -324,6 +336,42 @@ pub async fn lookup_username(
         username: user.username,
         public_keys: Some(public_keys),
     }))
+}
+
+// ── key_type selection ─────────────────────────────────────────
+
+/// The key a signature is verified against, and the default for every asset.
+pub const KEY_TYPE_PRIMARY: &str = "primary";
+
+/// A Grin wallet's canonical slatepack address: a payable address, NOT the key
+/// that signs. Kept in its own row so it cannot displace [`KEY_TYPE_PRIMARY`].
+pub const KEY_TYPE_SLATEPACK: &str = "slatepack";
+
+/// Is this a bech32 Grin slatepack address rather than a raw public key?
+///
+/// The two Grin values a wallet registers are distinguishable by construction: a
+/// slatepack address is bech32 under the `grin`/`tgrin` HRP, and a hex public key
+/// cannot begin with those characters because `g`, `r`, `i` and `n` are not hex
+/// digits. So this is a total discriminator, not a heuristic that a well-formed
+/// public key could trip.
+fn is_grin_slatepack_address(value: &str) -> bool {
+    let v = value.trim();
+    v.starts_with("grin1") || v.starts_with("tgrin1")
+}
+
+/// Which row a registered key belongs in.
+///
+/// A Grin wallet publishes two different keys derived two different ways: the
+/// Smirk-derived public key that website sign-in verifies, and the canonical
+/// grin-wallet slatepack address that senders pay. Routing them by value keeps
+/// the second from overwriting the first on `(user_id, asset, key_type)`, and it
+/// does so for wallets that are ALREADY SHIPPED, which cannot be taught to send a
+/// `key_type` of their own.
+fn key_type_for(asset: AssetType, public_key: &str) -> &'static str {
+    match asset {
+        AssetType::Grin if is_grin_slatepack_address(public_key) => KEY_TYPE_SLATEPACK,
+        _ => KEY_TYPE_PRIMARY,
+    }
 }
 
 // ── POST /keys ────────────────────────────────────────────────────────────────
@@ -352,6 +400,7 @@ pub async fn register_key(
 ) -> Result<Json<UserKeyInfo>, AppError> {
     let user_id = extract_user_id_from_token(&state, &headers).await?;
     let asset = parse_asset(&req.asset)?;
+    let key_type = key_type_for(asset, &req.public_key);
 
     let key = state
         .db
@@ -360,11 +409,11 @@ pub async fn register_key(
             asset,
             public_key: req.public_key.clone(),
             public_spend_key: req.public_spend_key.clone(),
-            key_type: "primary".to_string(),
+            key_type: key_type.to_string(),
         })
         .await?;
 
-    info!(user_id = %user_id, asset = %asset, "registered public key");
+    info!(user_id = %user_id, asset = %asset, key_type, "registered public key");
     Ok(Json(key_info(key)))
 }
 
@@ -467,6 +516,60 @@ mod tests {
         }
         // A non-reserved, well-formed name passes.
         assert!(validate_username("alice123").is_ok());
+    }
+
+    /// The two Grin values a wallet registers must land in different rows, or
+    /// the second overwrites the first and Grin sign-in stops resolving.
+    #[test]
+    fn grin_signing_key_and_slatepack_address_get_separate_rows() {
+        // A 64-hex public key is the thing a signature is checked against.
+        let hex_key = "b".repeat(64);
+        assert_eq!(key_type_for(AssetType::Grin, &hex_key), KEY_TYPE_PRIMARY);
+
+        // A bech32 slatepack address is payable, not signable, so it is kept apart.
+        let addr = "grin1qqv9hlxpazdvs0zt6f2qm2r9j8sjkz5t2e2y8y4dm2xu9zr9s6zjqk5ldrz";
+        assert_eq!(key_type_for(AssetType::Grin, addr), KEY_TYPE_SLATEPACK);
+        assert_ne!(
+            key_type_for(AssetType::Grin, addr),
+            key_type_for(AssetType::Grin, &hex_key)
+        );
+    }
+
+    /// The split is Grin-only: no other asset grows a second row, whatever it
+    /// registers.
+    #[test]
+    fn other_assets_are_unaffected_by_the_grin_split() {
+        for asset in [
+            AssetType::Btc,
+            AssetType::Ltc,
+            AssetType::Xmr,
+            AssetType::Wow,
+        ] {
+            assert_eq!(key_type_for(asset, &"a".repeat(64)), KEY_TYPE_PRIMARY);
+            // Even a value shaped like a slatepack address stays primary.
+            assert_eq!(
+                key_type_for(asset, "grin1qqv9hlxpazdvs0zt"),
+                KEY_TYPE_PRIMARY
+            );
+        }
+    }
+
+    /// The discriminator has to be total, not a guess: a hex public key cannot
+    /// begin with the Grin HRP, because those letters are not hex digits.
+    #[test]
+    fn slatepack_discriminator_separates_addresses_from_public_keys() {
+        assert!(is_grin_slatepack_address("grin1qqv9hlxpazdvs0zt"));
+        assert!(is_grin_slatepack_address("tgrin1qqv9hlxpazdvs0zt"));
+        assert!(is_grin_slatepack_address("  grin1qqv9hlxpazdvs0zt  "));
+
+        for c in "0123456789abcdefABCDEF".chars() {
+            let key: String = std::iter::repeat(c).take(64).collect();
+            assert!(
+                !is_grin_slatepack_address(&key),
+                "hex public key of {c:?} must not read as an address"
+            );
+        }
+        assert!(!is_grin_slatepack_address(""));
     }
 
     #[test]
