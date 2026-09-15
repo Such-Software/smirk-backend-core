@@ -33,15 +33,26 @@
 //!   messages. "User not found" and "signature invalid" deliberately do not
 //!   leak which one occurred beyond their distinct, fixed literals.
 //! * **No user creation.** Website sign-in resolves an ALREADY-registered
-//!   wallet (by the proven identity key's `pubkey_hash`); an unknown key is a
-//!   401 directing the user to register with the extension first. It never
-//!   mints an identity from a bare signature.
+//!   wallet from the proven key; an unknown key is a 401 with a fixed literal.
+//!   It never mints an identity from a bare signature, and it never names a
+//!   client the user is supposedly missing: the wallet that can sign here is by
+//!   definition the right client.
 //!
-//! Identity in this backend is the wallet's BTC key (`pubkey_hash`); the signed
-//! asset's public key is hashed and resolved via
-//! [`Database::get_user_by_pubkey_hash`]. The verifier still branches by asset
-//! so the cross-asset signing contract holds, but only a key that hashes to a
-//! stored identity resolves a user.
+//! ## Resolving the signer
+//!
+//! The proven key is looked up as itself, against the `primary` `user_keys` row
+//! for the asset that signed ([`Database::get_user_by_asset_pubkey`]): the very
+//! value `/auth/extension` stored at registration.
+//!
+//! This used to resolve only through `users.pubkey_hash`, which holds the BTC
+//! key's hash and nothing else, so LTC/XMR/WOW/Grin sign-in could not succeed
+//! for anyone: the lookup had no row that a non-BTC key could ever match, and an
+//! unregistered key is indistinguishable from an unknown user, so the failure
+//! surfaced as "register first" to users who were already registered.
+//!
+//! `pubkey_hash` remains the BTC-only fallback. Identities imported by
+//! `migrate-legacy` carry `pubkey_hash` but no `user_keys` rows until their
+//! owner unlocks a v0.3 wallet, and they must keep signing in meanwhile.
 //!
 //! Routes are registered RELATIVE to `/api/v1` (e.g. `/auth/website/challenge`);
 //! see [`routes`]. The app nests this router under `/api/v1`.
@@ -270,22 +281,41 @@ pub async fn website_verify(
     )?;
 
     // The signature is valid: the caller controls this key. Resolve the
-    // ALREADY-registered wallet by the proven key's pubkey hash. We never create
-    // a user here — website sign-in is for wallets already registered via the
-    // extension. An unknown key is a 401 with a literal, registration-pointing
-    // message (the same outcome as a non-matching signature: no enumeration).
-    let pubkey_hash = hash_public_key(&req.signature.public_key);
-    let user = state
+    // ALREADY-registered wallet from THAT key. We never create a user here.
+    //
+    // Resolve by the proven asset's own registered key first. Resolving only by
+    // `users.pubkey_hash` used to be the whole lookup, and `pubkey_hash` only
+    // ever holds the BTC key's hash (see `auth::extension_register`), so a
+    // signature from any other coin could not match anything no matter how
+    // correct it was. Users reported "User not found" while their wallet,
+    // handle and desktop session all worked; picking a different coin on the
+    // sign-in page was the only thing that changed the outcome.
+    //
+    // The `pubkey_hash` lookup stays as the BTC fallback: rows imported by
+    // `migrate-legacy` carry an identity but no `user_keys` (keys are
+    // re-registered on the first v0.3 unlock), and dropping the fallback would
+    // lock every one of them out.
+    let resolved = match state
         .db
-        .get_user_by_pubkey_hash(&pubkey_hash)
+        .get_user_by_asset_pubkey(asset, &req.signature.public_key)
         .await?
-        .ok_or_else(|| {
-            info!("website_verify: no user for proven key");
-            AppError::AuthError(
-                "No wallet is registered for this key. Register with the Smirk extension first."
-                    .into(),
-            )
-        })?;
+    {
+        Some(user) => Some(user),
+        None if asset == AssetType::Btc => {
+            let pubkey_hash = hash_public_key(&req.signature.public_key);
+            state.db.get_user_by_pubkey_hash(&pubkey_hash).await?
+        }
+        None => None,
+    };
+    let user = resolved.ok_or_else(|| {
+        info!(asset = %asset, "website_verify: no user for proven key");
+        AppError::AuthError(
+            "We could not match this coin's key to a Smirk account on this server. \
+             Unlock your Smirk wallet once so it publishes its keys here, then try \
+             again with this or another coin."
+                .into(),
+        )
+    })?;
 
     // Mint a Web session: token pair + revocable DB session row (peppered
     // refresh hash). Mirrors `issue_session` in the auth module so the session

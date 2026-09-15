@@ -41,6 +41,7 @@ pub struct LandingOverlay {
     pub expose_uptime: Option<bool>,
     pub stats_enabled: Option<bool>,
     pub stats_cache_hours: Option<u64>,
+    pub stats_min_users: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -228,6 +229,9 @@ impl Config {
             }
             if let Some(v) = l.stats_cache_hours {
                 c.landing.stats_cache_hours = v;
+            }
+            if let Some(v) = l.stats_min_users {
+                c.landing.stats_min_users = v;
             }
         }
 
@@ -429,6 +433,7 @@ pub const EDITABLE_FIELDS: &[(&str, &str)] = &[
     ("landing", "expose_uptime"),
     ("landing", "stats_enabled"),
     ("landing", "stats_cache_hours"),
+    ("landing", "stats_min_users"),
     ("retention", "login_events_days"),
     ("retention", "audit_days"),
     ("retention", "erasure_enabled"),
@@ -490,6 +495,7 @@ impl Config {
                 expose_uptime: Some(self.landing.expose_uptime),
                 stats_enabled: Some(self.landing.stats_enabled),
                 stats_cache_hours: Some(self.landing.stats_cache_hours),
+                stats_min_users: Some(self.landing.stats_min_users),
             }),
             retention: Some(RetentionOverlay {
                 login_events_days: Some(self.retention.login_events_days),

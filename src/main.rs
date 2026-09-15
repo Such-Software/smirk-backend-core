@@ -117,6 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         relay,
         web_challenges: Arc::default(),
         prices: prices_cache,
+        stats_cache: Arc::default(),
         admin_sessions,
         shutdown: Arc::new(tokio::sync::Notify::new()),
     });

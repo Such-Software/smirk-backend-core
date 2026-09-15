@@ -430,6 +430,10 @@ pub struct LandingConfig {
     pub expose_uptime: bool,
     pub stats_enabled: bool,
     pub stats_cache_hours: u64,
+    /// k-anonymity floor for the public stats block. Under this many handles the
+    /// block says only "some exist": on a young instance an exact-ish count plus
+    /// a timestamp correlates trivially with the registrations that produced it.
+    pub stats_min_users: i64,
 }
 
 #[derive(Clone)]
@@ -930,6 +934,7 @@ impl Config {
                 expose_uptime: env_bool("PUBLIC_EXPOSE_UPTIME", false),
                 stats_enabled: env_bool("PUBLIC_STATS_ENABLED", false),
                 stats_cache_hours: env_parse("PUBLIC_STATS_CACHE_HOURS", 24u64)?,
+                stats_min_users: env_parse("PUBLIC_STATS_MIN_USERS", 20i64)?,
             },
             retention: RetentionConfig {
                 login_events_days: env_parse("RETENTION_LOGIN_EVENTS_DAYS", 90u64)?,
@@ -1586,6 +1591,7 @@ mod tests {
                 expose_uptime: false,
                 stats_enabled: false,
                 stats_cache_hours: 24,
+                stats_min_users: 20,
             },
             retention: RetentionConfig {
                 login_events_days: 90,

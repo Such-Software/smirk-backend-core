@@ -79,6 +79,10 @@ pub struct AppState {
     /// Latest fetched fiat prices, refreshed by a background task when the price
     /// feed is enabled. Stays empty (and `/prices` 404s) otherwise.
     pub prices: Arc<RwLock<PriceSnapshot>>,
+    /// Cached public stats block (the handle count), recomputed at most once per
+    /// `PUBLIC_STATS_CACHE_HOURS`. Empty until the first request that needs it,
+    /// so an instance with stats off never runs the query at all.
+    pub stats_cache: crate::api::landing::StatsCache,
     /// Admin token minter/verifier. `Some` only when the admin surface is
     /// enabled; the admin plane and guard refuse all requests otherwise.
     pub admin_sessions: Option<AdminSessionManager>,

@@ -98,6 +98,7 @@ pub async fn try_app_with(mutate: impl FnOnce(&mut Config)) -> Option<TestApp> {
         relay,
         web_challenges: Arc::default(),
         prices,
+        stats_cache: Arc::default(),
         admin_sessions,
         shutdown: Arc::default(),
     });
@@ -245,6 +246,29 @@ impl TestApp {
             .await
             .expect("create user");
         user.id
+    }
+
+    /// Create a user holding a claimed handle. Returns the handle so a test can
+    /// assert it never appears on a public surface.
+    pub async fn create_user_with_handle(&self) -> String {
+        use smirk_backend_core::models::db::NewUser;
+        // Shaped like a real handle (lowercase, <= 32 chars) but unmistakable in
+        // a response body, so a leak is a match and not a coincidence.
+        let handle = format!("h{}", &Uuid::new_v4().simple().to_string()[..16]);
+        self.state
+            .db
+            .create_user(NewUser {
+                username: Some(handle.clone()),
+                pubkey_hash: Some(format!("pk-{}", Uuid::new_v4())),
+                nostr_pubkey: None,
+                wallet_birthday: None,
+                seed_fingerprint: None,
+                xmr_start_height: None,
+                wow_start_height: None,
+            })
+            .await
+            .expect("create user with handle");
+        handle
     }
 
     /// Create a user + an active session, returning `(user_id, access, refresh)`.

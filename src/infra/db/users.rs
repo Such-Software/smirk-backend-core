@@ -36,6 +36,16 @@ fn registration_conflict(e: sqlx::Error) -> AppError {
 const USER_COLS: &str = "id, username, pubkey_hash, nostr_pubkey, wallet_birthday, \
      seed_fingerprint, xmr_start_height, wow_start_height, created_at, updated_at, last_seen_at";
 
+/// [`USER_COLS`] qualified to the `users` alias `u`, for any query that JOINs.
+///
+/// `user_keys` also has `id`, `created_at` and `updated_at`, so an unqualified
+/// list against a join is `column reference "id" is ambiguous` from Postgres:
+/// a 500 at runtime, invisible at compile time because these queries are built
+/// as strings.
+const USER_COLS_U: &str = "u.id, u.username, u.pubkey_hash, u.nostr_pubkey, u.wallet_birthday, \
+     u.seed_fingerprint, u.xmr_start_height, u.wow_start_height, u.created_at, u.updated_at, \
+     u.last_seen_at";
+
 impl Database {
     /// Create a new user. `pubkey_hash` / `seed_fingerprint` are peppered here.
     #[instrument(skip(self, input))]
@@ -232,12 +242,42 @@ impl Database {
     #[instrument(skip(self, address))]
     pub async fn find_user_by_grin_address(&self, address: &str) -> Result<Option<User>, AppError> {
         let sql = format!(
-            "SELECT {USER_COLS} FROM users u \
+            "SELECT {USER_COLS_U} FROM users u \
              JOIN user_keys k ON k.user_id = u.id \
              WHERE k.asset = 'grin' AND k.public_key = $1"
         );
         Ok(sqlx::query_as::<_, User>(&sql)
             .bind(address)
+            .fetch_optional(self.pool())
+            .await?)
+    }
+
+    /// Resolve a user by the public key they registered for one asset.
+    ///
+    /// Website sign-in proves control of ONE coin's key, which is not
+    /// necessarily the BTC key that anchors `users.pubkey_hash`. Resolving only
+    /// by `pubkey_hash` therefore made ltc/xmr/wow/grin sign-in structurally
+    /// impossible on this backend: only a BTC signature could ever match. That
+    /// is the 2026-09-13 "User not found" report, where the wallet, the handle
+    /// and the desktop session were all fine and only the website refused.
+    ///
+    /// Matched verbatim against `user_keys.public_key` for the `primary` key of
+    /// `asset`, which is exactly the value `/auth/extension` stored at
+    /// registration, so nothing is re-hashed or re-encoded on either side.
+    #[instrument(skip(self, public_key))]
+    pub async fn get_user_by_asset_pubkey(
+        &self,
+        asset: AssetType,
+        public_key: &str,
+    ) -> Result<Option<User>, AppError> {
+        let sql = format!(
+            "SELECT {USER_COLS_U} FROM users u \
+             JOIN user_keys k ON k.user_id = u.id \
+             WHERE k.asset = $1 AND k.public_key = $2 AND k.key_type = 'primary'"
+        );
+        Ok(sqlx::query_as::<_, User>(&sql)
+            .bind(asset)
+            .bind(public_key)
             .fetch_optional(self.pool())
             .await?)
     }
@@ -628,5 +668,19 @@ impl Database {
         )
         .fetch_one(self.pool())
         .await?)
+    }
+
+    /// Count users holding a claimed handle (`name@<instance host>`).
+    ///
+    /// Returns a scalar and never SELECTs `username` itself: the only caller is
+    /// the unauthenticated public stats block, and a query that can only produce
+    /// a number cannot be widened into a handle directory by a later edit.
+    #[instrument(skip(self))]
+    pub async fn get_handle_count(&self) -> Result<i64, AppError> {
+        Ok(
+            sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE username IS NOT NULL")
+                .fetch_one(self.pool())
+                .await?,
+        )
     }
 }
