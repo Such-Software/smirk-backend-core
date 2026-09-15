@@ -354,7 +354,7 @@ pub const KEY_TYPE_SLATEPACK: &str = "slatepack";
 /// cannot begin with those characters because `g`, `r`, `i` and `n` are not hex
 /// digits. So this is a total discriminator, not a heuristic that a well-formed
 /// public key could trip.
-fn is_grin_slatepack_address(value: &str) -> bool {
+pub(crate) fn is_grin_slatepack_address(value: &str) -> bool {
     let v = value.trim();
     v.starts_with("grin1") || v.starts_with("tgrin1")
 }
@@ -367,7 +367,7 @@ fn is_grin_slatepack_address(value: &str) -> bool {
 /// the second from overwriting the first on `(user_id, asset, key_type)`, and it
 /// does so for wallets that are ALREADY SHIPPED, which cannot be taught to send a
 /// `key_type` of their own.
-fn key_type_for(asset: AssetType, public_key: &str) -> &'static str {
+pub(crate) fn key_type_for(asset: AssetType, public_key: &str) -> &'static str {
     match asset {
         AssetType::Grin if is_grin_slatepack_address(public_key) => KEY_TYPE_SLATEPACK,
         _ => KEY_TYPE_PRIMARY,

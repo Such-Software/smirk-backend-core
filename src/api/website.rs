@@ -72,10 +72,12 @@ use tracing::{info, instrument};
 
 use crate::api::auth::{AuthResponse, UserInfo};
 use crate::api::middleware::client_ip;
+use crate::api::users::key_type_for;
 use crate::core::crypto::signatures::{verify_bitcoin_signature, verify_ed25519_signature};
 use crate::core::session::{hash_refresh_token, Platform, WebChallenge};
 use crate::error::AppError;
-use crate::models::db::{AssetType, NewSession};
+use crate::infra::legacy_directory::LegacyIdentity;
+use crate::models::db::{AssetType, NewSession, NewUser, NewUserKey, User};
 use crate::AppState;
 
 // ── DTOs ──────────────────────────────────────────────────────────────────────
@@ -307,6 +309,22 @@ pub async fn website_verify(
         }
         None => None,
     };
+
+    // Still nothing: the legacy instance may hold this identity. Disabled unless
+    // an operator configured it, in which case this resolves nothing and the
+    // refusal below is unchanged. Migrating here rather than in a batch means
+    // every import is gated on a signature the user just produced.
+    let resolved = match resolved {
+        Some(user) => Some(user),
+        None => match state
+            .legacy
+            .find_by_proven_key(asset.as_str(), &req.signature.public_key)
+            .await?
+        {
+            Some(identity) => Some(import_legacy_identity(&state, identity).await?),
+            None => None,
+        },
+    };
     let user = resolved.ok_or_else(|| {
         info!(asset = %asset, "website_verify: no user for proven key");
         AppError::AuthError(
@@ -363,6 +381,78 @@ pub async fn website_verify(
         user: user_info(&user),
         is_new: false,
     }))
+}
+
+/// Adopt a legacy identity into this instance, having just proven one of its keys.
+///
+/// Creates a NEW row rather than attaching to an existing one. That is the whole
+/// safety property: 14 of the 16 legacy handles are also held here by rows we
+/// cannot prove belong to the same person, so adopting by name could hand this
+/// person's keys to someone else's account. The keys we just proved are the
+/// identity; everything else is left behind.
+async fn import_legacy_identity(
+    state: &AppState,
+    identity: LegacyIdentity,
+) -> Result<User, AppError> {
+    // Carry the handle only when it is free here. Taking a held one is the
+    // takeover we are avoiding, so a collision silently imports without it and
+    // the user re-claims a handle as normal.
+    let username = match identity.username.as_deref().map(str::to_lowercase) {
+        Some(name) => match state.db.get_user_by_username(&name).await? {
+            None => Some(name),
+            Some(_) => {
+                info!("legacy import: handle already held here, importing without it");
+                None
+            }
+        },
+        None => None,
+    };
+
+    // pubkey_hash is deliberately NOT carried. Legacy computes a plain sha256
+    // where this instance stores an HMAC, so the value would be meaningless, and
+    // importing one risks colliding with a row we cannot prove is the same
+    // person. The imported keys are the credential.
+    let user = state
+        .db
+        .create_user(NewUser {
+            username,
+            pubkey_hash: None,
+            nostr_pubkey: None,
+            wallet_birthday: None,
+            seed_fingerprint: None,
+            xmr_start_height: None,
+            wow_start_height: None,
+        })
+        .await?;
+
+    for key in &identity.keys {
+        let Ok(key_asset) = parse_asset(&key.asset) else {
+            continue;
+        };
+        // Never claim a key some other account here already holds: that would
+        // make the same key resolve to two users.
+        if state
+            .db
+            .get_user_by_asset_pubkey(key_asset, &key.public_key)
+            .await?
+            .is_some()
+        {
+            continue;
+        }
+        state
+            .db
+            .upsert_user_key(NewUserKey {
+                user_id: user.id,
+                asset: key_asset,
+                public_key: key.public_key.clone(),
+                public_spend_key: key.public_spend_key.clone(),
+                key_type: key_type_for(key_asset, &key.public_key).to_string(),
+            })
+            .await?;
+    }
+
+    info!(user_id = %user.id, "migrated a legacy identity on proven sign-in");
+    Ok(user)
 }
 
 // ── router ───────────────────────────────────────────────────────────────────
