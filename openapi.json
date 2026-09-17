@@ -3885,6 +3885,17 @@
             "type": "boolean",
             "description": "Whether a user owns this username."
           },
+          "tip_keys": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PublicKeysInfo",
+                "description": "Per-asset key a sender encrypts a TARGETED tip to, if registered.\n\nSeparate from `public_keys` because for XMR and WOW the two differ: the\npublic key that identifies a Cryptonote wallet is its spend key, and\nencrypting to that is not an option (see `key_type_for_tip`). An asset\nwhose owner has published no usable target is `null` here, which the\nsender reads as \"targeted tip unavailable\", never as \"fall back to the\nidentity key\"."
+              }
+            ]
+          },
           "user_id": {
             "type": [
               "string",
@@ -4610,6 +4621,13 @@
           "asset": {
             "type": "string",
             "description": "Asset the key is for (`btc`, `ltc`, `xmr`, `wow`, `grin`)."
+          },
+          "key_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Which row this key belongs in (`primary`, `enc`, `slatepack`).\n\nOmitted by every shipped wallet, and by anything registering the key a\nsignature is verified against. Required for a key whose role cannot be\nread off its own value: an `enc` key is 32 opaque bytes that look exactly\nlike a `primary` one, so without this it would silently overwrite the\nidentity key on `(user_id, asset, key_type)`."
           },
           "public_key": {
             "type": "string",

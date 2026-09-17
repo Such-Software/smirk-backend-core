@@ -176,6 +176,15 @@ pub struct LookupUsernameResponse {
     pub username: Option<String>,
     /// The user's per-asset receiving public keys, if registered.
     pub public_keys: Option<PublicKeysInfo>,
+    /// Per-asset key a sender encrypts a TARGETED tip to, if registered.
+    ///
+    /// Separate from `public_keys` because for XMR and WOW the two differ: the
+    /// public key that identifies a Cryptonote wallet is its spend key, and
+    /// encrypting to that is not an option (see `key_type_for_tip`). An asset
+    /// whose owner has published no usable target is `null` here, which the
+    /// sender reads as "targeted tip unavailable", never as "fall back to the
+    /// identity key".
+    pub tip_keys: Option<PublicKeysInfo>,
 }
 
 /// Register or update one of the caller's per-asset public keys.
@@ -187,6 +196,14 @@ pub struct RegisterKeyRequest {
     pub public_key: String,
     /// XMR/WOW only: the public spend key.
     pub public_spend_key: Option<String>,
+    /// Which row this key belongs in (`primary`, `enc`, `slatepack`).
+    ///
+    /// Omitted by every shipped wallet, and by anything registering the key a
+    /// signature is verified against. Required for a key whose role cannot be
+    /// read off its own value: an `enc` key is 32 opaque bytes that look exactly
+    /// like a `primary` one, so without this it would silently overwrite the
+    /// identity key on `(user_id, asset, key_type)`.
+    pub key_type: Option<String>,
 }
 
 /// A single per-asset public key.
@@ -301,40 +318,48 @@ pub async fn lookup_username(
             user_id: None,
             username: None,
             public_keys: None,
+            tip_keys: None,
         }));
     };
 
     let keys = state.db.get_user_keys(user.id).await?;
     // Pick by key_type, not "first row of this asset". Grin has two rows, so an
     // unqualified `find` returns whichever the query happened to yield.
-    let key_for = |asset: AssetType| {
-        let pick = |key_type: &str| {
-            keys.iter()
-                .find(|k| k.asset == asset && k.key_type == key_type)
-                .map(|k| k.public_key.clone())
-        };
-        match asset {
-            // Senders need the payable slatepack address. The `primary` row holds
-            // the key that signs, which is a different derivation and not payable,
-            // so fall back to it only when it still carries a pre-split address.
-            AssetType::Grin => pick(KEY_TYPE_SLATEPACK)
-                .or_else(|| pick(KEY_TYPE_PRIMARY).filter(|v| is_grin_slatepack_address(v))),
-            _ => pick(KEY_TYPE_PRIMARY),
-        }
+    let pick = |asset: AssetType, key_type: &str| {
+        keys.iter()
+            .find(|k| k.asset == asset && k.key_type == key_type)
+            .map(|k| k.public_key.clone())
     };
-    let public_keys = PublicKeysInfo {
-        btc: key_for(AssetType::Btc),
-        ltc: key_for(AssetType::Ltc),
-        xmr: key_for(AssetType::Xmr),
-        wow: key_for(AssetType::Wow),
-        grin: key_for(AssetType::Grin),
+    let key_for = |asset: AssetType| match asset {
+        // Senders need the payable slatepack address. The `primary` row holds
+        // the key that signs, which is a different derivation and not payable,
+        // so fall back to it only when it still carries a pre-split address.
+        AssetType::Grin => pick(asset, KEY_TYPE_SLATEPACK)
+            .or_else(|| pick(asset, KEY_TYPE_PRIMARY).filter(|v| is_grin_slatepack_address(v))),
+        _ => pick(asset, KEY_TYPE_PRIMARY),
+    };
+    // The tip target. For three assets it IS the receiving key, so reuse
+    // `key_for` and keep its Grin fallback; for XMR and WOW only a published
+    // `enc` row will do, and its absence means "no targeted tip", not "use the
+    // spend key".
+    let tip_key_for = |asset: AssetType| match key_type_for_tip(asset) {
+        KEY_TYPE_ENC => pick(asset, KEY_TYPE_ENC),
+        _ => key_for(asset),
+    };
+    let all_assets = |f: &dyn Fn(AssetType) -> Option<String>| PublicKeysInfo {
+        btc: f(AssetType::Btc),
+        ltc: f(AssetType::Ltc),
+        xmr: f(AssetType::Xmr),
+        wow: f(AssetType::Wow),
+        grin: f(AssetType::Grin),
     };
 
     Ok(Json(LookupUsernameResponse {
         registered: true,
         user_id: Some(user.id.to_string()),
         username: user.username,
-        public_keys: Some(public_keys),
+        public_keys: Some(all_assets(&key_for)),
+        tip_keys: Some(all_assets(&tip_key_for)),
     }))
 }
 
@@ -346,6 +371,15 @@ pub const KEY_TYPE_PRIMARY: &str = "primary";
 /// A Grin wallet's canonical slatepack address: a payable address, NOT the key
 /// that signs. Kept in its own row so it cannot displace [`KEY_TYPE_PRIMARY`].
 pub const KEY_TYPE_SLATEPACK: &str = "slatepack";
+
+/// A per-asset encryption subkey: the ed25519 public key a sender seals a
+/// targeted tip to. Never a spend authority and never a signing key.
+pub const KEY_TYPE_ENC: &str = "enc";
+
+/// Every `key_type` a client may ask for. Anything else is a 400 rather than a
+/// new row: an unrecognised type would sit in the table forever, readable by
+/// nothing, and a typo would silently register a key that no sender can find.
+pub const ALLOWED_KEY_TYPES: [&str; 3] = [KEY_TYPE_PRIMARY, KEY_TYPE_ENC, KEY_TYPE_SLATEPACK];
 
 /// Is this a bech32 Grin slatepack address rather than a raw public key?
 ///
@@ -371,6 +405,60 @@ pub(crate) fn key_type_for(asset: AssetType, public_key: &str) -> &'static str {
     match asset {
         AssetType::Grin if is_grin_slatepack_address(public_key) => KEY_TYPE_SLATEPACK,
         _ => KEY_TYPE_PRIMARY,
+    }
+}
+
+/// Resolve the row a registration lands in, honouring an explicit request.
+///
+/// Absent `requested`, this is exactly [`key_type_for`], which is what every
+/// already-shipped wallet relies on.
+///
+/// One invariant survives an explicit request: a bech32 Grin address never lands
+/// in `primary`. That row holds the key website sign-in verifies against, and
+/// overwriting it with an address is the outage `ddbba30` fixed. A client that
+/// asks for it is refused rather than quietly rerouted, because a client that
+/// believes it just registered a signing key has a bug worth surfacing.
+pub(crate) fn resolve_key_type(
+    asset: AssetType,
+    public_key: &str,
+    requested: Option<&str>,
+) -> Result<&'static str, AppError> {
+    let Some(requested) = requested.map(str::trim).filter(|r| !r.is_empty()) else {
+        return Ok(key_type_for(asset, public_key));
+    };
+    let resolved = ALLOWED_KEY_TYPES
+        .into_iter()
+        .find(|allowed| allowed.eq_ignore_ascii_case(requested))
+        .ok_or_else(|| {
+            AppError::ValidationError(format!(
+                "Unknown key_type: {requested} (expected one of {})",
+                ALLOWED_KEY_TYPES.join(", ")
+            ))
+        })?;
+    if resolved == KEY_TYPE_PRIMARY && is_grin_slatepack_address(public_key) {
+        return Err(AppError::ValidationError(
+            "A Grin slatepack address cannot be registered as the primary key:              primary holds the key that signs, which is a different derivation."
+                .to_string(),
+        ));
+    }
+    Ok(resolved)
+}
+
+/// Which stored row a sender should encrypt a TARGETED tip to, per asset.
+///
+/// BTC and LTC seal to the secp256k1 key that already identifies the wallet, so
+/// the identity key is also the tip key. Grin seals to the payable slatepack
+/// address. XMR and WOW seal to a dedicated encryption subkey and to NOTHING
+/// ELSE: the registered Cryptonote public key is the spend key, whose scalar is
+/// both the spend authority and an ed25519 signing oracle already exposed to
+/// dapps, and it is a raw reduced scalar that stock age cannot pair with anyway.
+/// A wallet too old to have published an `enc` key therefore has no XMR tip
+/// target, which is the correct answer rather than a fallback.
+pub(crate) fn key_type_for_tip(asset: AssetType) -> &'static str {
+    match asset {
+        AssetType::Btc | AssetType::Ltc => KEY_TYPE_PRIMARY,
+        AssetType::Xmr | AssetType::Wow => KEY_TYPE_ENC,
+        AssetType::Grin => KEY_TYPE_SLATEPACK,
     }
 }
 
@@ -400,7 +488,7 @@ pub async fn register_key(
 ) -> Result<Json<UserKeyInfo>, AppError> {
     let user_id = extract_user_id_from_token(&state, &headers).await?;
     let asset = parse_asset(&req.asset)?;
-    let key_type = key_type_for(asset, &req.public_key);
+    let key_type = resolve_key_type(asset, &req.public_key, req.key_type.as_deref())?;
 
     let key = state
         .db
@@ -550,6 +638,111 @@ mod tests {
             assert_eq!(
                 key_type_for(asset, "grin1qqv9hlxpazdvs0zt"),
                 KEY_TYPE_PRIMARY
+            );
+        }
+    }
+
+    /// A wallet that sends no `key_type` must behave exactly as it did before
+    /// the field existed, because every shipped wallet is such a wallet.
+    #[test]
+    fn omitting_key_type_preserves_value_based_routing() {
+        let hex_key = "b".repeat(64);
+        let addr = "grin1qqv9hlxpazdvs0zt6f2qm2r9j8sjkz5t2e2y8y4dm2xu9zr9s6zjqk5ldrz";
+        for (asset, value) in [
+            (AssetType::Btc, hex_key.as_str()),
+            (AssetType::Xmr, hex_key.as_str()),
+            (AssetType::Grin, hex_key.as_str()),
+            (AssetType::Grin, addr),
+        ] {
+            assert_eq!(
+                resolve_key_type(asset, value, None).unwrap(),
+                key_type_for(asset, value),
+                "{asset} registration changed shape when key_type was omitted"
+            );
+        }
+        // An empty or whitespace-only field is "not specified", not a bad value.
+        assert_eq!(
+            resolve_key_type(AssetType::Xmr, &hex_key, Some("  ")).unwrap(),
+            KEY_TYPE_PRIMARY
+        );
+    }
+
+    /// An encryption subkey is opaque bytes indistinguishable from an identity
+    /// key, so only the explicit request can route it, and it must not displace
+    /// the identity key.
+    #[test]
+    fn an_explicit_enc_request_lands_in_its_own_row() {
+        let key = "c".repeat(64);
+        for asset in [AssetType::Xmr, AssetType::Wow] {
+            let enc = resolve_key_type(asset, &key, Some(KEY_TYPE_ENC)).unwrap();
+            assert_eq!(enc, KEY_TYPE_ENC);
+            assert_ne!(
+                enc,
+                resolve_key_type(asset, &key, None).unwrap(),
+                "{asset} enc key would overwrite the identity key"
+            );
+        }
+    }
+
+    /// Case is not part of the contract, but membership is: anything outside the
+    /// allowlist is refused rather than stored where nothing will read it.
+    #[test]
+    fn unknown_key_types_are_refused() {
+        let key = "d".repeat(64);
+        for allowed in ALLOWED_KEY_TYPES {
+            assert_eq!(
+                resolve_key_type(AssetType::Btc, &key, Some(&allowed.to_uppercase())).unwrap(),
+                allowed
+            );
+        }
+        // Surrounding whitespace is trimmed, so the near-misses here differ in
+        // their actual characters, not in padding.
+        for bogus in ["encryption", "prim", "enc-xmr", "🙂"] {
+            match resolve_key_type(AssetType::Btc, &key, Some(bogus)) {
+                Err(AppError::ValidationError(_)) => {}
+                other => panic!("expected {bogus:?} to be refused, got {other:?}"),
+            }
+        }
+    }
+
+    /// The invariant `ddbba30` established survives an explicit request: the row
+    /// that sign-in verifies against never holds an address.
+    #[test]
+    fn an_address_cannot_be_forced_into_the_signing_row() {
+        let addr = "grin1qqv9hlxpazdvs0zt6f2qm2r9j8sjkz5t2e2y8y4dm2xu9zr9s6zjqk5ldrz";
+        match resolve_key_type(AssetType::Grin, addr, Some(KEY_TYPE_PRIMARY)) {
+            Err(AppError::ValidationError(_)) => {}
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        // The signing key itself still registers normally.
+        assert_eq!(
+            resolve_key_type(AssetType::Grin, &"b".repeat(64), Some(KEY_TYPE_PRIMARY)).unwrap(),
+            KEY_TYPE_PRIMARY
+        );
+    }
+
+    /// A Cryptonote tip must never be sealed to the spend key: that scalar is the
+    /// spend authority and an ed25519 signing oracle exposed to dapps.
+    #[test]
+    fn cryptonote_tips_target_a_key_that_is_not_the_identity_key() {
+        for asset in [AssetType::Xmr, AssetType::Wow] {
+            assert_ne!(
+                key_type_for_tip(asset),
+                key_type_for(asset, &"e".repeat(64)),
+                "{asset} would seal a tip to its registered spend key"
+            );
+        }
+        // Every tip target is a row a client can actually register.
+        for asset in [
+            AssetType::Btc,
+            AssetType::Ltc,
+            AssetType::Xmr,
+            AssetType::Wow,
+            AssetType::Grin,
+        ] {
+            assert!(
+                ALLOWED_KEY_TYPES.contains(&key_type_for_tip(asset)),
+                "{asset} targets a key_type nothing can register"
             );
         }
     }
