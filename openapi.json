@@ -756,7 +756,8 @@
         "tags": [
           "tips"
         ],
-        "summary": "Tips CLAIMABLE by the caller. As with `received`, a public-only instance has\nno targeted-claimable inbox, so this is always empty (served 200, not 404).",
+        "summary": "Tips CLAIMABLE by the caller right now.",
+        "description": "A strict subset of `received`, filtered by exactly the conditions the claim\ncall itself enforces, so the inbox never offers a Claim the backend will then\nrefuse.",
         "operationId": "get_claimable_social_tips",
         "responses": {
           "200": {
@@ -788,7 +789,8 @@
         "tags": [
           "tips"
         ],
-        "summary": "Tips RECEIVED by the caller. Public-only instances have no targeted-recipient\ninbox (public tips are claimed via share URL, never delivered to a user), so\nthis is always empty — served (200) rather than 404 so the client's inbox\npoll doesn't error on a targeted-only endpoint this instance doesn't serve.",
+        "summary": "Tips RECEIVED by the caller, newest first.",
+        "description": "Public tips never appear here: they are claimed by holding a share URL and\nhave no addressee to deliver to. An instance with targeted tips off has\nnothing to list and answers 200 with an empty list, so the client's inbox\npoll does not error on a backend that simply does not offer the feature.",
         "operationId": "get_received_social_tips",
         "responses": {
           "200": {
@@ -3324,6 +3326,7 @@
           "premium_relay",
           "feed",
           "tips",
+          "targeted_tips",
           "xmr_subaddr_provisioning",
           "utxo_multi_address"
         ],
@@ -3359,6 +3362,10 @@
           "prices": {
             "type": "boolean",
             "description": "Fiat price feed."
+          },
+          "targeted_tips": {
+            "type": "boolean",
+            "description": "Tips addressed to a Smirk handle rather than to a share URL. A client\nmust not offer the targeted option unless this is true, because the\ncreate call refuses it and the send would fail after the user picked a\nrecipient and an amount."
           },
           "tips": {
             "type": "boolean",

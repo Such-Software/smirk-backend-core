@@ -307,6 +307,13 @@ pub struct FeatureFlags {
     pub prices_currency: String,
     /// Parked feature; off by default.
     pub tips: bool,
+    /// Tips addressed to a Smirk user rather than to whoever holds a share URL.
+    ///
+    /// Off by default and independently of [`Self::tips`]: it is a distinct
+    /// surface (a recipient inbox, and a claim authorised by identity rather
+    /// than by holding a secret), and turning tips on must not turn it on by
+    /// implication. Requires the `recipient_user_id` migration to have run.
+    pub targeted_tips: bool,
     /// Nostr-native identity (NIP-98 login/link, NIP-05 directory).
     pub nostr_identity: bool,
     /// Grin slatepack relay (async store-and-forward mailbox for interactive
@@ -861,6 +868,7 @@ impl Config {
                 },
                 prices_currency: env_or("PRICES_CURRENCY", "usd").to_lowercase(),
                 tips: env_bool("FEATURE_TIPS", false),
+                targeted_tips: env_bool("FEATURE_TARGETED_TIPS", false),
                 nostr_identity: env_bool("FEATURE_NOSTR_IDENTITY", true),
                 grin_relay: env_bool("FEATURE_GRIN_RELAY", true),
             },
@@ -1492,12 +1500,13 @@ impl Config {
 }
 
 #[cfg(test)]
-mod tests {
-    //! Fail-closed validation regression tests. `validate()` must reject weak
-    //! or inconsistent security settings rather than booting.
-    use super::*;
-
-    fn valid() -> Config {
+impl Config {
+    /// A minimal, valid [`Config`] for tests anywhere in this crate.
+    ///
+    /// Lives here rather than in one module's test block so a test of what a
+    /// flag DOES can be written next to the flag, instead of next to the
+    /// fixture that happened to exist first.
+    pub(crate) fn test_default() -> Config {
         let utxo = || UtxoConfig {
             network: "mainnet".into(),
             electrum_primary: None,
@@ -1548,6 +1557,7 @@ mod tests {
                 prices_assets: vec!["btc".into(), "xmr".into()],
                 prices_currency: "usd".into(),
                 tips: false,
+                targeted_tips: false,
                 nostr_identity: true,
                 grin_relay: true,
             },
@@ -1666,6 +1676,17 @@ mod tests {
                 restart_apply_mode: RestartApplyMode::Manual,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Fail-closed validation regression tests. `validate()` must reject weak
+    //! or inconsistent security settings rather than booting.
+    use super::*;
+
+    fn valid() -> Config {
+        Config::test_default()
     }
 
     /// A fully-wired pay-to-register config (for the require_payment tests).

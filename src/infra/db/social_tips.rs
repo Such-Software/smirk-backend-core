@@ -1,7 +1,6 @@
-//! Social-tips (public) DB access.
+//! Social-tips DB access.
 //!
-//! The `social_tips` row plus its query methods on [`Database`]. PUBLIC tips
-//! only — no targeted/recipient columns. Every status transition is a single
+//! The `social_tips` row plus its query methods on [`Database`]. Every status transition is a single
 //! guarded `UPDATE ... WHERE status IN (...) ... RETURNING`, so concurrent
 //! claims / sweeps / clawbacks race safely on the DB (the guards are the
 //! money-safety surface; see each method).
@@ -26,9 +25,9 @@ pub(crate) const TIP_COLS: &str = "\
     funding_amount_observed, funding_amount_verified_at, claimed_at, claimed_by_user_id, \
     clawed_back_at, sweep_txid, sweep_confirmed_at, sweep_block_height, sweep_block_hash, \
     sweep_confirmed_dm_sent_at, reorg_notified_at, tip_view_key, lws_registered_at, \
-    lws_deactivated_at, created_at, updated_at, grin_commitment";
+    lws_deactivated_at, created_at, updated_at, grin_commitment, recipient_user_id";
 
-/// A persisted public social tip. Field names/order match [`TIP_COLS`] (sqlx
+/// A persisted social tip. Field names/order match [`TIP_COLS`] (sqlx
 /// `FromRow` maps by name).
 #[derive(Debug, Clone, FromRow)]
 pub struct SocialTipRow {
@@ -67,9 +66,11 @@ pub struct SocialTipRow {
     /// on-chain handle the grin confirmation/sweep workers query by. The same
     /// value also lands in `tip_address`; prefer this explicit field.
     pub grin_commitment: Option<String>,
+    /// Targeted tips only: the user this tip is addressed to.
+    pub recipient_user_id: Option<Uuid>,
 }
 
-/// Values for a fresh public tip. `status` is set by the caller
+/// Values for a fresh tip. `status` is set by the caller
 /// (`draft` for the two-phase flow, `pending_confirmation` when funding is
 /// attached at create time).
 pub struct NewSocialTip<'a> {
@@ -84,6 +85,9 @@ pub struct NewSocialTip<'a> {
     pub confirmations_required: i32,
     /// Grin voucher commitment (hex). `None` for non-grin tips.
     pub grin_commitment: Option<&'a str>,
+    /// Targeted tips only: the user this tip is addressed to. `None` makes it
+    /// public, claimable by whoever holds the share URL.
+    pub recipient_user_id: Option<Uuid>,
 }
 
 /// A `social_tips` row cancelled by a GC pass, distilled to the fields the
@@ -131,11 +135,14 @@ impl Database {
         status: TipStatus,
     ) -> Result<SocialTipRow, AppError> {
         let row = sqlx::query_as::<_, SocialTipRow>(&format!(
+            // is_public is DERIVED from the recipient, never passed separately:
+            // two independent sources for "who may claim this" is how a tip ends
+            // up both addressed to someone and claimable by anyone.
             "INSERT INTO social_tips \
              (sender_user_id, asset, amount, is_public, claim_key_hash, encrypted_key, \
               tip_address, funding_txid, status, confirmations_required, tip_view_key, \
-              grin_commitment) \
-             VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $8, $9, $10, $11) \
+              grin_commitment, recipient_user_id) \
+             VALUES ($1, $2, $3, ($12 IS NULL), $4, $5, $6, $7, $8, $9, $10, $11, $12) \
              RETURNING {TIP_COLS}"
         ))
         .bind(new.sender_user_id)
@@ -149,6 +156,7 @@ impl Database {
         .bind(new.confirmations_required)
         .bind(new.tip_view_key)
         .bind(new.grin_commitment)
+        .bind(new.recipient_user_id)
         .fetch_one(self.pool())
         .await?;
         Ok(row)
@@ -185,6 +193,52 @@ impl Database {
              WHERE sender_user_id = $1 ORDER BY created_at DESC"
         ))
         .bind(sender_user_id)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// All tips ADDRESSED to this user, newest first, whatever their state.
+    ///
+    /// Scoped to `recipient_user_id`, so a public tip never appears in anyone's
+    /// inbox: a public tip is claimed by holding its URL and has no addressee to
+    /// deliver it to.
+    #[instrument(skip(self))]
+    pub async fn get_received_social_tips(
+        &self,
+        recipient_user_id: Uuid,
+    ) -> Result<Vec<SocialTipRow>, AppError> {
+        let rows = sqlx::query_as::<_, SocialTipRow>(&format!(
+            "SELECT {TIP_COLS} FROM social_tips \
+             WHERE recipient_user_id = $1 ORDER BY created_at DESC"
+        ))
+        .bind(recipient_user_id)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// Tips this user can claim RIGHT NOW.
+    ///
+    /// The predicate is deliberately the same set of conditions
+    /// [`Self::mark_tip_claiming`] enforces, so the inbox cannot offer a Claim
+    /// button that the claim call then refuses: funded to the required depth,
+    /// amount verified against what actually arrived, not already swept.
+    #[instrument(skip(self))]
+    pub async fn get_claimable_social_tips(
+        &self,
+        recipient_user_id: Uuid,
+    ) -> Result<Vec<SocialTipRow>, AppError> {
+        let rows = sqlx::query_as::<_, SocialTipRow>(&format!(
+            "SELECT {TIP_COLS} FROM social_tips \
+             WHERE recipient_user_id = $1 \
+               AND status IN ('pending', 'claiming') \
+               AND funding_confirmations >= confirmations_required \
+               AND funding_amount_verified = TRUE \
+               AND sweep_confirmed_at IS NULL \
+             ORDER BY created_at DESC"
+        ))
+        .bind(recipient_user_id)
         .fetch_all(self.pool())
         .await?;
         Ok(rows)
@@ -498,7 +552,7 @@ impl Database {
                AND funding_confirmations >= confirmations_required \
                AND funding_amount_verified = TRUE \
                AND sweep_confirmed_at IS NULL \
-               AND is_public = TRUE \
+               AND (is_public = TRUE OR recipient_user_id = $2) \
              RETURNING {TIP_COLS}"
         ))
         .bind(tip_id)

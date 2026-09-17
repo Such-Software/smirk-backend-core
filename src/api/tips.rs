@@ -169,6 +169,50 @@ fn ensure_tips_enabled(state: &AppState) -> Result<(), AppError> {
     }
 }
 
+/// Resolve the user a targeted tip is addressed to.
+///
+/// Fails closed on the capability first: a backend without the
+/// `recipient_user_id` migration, or one whose operator has not turned this on,
+/// must refuse rather than silently create a public tip out of a targeted
+/// request. That mistake would hand a tip meant for one person to anyone with
+/// the URL, so the ordering here matters more than the tidiness.
+///
+/// Only Smirk handles resolve. This backend serves no third-party platform
+/// mapping, so a `platform` of anything else has nothing to look up and is
+/// refused by name rather than resolving to nobody.
+async fn resolve_tip_recipient(
+    state: &AppState,
+    req: &CreateSocialTipRequest,
+) -> Result<Uuid, AppError> {
+    if !state.cfg().features.targeted_tips {
+        return Err(AppError::ValidationError(
+            "Targeted tips are not enabled on this instance; set is_public = true.".into(),
+        ));
+    }
+    let platform = req.platform.as_deref().unwrap_or("smirk").to_lowercase();
+    if platform != "smirk" {
+        return Err(AppError::ValidationError(format!(
+            "This instance resolves Smirk handles only, not '{platform}'."
+        )));
+    }
+    let username = req
+        .username
+        .as_deref()
+        .map(|u| u.trim().trim_start_matches('@').to_lowercase())
+        .filter(|u| !u.is_empty())
+        .ok_or_else(|| {
+            AppError::ValidationError("username is required for a targeted tip.".into())
+        })?;
+    let user = state
+        .db
+        .get_user_by_username(&username)
+        .await?
+        .ok_or_else(|| {
+            AppError::ValidationError(format!("No Smirk user owns the handle '{username}'."))
+        })?;
+    Ok(user.id)
+}
+
 /// Whether `asset` is a tip-capable chain enabled on this instance.
 fn supported_tip_asset(state: &AppState, asset: &str) -> bool {
     let c = &state.cfg().features.chains;
@@ -285,12 +329,14 @@ pub async fn create_social_tip(
     let user_id = extract_user_id_from_token(&state, &headers).await?;
     ensure_tips_enabled(&state)?;
 
-    // Public-only port: targeted tips are rejected outright.
-    if !req.is_public {
-        return Err(AppError::ValidationError(
-            "Targeted tips are not supported on this instance; set is_public = true.".into(),
-        ));
-    }
+    // A targeted tip is addressed to a user; a public one is claimed by whoever
+    // holds the share URL. Resolve the addressee first, because everything below
+    // (which fields are required, which are forbidden) follows from it.
+    let recipient_user_id = if req.is_public {
+        None
+    } else {
+        Some(resolve_tip_recipient(&state, &req).await?)
+    };
     if req.amount <= 0 {
         return Err(AppError::ValidationError("amount must be positive.".into()));
     }
@@ -301,21 +347,29 @@ pub async fn create_social_tip(
         )));
     }
 
-    // Public tips require the claim-key hash (mirrors the public_tip_has_hash CHECK).
-    let claim_key_hash = req
-        .claim_key_hash
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            AppError::ValidationError("claim_key_hash is required for a public tip.".into())
-        })?;
-    // A claim-key hash is SHA256(claim key) = exactly 64 hex chars. Validate the
-    // shape so malformed input is a clean 400, not a DB length-overflow 500.
-    if claim_key_hash.len() != 64 || hex::decode(claim_key_hash).is_err() {
-        return Err(AppError::ValidationError(
-            "claim_key_hash must be a 64-character hex SHA256.".into(),
-        ));
-    }
+    // Public tips require the claim-key hash (mirrors the public_tip_has_hash
+    // CHECK). A targeted tip has no claim key at all: the ciphertext is sealed
+    // to the recipient's own key, so holding the row grants nothing.
+    let claim_key_hash = match recipient_user_id {
+        None => {
+            let h = req
+                .claim_key_hash
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    AppError::ValidationError("claim_key_hash is required for a public tip.".into())
+                })?;
+            // SHA256(claim key) = exactly 64 hex chars. Validate the shape so
+            // malformed input is a clean 400, not a DB length-overflow 500.
+            if h.len() != 64 || hex::decode(h).is_err() {
+                return Err(AppError::ValidationError(
+                    "claim_key_hash must be a 64-character hex SHA256.".into(),
+                ));
+            }
+            Some(h)
+        }
+        Some(_) => None,
+    };
 
     // encrypted_key: hex, capped at 4096 hex chars.
     let encrypted_key: Option<Vec<u8>> = match req.encrypted_key.as_deref() {
@@ -368,13 +422,14 @@ pub async fn create_social_tip(
         sender_user_id: user_id,
         asset: &asset,
         amount: req.amount,
-        claim_key_hash: Some(claim_key_hash),
+        claim_key_hash,
         encrypted_key: encrypted_key.as_deref(),
         tip_address,
         funding_txid,
         tip_view_key: req.tip_view_key.as_deref().filter(|s| !s.is_empty()),
         confirmations_required: confirmations_for_asset(&asset),
         grin_commitment,
+        recipient_user_id,
     };
 
     let tip = if is_draft {
@@ -421,10 +476,12 @@ pub async fn get_sent_social_tips(
     }))
 }
 
-/// Tips RECEIVED by the caller. Public-only instances have no targeted-recipient
-/// inbox (public tips are claimed via share URL, never delivered to a user), so
-/// this is always empty — served (200) rather than 404 so the client's inbox
-/// poll doesn't error on a targeted-only endpoint this instance doesn't serve.
+/// Tips RECEIVED by the caller, newest first.
+///
+/// Public tips never appear here: they are claimed by holding a share URL and
+/// have no addressee to deliver to. An instance with targeted tips off has
+/// nothing to list and answers 200 with an empty list, so the client's inbox
+/// poll does not error on a backend that simply does not offer the feature.
 #[utoipa::path(
     security(("bearer_auth" = [])),
     get,
@@ -441,13 +498,22 @@ pub async fn get_received_social_tips(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<SocialTipsResponse>, AppError> {
-    extract_user_id_from_token(&state, &headers).await?;
+    let user_id = extract_user_id_from_token(&state, &headers).await?;
     ensure_tips_enabled(&state)?;
-    Ok(Json(SocialTipsResponse { tips: Vec::new() }))
+    if !state.cfg().features.targeted_tips {
+        return Ok(Json(SocialTipsResponse { tips: Vec::new() }));
+    }
+    let rows = state.db.get_received_social_tips(user_id).await?;
+    Ok(Json(SocialTipsResponse {
+        tips: rows.into_iter().map(to_sent_tip).collect(),
+    }))
 }
 
-/// Tips CLAIMABLE by the caller. As with `received`, a public-only instance has
-/// no targeted-claimable inbox, so this is always empty (served 200, not 404).
+/// Tips CLAIMABLE by the caller right now.
+///
+/// A strict subset of `received`, filtered by exactly the conditions the claim
+/// call itself enforces, so the inbox never offers a Claim the backend will then
+/// refuse.
 #[utoipa::path(
     security(("bearer_auth" = [])),
     get,
@@ -464,9 +530,15 @@ pub async fn get_claimable_social_tips(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<SocialTipsResponse>, AppError> {
-    extract_user_id_from_token(&state, &headers).await?;
+    let user_id = extract_user_id_from_token(&state, &headers).await?;
     ensure_tips_enabled(&state)?;
-    Ok(Json(SocialTipsResponse { tips: Vec::new() }))
+    if !state.cfg().features.targeted_tips {
+        return Ok(Json(SocialTipsResponse { tips: Vec::new() }));
+    }
+    let rows = state.db.get_claimable_social_tips(user_id).await?;
+    Ok(Json(SocialTipsResponse {
+        tips: rows.into_iter().map(to_sent_tip).collect(),
+    }))
 }
 
 /// Public tip metadata for a share-URL holder. UNAUTHENTICATED: the tip id (a

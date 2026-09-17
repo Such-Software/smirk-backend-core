@@ -74,6 +74,11 @@ pub struct FeatureCapabilities {
     pub feed: bool,
     /// Tipping (parked).
     pub tips: bool,
+    /// Tips addressed to a Smirk handle rather than to a share URL. A client
+    /// must not offer the targeted option unless this is true, because the
+    /// create call refuses it and the send would fail after the user picked a
+    /// recipient and an amount.
+    pub targeted_tips: bool,
     /// Monero/Wownero subaddress provisioning: this instance registers a batch
     /// of account-0 subaddress indices with its LWS and serves
     /// `POST /wallet/lws/provision_subaddrs`. Off ⇒ that route is not mounted
@@ -308,6 +313,10 @@ pub fn effective_capabilities(config: &Config) -> CapabilitiesResponse {
             premium_relay: premium_advertised(config),
             feed: feed_advertised(config),
             tips: tips_advertised(config),
+            // Narrower than `tips` and never wider: a targeted tip is still a
+            // tip, so an instance with tipping off cannot serve one whatever
+            // this flag says.
+            targeted_tips: tips_advertised(config) && config.features.targeted_tips,
             // Advertised through the SAME predicates the routers gate on, so a
             // client can never be told a route exists that would 404 (or the
             // reverse). Both are environment flags, and both are chain-gated:
@@ -426,4 +435,41 @@ pub async fn capabilities(State(state): State<Arc<AppState>>) -> Json<Capabiliti
 /// Capability route, RELATIVE to the `/api/v1` mount point. Public (no auth).
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new().route("/capabilities", get(capabilities))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    /// Targeted tipping is a distinct surface (an inbox, and a claim authorised
+    /// by identity rather than by holding a secret) and it requires a migration
+    /// to have run, so an operator has to ask for it explicitly.
+    #[test]
+    fn targeted_tips_are_off_until_asked_for() {
+        let config = Config::test_default();
+        assert!(!config.features.targeted_tips);
+    }
+
+    /// A targeted tip is still a tip. Advertising it on an instance with tipping
+    /// off would offer a client a route that refuses every request.
+    #[test]
+    fn targeted_tips_are_never_advertised_more_widely_than_tips() {
+        for (tips, targeted) in [(false, false), (false, true), (true, false), (true, true)] {
+            let mut config = Config::test_default();
+            config.features.tips = tips;
+            config.features.targeted_tips = targeted;
+            let caps = effective_capabilities(&config);
+            assert!(
+                !caps.features.targeted_tips || caps.features.tips,
+                "advertised targeted tips with tips={tips}"
+            );
+            if !targeted {
+                assert!(
+                    !caps.features.targeted_tips,
+                    "advertised a feature nobody enabled"
+                );
+            }
+        }
+    }
 }
