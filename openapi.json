@@ -3781,6 +3781,24 @@
             "format": "int64",
             "description": "Block height (`0`/negative for unconfirmed)."
           },
+          "total_received": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Satoshis this transaction paid to the queried address, when known.\n\nElectrum's `get_history` carries no amounts at all, so these are filled\nin from the verbose transaction. Absent means \"not determined\", never\nzero: a client that defaults a missing amount to 0 renders every row as\na confident \"sent 0\", which is what this wallet used to do.",
+            "minimum": 0
+          },
+          "total_sent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Satoshis this transaction spent FROM the queried address, when the\nserver resolved every input's prevout. Absent on a server that resolves\nnone (public ElectrumX), because a partial answer would look exact.",
+            "minimum": 0
+          },
           "txid": {
             "type": "string"
           }
@@ -5111,6 +5129,24 @@
             "type": "integer",
             "format": "int64",
             "description": "Block height (`0`/negative for unconfirmed)."
+          },
+          "total_received": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "See [`HistoryEntry::total_received`].",
+            "minimum": 0
+          },
+          "total_sent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "See [`HistoryEntry::total_sent`].",
+            "minimum": 0
           },
           "txid": {
             "type": "string"

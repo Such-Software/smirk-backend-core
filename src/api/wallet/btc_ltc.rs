@@ -164,6 +164,17 @@ pub struct HistoryEntry {
     pub height: i64,
     /// Fee in satoshis (mempool entries only).
     pub fee: Option<u64>,
+    /// Satoshis this transaction paid to the queried address, when known.
+    ///
+    /// Electrum's `get_history` carries no amounts at all, so these are filled
+    /// in from the verbose transaction. Absent means "not determined", never
+    /// zero: a client that defaults a missing amount to 0 renders every row as
+    /// a confident "sent 0", which is what this wallet used to do.
+    pub total_received: Option<u64>,
+    /// Satoshis this transaction spent FROM the queried address, when the
+    /// server resolved every input's prevout. Absent on a server that resolves
+    /// none (public ElectrumX), because a partial answer would look exact.
+    pub total_sent: Option<u64>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -220,6 +231,10 @@ pub struct TaggedHistoryEntry {
     pub height: i64,
     /// Fee in satoshis (mempool entries only).
     pub fee: Option<u64>,
+    /// See [`HistoryEntry::total_received`].
+    pub total_received: Option<u64>,
+    /// See [`HistoryEntry::total_sent`].
+    pub total_sent: Option<u64>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -370,21 +385,103 @@ pub async fn history(
 ) -> Result<Json<HistoryResponse>, AppError> {
     extract_user_id_from_token(&state, &headers).await?;
     let asset = req.asset.to_lowercase();
-    let entries = electrum_for(&state, &asset)?
-        .get_history(&req.address)
-        .await?;
+    let client = electrum_for(&state, &asset)?;
+    let mut entries = client.get_history(&req.address).await?;
+    // Newest first, so the bounded amount resolution below spends its budget on
+    // the rows the user actually sees. Electrum returns ascending height, and
+    // unconfirmed rows carry height 0 or less.
+    entries.sort_by_key(|e| std::cmp::Reverse(if e.height > 0 { e.height } else { i64::MAX }));
+    let txids: Vec<String> = entries.iter().map(|e| e.tx_hash.clone()).collect();
+    let amounts = resolve_amounts(client, &txids, std::slice::from_ref(&req.address)).await;
     Ok(Json(HistoryResponse {
         asset,
         address: req.address,
         transactions: entries
             .into_iter()
-            .map(|e| HistoryEntry {
-                txid: e.tx_hash,
-                height: e.height,
-                fee: e.fee,
+            .map(|e| {
+                let (total_received, total_sent) =
+                    amounts.get(&e.tx_hash).copied().unwrap_or((None, None));
+                HistoryEntry {
+                    txid: e.tx_hash,
+                    height: e.height,
+                    fee: e.fee,
+                    total_received,
+                    total_sent,
+                }
             })
             .collect(),
     }))
+}
+
+/// How many history rows get their amounts resolved, newest first.
+///
+/// Each resolution is one `blockchain.transaction.get`, so an unbounded wallet
+/// history would turn one request into hundreds. The wallet shows a scrolling
+/// activity list; rows past this simply arrive without amounts, which the
+/// client already renders honestly rather than as zero.
+const AMOUNT_RESOLUTION_LIMIT: usize = 60;
+
+/// Resolve `(total_received, total_sent)` for the newest rows of a history.
+///
+/// Electrum's `get_history` is txid + height + fee and nothing else, so the
+/// amounts have to come from the verbose transaction. BEST EFFORT by design: a
+/// row whose transaction cannot be fetched or parsed keeps `None`, because the
+/// client distinguishes "not determined" from zero, and one slow or hostile
+/// upstream response must not fail the whole history request.
+///
+/// `addresses` is the set the caller asked about, so a transaction between two
+/// of the user's own addresses nets correctly instead of reading as a payment
+/// to a stranger.
+async fn resolve_amounts(
+    client: &crate::infra::electrum::ElectrumClient,
+    txids: &[String],
+    addresses: &[String],
+) -> std::collections::HashMap<String, (Option<u64>, Option<u64>)> {
+    use futures::stream::{self, StreamExt};
+
+    let fetched = stream::iter(txids.iter().take(AMOUNT_RESOLUTION_LIMIT).cloned())
+        .map(|txid| async move {
+            let tx = client.get_transaction_verbose(&txid).await.ok();
+            (txid, tx)
+        })
+        // A small window: enough to hide per-call latency, not enough to look
+        // like a burst to the upstream server.
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
+
+    let mut out = std::collections::HashMap::new();
+    for (txid, tx) in fetched {
+        let Some(tx) = tx else {
+            out.insert(txid, (None, None));
+            continue;
+        };
+        let mut received: u64 = 0;
+        let mut received_ok = true;
+        let mut sent: u64 = 0;
+        // `total_sent_from` answers only when EVERY input carries a resolved
+        // prevout, so a server that resolves none leaves sent unknown for the
+        // whole row rather than reporting a partial figure as exact.
+        let mut sent_ok = true;
+        for address in addresses {
+            match tx.total_received_at(address) {
+                Ok(v) => received = received.saturating_add(v),
+                Err(_) => received_ok = false,
+            }
+            match tx.total_sent_from(address) {
+                Ok(Some(v)) => sent = sent.saturating_add(v),
+                Ok(None) | Err(_) => sent_ok = false,
+            }
+        }
+        out.insert(
+            txid,
+            (
+                if received_ok { Some(received) } else { None },
+                if sent_ok { Some(sent) } else { None },
+            ),
+        );
+    }
+    out
 }
 
 /// Best-chain tip height (for client-side confirmation counting).
@@ -573,18 +670,35 @@ pub async fn history_multi(
     extract_user_id_from_token(&state, &headers).await?;
     let asset = req.asset.to_lowercase();
     validate_address_batch(&req.addresses)?;
-    let tagged = electrum_for(&state, &asset)?
-        .get_history_tagged(&req.addresses)
-        .await?;
+    let client = electrum_for(&state, &asset)?;
+    let mut tagged = client.get_history_tagged(&req.addresses).await?;
+    tagged.sort_by_key(|(_, e)| std::cmp::Reverse(if e.height > 0 { e.height } else { i64::MAX }));
+    // One transaction can touch several of the queried addresses and so appear
+    // once per address. Resolve each DISTINCT txid once, and compute its amounts
+    // against the whole address set so a transfer between the user's own
+    // addresses nets out instead of reading as a payment.
+    let mut txids: Vec<String> = Vec::new();
+    for (_, e) in &tagged {
+        if !txids.contains(&e.tx_hash) {
+            txids.push(e.tx_hash.clone());
+        }
+    }
+    let amounts = resolve_amounts(client, &txids, &req.addresses).await;
     Ok(Json(MultiHistoryResponse {
         asset,
         transactions: tagged
             .into_iter()
-            .map(|(address, e)| TaggedHistoryEntry {
-                address,
-                txid: e.tx_hash,
-                height: e.height,
-                fee: e.fee,
+            .map(|(address, e)| {
+                let (total_received, total_sent) =
+                    amounts.get(&e.tx_hash).copied().unwrap_or((None, None));
+                TaggedHistoryEntry {
+                    address,
+                    txid: e.tx_hash,
+                    height: e.height,
+                    fee: e.fee,
+                    total_received,
+                    total_sent,
+                }
             })
             .collect(),
     }))
