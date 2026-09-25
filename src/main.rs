@@ -16,8 +16,15 @@ use smirk_backend_core::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
+    // .env BEFORE the subscriber. The unit deliberately sets no EnvironmentFile,
+    // so RUST_LOG lives only in .env and dotenv is what puts it into the
+    // environment. Built first, EnvFilter sees no RUST_LOG and falls back to its
+    // default directive, ERROR, which silently drops every info! and warn! this
+    // binary emits: the boot lines an operator reads to confirm a capability came
+    // up, and the warnings that say why one did not. Production ran that way from
+    // the 2026-09-20 build until this was found.
     let _ = dotenvy::dotenv();
+    tracing_subscriber::fmt::init();
 
     // Fail-closed: aborts on a weak/missing/inconsistent secret. This is the env-only
     // truth; the effective config below layers the validated DB overlay on top.

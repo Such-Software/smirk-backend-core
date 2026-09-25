@@ -124,6 +124,9 @@ async fn db_create_draft_roundtrips_all_columns() {
     use smirk_backend_core::infra::db::NewSocialTip;
     let enc = hex::decode("cdcd").unwrap();
     let new = NewSocialTip {
+        // Public tip: these predate targeted tips and are claimable by whoever
+        // holds the share URL.
+        recipient_user_id: None,
         sender_user_id: uid,
         asset: "btc",
         amount: 100_000,
@@ -227,6 +230,9 @@ async fn make_draft(
     view_key: Option<&str>,
 ) -> uuid::Uuid {
     let new = NewSocialTip {
+        // Public tip: these predate targeted tips and are claimable by whoever
+        // holds the share URL.
+        recipient_user_id: None,
         sender_user_id: uid,
         asset,
         amount,
@@ -1336,6 +1342,9 @@ async fn grin_tip_db_lifecycle_columns() {
 
     use smirk_backend_core::infra::db::NewSocialTip;
     let new = NewSocialTip {
+        // Public tip: these predate targeted tips and are claimable by whoever
+        // holds the share URL.
+        recipient_user_id: None,
         sender_user_id: uid,
         asset: "grin",
         amount: 500,

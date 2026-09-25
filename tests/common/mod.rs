@@ -92,6 +92,9 @@ pub async fn try_app_with(mutate: impl FnOnce(&mut Config)) -> Option<TestApp> {
         config: Arc::new(arc_swap::ArcSwap::from_pointee(config.clone())),
         config_base: Arc::new(config),
         db,
+        // Off in tests: the migration is a production transitional path, and a
+        // test that needed it would configure a legacy database of its own.
+        legacy: smirk_backend_core::infra::legacy_directory::LegacyDirectory::disabled(),
         sessions,
         chains,
         payment,
