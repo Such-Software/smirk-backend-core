@@ -127,3 +127,130 @@ pub fn from_config(cfg: &Config) -> Result<Option<Arc<dyn PaymentProvider>>, App
     };
     Ok(Some(provider))
 }
+
+/// One way to pay for premium: a processor plus the assets it takes.
+#[derive(Clone)]
+pub struct PaymentRail {
+    pub provider: Arc<dyn PaymentProvider>,
+    /// Asset codes as the wallet should label them.
+    pub assets: Vec<String>,
+}
+
+impl PaymentRail {
+    pub fn kind(&self) -> &'static str {
+        self.provider.kind()
+    }
+}
+
+/// Every processor premium may invoice through, primary first.
+///
+/// The primary is the same provider the registration gate uses, so an instance
+/// with no checkout rails behaves exactly as before. Rails are looked up by the
+/// kind persisted on the invoice row, so an invoice is always polled at the
+/// processor that minted it, never at whichever one is first today.
+#[derive(Clone, Default)]
+pub struct PaymentRails {
+    rails: Vec<PaymentRail>,
+}
+
+impl PaymentRails {
+    /// The rails in advertisement order, primary first.
+    pub fn all(&self) -> &[PaymentRail] {
+        &self.rails
+    }
+
+    /// The rail a new invoice uses: the one named, or the primary when none is.
+    /// An unknown name is refused rather than defaulted, so a client that asked
+    /// for Monero is never silently handed a Bitcoin invoice.
+    pub fn select(&self, kind: Option<&str>) -> Option<&PaymentRail> {
+        match kind {
+            None => self.rails.first(),
+            Some(k) => self.rails.iter().find(|r| r.kind() == k),
+        }
+    }
+
+    /// The rail that minted a stored invoice.
+    pub fn for_invoice(&self, provider_kind: &str) -> Option<&PaymentRail> {
+        self.rails.iter().find(|r| r.kind() == provider_kind)
+    }
+}
+
+/// Build premium's rails: the primary provider (if any) followed by each
+/// configured checkout rail. Empty when premium is off.
+pub fn rails_from_config(
+    cfg: &Config,
+    primary: Option<&Arc<dyn PaymentProvider>>,
+) -> Result<PaymentRails, AppError> {
+    if !cfg.premium.enabled {
+        return Ok(PaymentRails::default());
+    }
+    let mut rails = Vec::new();
+    if let Some(p) = primary {
+        rails.push(PaymentRail {
+            provider: Arc::clone(p),
+            assets: cfg.premium.primary_assets.clone(),
+        });
+    }
+    for rail in &cfg.premium.rails {
+        rails.push(PaymentRail {
+            provider: Arc::new(BtcPayProvider::checkout_rail(rail)?),
+            assets: vec![rail.asset.to_string()],
+        });
+    }
+    Ok(PaymentRails { rails })
+}
+
+#[cfg(test)]
+mod rail_tests {
+    use super::*;
+
+    struct Fake(&'static str);
+
+    #[async_trait]
+    impl PaymentProvider for Fake {
+        fn kind(&self) -> &'static str {
+            self.0
+        }
+        async fn create_invoice(&self, _: &InvoiceRequest) -> Result<Invoice, AppError> {
+            unreachable!()
+        }
+        async fn get_invoice(&self, _: &str) -> Result<Invoice, AppError> {
+            unreachable!()
+        }
+    }
+
+    fn rails(kinds: &[&'static str]) -> PaymentRails {
+        PaymentRails {
+            rails: kinds
+                .iter()
+                .map(|k| PaymentRail {
+                    provider: Arc::new(Fake(k)),
+                    assets: vec![],
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn no_choice_means_the_primary() {
+        let r = rails(&["btcpay", "xmrcheckout"]);
+        assert_eq!(r.select(None).map(|x| x.kind()), Some("btcpay"));
+    }
+
+    #[test]
+    fn an_unknown_rail_is_refused_not_defaulted() {
+        // Asking for a coin this instance cannot take must not quietly mint an
+        // invoice in a different coin.
+        let r = rails(&["btcpay", "xmrcheckout"]);
+        assert!(r.select(Some("wowcheckout")).is_none());
+    }
+
+    #[test]
+    fn an_invoice_is_polled_where_it_was_minted() {
+        let r = rails(&["btcpay", "xmrcheckout", "wowcheckout"]);
+        for k in ["btcpay", "xmrcheckout", "wowcheckout"] {
+            assert_eq!(r.for_invoice(k).map(|x| x.kind()), Some(k));
+        }
+        assert!(r.for_invoice("retired-processor").is_none());
+    }
+}

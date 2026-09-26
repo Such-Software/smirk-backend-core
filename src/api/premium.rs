@@ -26,6 +26,10 @@ use crate::AppState;
 pub struct InvoiceReq {
     /// Plan id (see `/capabilities` → `premium.plans`), e.g. `quarter`.
     pub plan: String,
+    /// Payment rail (see `/capabilities` → `premium.rails[].id`). Omitted means
+    /// the primary rail, which is how clients before rails behaved.
+    #[serde(default)]
+    pub rail: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -36,6 +40,8 @@ pub struct InvoiceResp {
     pub plan: String,
     pub amount: String,
     pub currency: String,
+    /// The rail the invoice was minted on.
+    pub rail: String,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -146,10 +152,16 @@ pub async fn invoice(
         ));
     }
 
-    let provider = state
-        .payment
-        .as_ref()
-        .ok_or_else(|| AppError::Internal("payment provider not configured".into()))?;
+    let rail = state
+        .payment_rails
+        .select(req.rail.as_deref().map(str::trim))
+        .ok_or_else(|| match req.rail {
+            // Named a rail this instance does not offer: refuse rather than mint
+            // an invoice in a coin the user did not choose.
+            Some(_) => AppError::ValidationError("That payment method is not available.".into()),
+            None => AppError::Internal("payment provider not configured".into()),
+        })?;
+    let provider = &rail.provider;
 
     let pay = &state.cfg().registration.payment;
     let currency = state.cfg().premium.currency.clone();
@@ -182,6 +194,7 @@ pub async fn invoice(
         plan: plan.id.clone(),
         amount: plan.amount.clone(),
         currency,
+        rail: provider.kind().to_string(),
     }))
 }
 
@@ -207,11 +220,6 @@ pub async fn activate(
     let user_id = extract_user_id_from_token(&state, &headers).await?;
     ensure_enabled(&state)?;
 
-    let provider = state
-        .payment
-        .as_ref()
-        .ok_or_else(|| AppError::Internal("payment provider not configured".into()))?;
-
     let id = req.invoice_id.trim();
     let uid = user_id.to_string();
 
@@ -231,8 +239,19 @@ pub async fn activate(
         ));
     }
 
-    // Source of truth: the processor. Only Settled grants (paid in full per policy).
-    let inv = provider.get_invoice(id).await?;
+    // Source of truth: the processor THAT MINTED IT. Only Settled grants.
+    let rail = state
+        .payment_rails
+        .for_invoice(&row.provider)
+        .ok_or_else(|| {
+            // The rail was switched off after this invoice was minted. Refuse
+            // and keep the invoice unconsumed, so re-enabling the rail lets the
+            // user redeem it rather than losing what they paid.
+            AppError::ValidationError(
+                "This invoice's payment method is currently unavailable. Try again later.".into(),
+            )
+        })?;
+    let inv = rail.provider.get_invoice(id).await?;
     if inv.status != InvoiceStatus::Settled {
         return Err(AppError::ValidationError(
             "Payment not yet confirmed. Complete the payment and retry.".into(),

@@ -79,6 +79,9 @@ pub async fn try_app_with(mutate: impl FnOnce(&mut Config)) -> Option<TestApp> {
     let chains = ChainClients::from_config(&config).expect("build chain clients");
     let payment =
         smirk_backend_core::infra::payment::from_config(&config).expect("build payment provider");
+    let payment_rails =
+        smirk_backend_core::infra::payment::rails_from_config(&config, payment.as_ref())
+            .expect("build payment rails");
     let relay =
         smirk_backend_core::infra::relay::from_config(&config).expect("build relay provider");
     let prices = Arc::new(tokio::sync::RwLock::new(
@@ -98,6 +101,7 @@ pub async fn try_app_with(mutate: impl FnOnce(&mut Config)) -> Option<TestApp> {
         sessions,
         chains,
         payment,
+        payment_rails,
         relay,
         web_challenges: Arc::default(),
         prices,

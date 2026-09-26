@@ -23,6 +23,9 @@ pub struct PremiumInvoiceRow {
     pub period_days: i32,
     pub amount: String,
     pub currency: String,
+    /// The rail that minted it (`btcpay`, `xmrcheckout`, ...): activation polls
+    /// this processor, never whichever one happens to be primary today.
+    pub provider: String,
     /// `None` while unspent; set once when the invoice extends premium.
     pub consumed_at: Option<DateTime<Utc>>,
 }
@@ -73,17 +76,27 @@ impl Database {
                 i32,
                 String,
                 String,
+                String,
                 Option<DateTime<Utc>>,
             ),
         >(
-            "SELECT invoice_id, user_id, plan_id, period_days, amount, currency, consumed_at \
+            "SELECT invoice_id, user_id, plan_id, period_days, amount, currency, provider, consumed_at \
              FROM premium_invoices WHERE invoice_id = $1",
         )
         .bind(invoice_id)
         .fetch_optional(self.pool())
         .await?;
         Ok(row.map(
-            |(invoice_id, user_id, plan_id, period_days, amount, currency, consumed_at)| {
+            |(
+                invoice_id,
+                user_id,
+                plan_id,
+                period_days,
+                amount,
+                currency,
+                provider,
+                consumed_at,
+            )| {
                 PremiumInvoiceRow {
                     invoice_id,
                     user_id,
@@ -91,6 +104,7 @@ impl Database {
                     period_days,
                     amount,
                     currency,
+                    provider,
                     consumed_at,
                 }
             },

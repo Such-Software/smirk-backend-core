@@ -73,6 +73,9 @@ pub struct AppState {
     /// Payment processor backing the optional pay-to-register gate; `Some` only
     /// when `REGISTRATION_REQUIRE_PAYMENT` is on.
     pub payment: Option<Arc<dyn crate::infra::payment::PaymentProvider>>,
+    /// Every processor premium may invoice through, primary first. Empty unless
+    /// premium is on.
+    pub payment_rails: crate::infra::payment::PaymentRails,
     /// Optional first-party Nostr relay (messaging plane); `Some` only when
     /// `RELAY_ENABLED` is on. Advertised via `/capabilities` + NIP-05 hints.
     pub relay: Option<Arc<dyn crate::infra::relay::RelayProvider>>,

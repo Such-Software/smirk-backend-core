@@ -66,6 +66,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let chains = ChainClients::from_config(&config)?;
     // Payment processor for the pay-to-register gate (None unless it's enabled).
     let payment = smirk_backend_core::infra::payment::from_config(&config)?;
+    let payment_rails =
+        smirk_backend_core::infra::payment::rails_from_config(&config, payment.as_ref())?;
     // Optional Nostr relay (messaging plane); None unless RELAY_ENABLED.
     let relay = smirk_backend_core::infra::relay::from_config(&config)?;
 
@@ -129,6 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sessions,
         chains,
         payment,
+        payment_rails,
         relay,
         web_challenges: Arc::default(),
         prices: prices_cache,

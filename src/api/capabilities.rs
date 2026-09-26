@@ -123,6 +123,19 @@ pub struct PremiumCapability {
     pub plans: Vec<PremiumPlanInfo>,
     /// The relay premium posting targets (mirrors `messaging.relay_url`).
     pub relay_url: String,
+    /// Ways to pay, primary first. Pass `id` as `rail` to `/premium/invoice`.
+    pub rails: Vec<PremiumRailInfo>,
+}
+
+/// One way to pay for premium.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct PremiumRailInfo {
+    /// Rail id, e.g. `btcpay`, `xmrcheckout`, `wowcheckout`.
+    pub id: String,
+    /// Assets this rail takes, e.g. `["BTC","LTC"]`. Empty means the operator
+    /// did not declare them; the wallet should then show the rail unlabelled
+    /// rather than guess.
+    pub assets: Vec<String>,
 }
 
 /// Public curated feed details (present only when `features.feed`). A read-only
@@ -375,6 +388,7 @@ pub fn effective_capabilities(config: &Config) -> CapabilitiesResponse {
                 })
                 .collect(),
             relay_url: config.messaging.relay.advertised_url.clone(),
+            rails: premium_rails(config),
         }),
         feed: feed_advertised(config).then(|| {
             let f = &config.feed;
@@ -399,6 +413,21 @@ fn relay_advertised(config: &Config) -> bool {
 
 /// Whether the premium tier is enabled AND the relay it gates is advertised
 /// (config validation already couples premium to relay + the premium-post policy).
+/// The premium rails, derived from config alone so capabilities never depends
+/// on a processor being reachable. Mirrors `payment::rails_from_config` order.
+fn premium_rails(config: &Config) -> Vec<PremiumRailInfo> {
+    let primary = PremiumRailInfo {
+        id: config.registration.payment.provider.clone(),
+        assets: config.premium.primary_assets.clone(),
+    };
+    std::iter::once(primary)
+        .chain(config.premium.rails.iter().map(|r| PremiumRailInfo {
+            id: r.kind.to_string(),
+            assets: vec![r.asset.to_string()],
+        }))
+        .collect()
+}
+
 fn premium_advertised(config: &Config) -> bool {
     config.premium.enabled && relay_advertised(config)
 }

@@ -692,6 +692,96 @@ pub struct PremiumConfig {
     pub enabled: bool,
     pub currency: String,
     pub plans: Vec<PremiumPlan>,
+    /// Assets the PRIMARY processor (`registration.payment`) accepts, as the
+    /// wallet should label it (`PAYMENT_ASSETS`, e.g. `BTC,LTC,GRIN`). Display
+    /// only: the processor decides what it will actually take.
+    pub primary_assets: Vec<String>,
+    /// Additional Greenfield-compatible processors premium may invoice through,
+    /// one per rail. Registration never uses these; it keeps the primary.
+    pub rails: Vec<PaymentRailConfig>,
+}
+
+/// One additional BTCPay-Greenfield-compatible processor, for premium only.
+///
+/// xmrcheckout and wowcheckout implement the same two invoice routes as BTCPay
+/// Server, so the existing adapter serves them unchanged. They exist because
+/// BTCPay itself cannot take Wownero, and this operator runs Monero through its
+/// own checkout rather than the BTCPay plugin. Each rail is its own store with
+/// its own key: sharing one across processors would couple their rotation.
+#[derive(Clone)]
+pub struct PaymentRailConfig {
+    /// Stable rail id, persisted on the invoice row so activation polls the
+    /// processor that minted it.
+    pub kind: &'static str,
+    /// The one asset this rail accepts, as the wallet should label it.
+    pub asset: &'static str,
+    pub provider_url: String,
+    pub store_id: String,
+    pub api_key: String,
+}
+
+/// The checkout rails an operator can enable, as (kind, asset, env prefix).
+/// The kind strings are persisted on invoice rows: never rename one.
+pub const CHECKOUT_RAILS: &[(&str, &str, &str)] = &[
+    ("xmrcheckout", "XMR", "PAYMENT_XMRCHECKOUT"),
+    ("wowcheckout", "WOW", "PAYMENT_WOWCHECKOUT"),
+];
+
+/// Refuse a checkout rail that cannot work. All three values or none, https in
+/// production, and a key that is neither short nor a placeholder. Each refusal
+/// names the rail's variables, so the operator knows which rail is broken.
+fn validate_rail(rail: &PaymentRailConfig, prod: bool) -> Result<(), AppError> {
+    let prefix = CHECKOUT_RAILS
+        .iter()
+        .find(|(k, _, _)| *k == rail.kind)
+        .map(|(_, _, p)| *p)
+        .unwrap_or("PAYMENT_RAIL");
+    if rail.provider_url.trim().is_empty() || rail.store_id.trim().is_empty() {
+        return Err(cfg_err(format!(
+            "{prefix}_URL and {prefix}_STORE_ID must both be set to enable the {} rail, \
+             or {prefix}_* left entirely unset",
+            rail.kind
+        )));
+    }
+    if prod && !rail.provider_url.starts_with("https://") && !is_loopback_url(&rail.provider_url) {
+        return Err(cfg_err(format!(
+            "{prefix}_URL must be https:// in production (loopback exempt)"
+        )));
+    }
+    if rail.api_key.len() < 8 {
+        return Err(cfg_err(format!(
+            "{prefix}_API_KEY must be set and at least 8 bytes"
+        )));
+    }
+    if prod && looks_placeholder(&rail.api_key) {
+        return Err(cfg_err(format!(
+            "{prefix}_API_KEY looks like a placeholder; set a real value"
+        )));
+    }
+    Ok(())
+}
+
+/// Read the checkout rails from `<PREFIX>_URL`, `<PREFIX>_STORE_ID` and
+/// `<PREFIX>_API_KEY`. A rail with none of the three is simply off. A rail with
+/// SOME of them is kept here so `validate()` can refuse it by name: a partial
+/// rail is an operator mistake, and dropping it silently would advertise a coin
+/// that then cannot be paid.
+fn parse_checkout_rails() -> Vec<PaymentRailConfig> {
+    CHECKOUT_RAILS
+        .iter()
+        .filter_map(|&(kind, asset, prefix)| {
+            let url = env_or(&format!("{prefix}_URL"), "");
+            let store = env_or(&format!("{prefix}_STORE_ID"), "");
+            let key = env_or(&format!("{prefix}_API_KEY"), "");
+            (!url.is_empty() || !store.is_empty() || !key.is_empty()).then_some(PaymentRailConfig {
+                kind,
+                asset,
+                provider_url: url,
+                store_id: store,
+                api_key: key,
+            })
+        })
+        .collect()
 }
 
 /// Parse `PREMIUM_PLANS` = comma-separated `id:days:amount` entries (e.g.
@@ -1018,6 +1108,11 @@ impl Config {
                 enabled: env_bool("PREMIUM_ENABLED", false),
                 currency: env_or("PREMIUM_CURRENCY", "").to_uppercase(),
                 plans: parse_premium_plans(&env_or("PREMIUM_PLANS", "")),
+                primary_assets: env_list("PAYMENT_ASSETS")
+                    .into_iter()
+                    .map(|a| a.to_uppercase())
+                    .collect(),
+                rails: parse_checkout_rails(),
             },
             feed: FeedConfig {
                 enabled: env_bool("FEED_ENABLED", false),
@@ -1493,6 +1588,9 @@ impl Config {
                     )));
                 }
             }
+            for rail in &self.premium.rails {
+                validate_rail(rail, prod)?;
+            }
         }
 
         Ok(())
@@ -1663,6 +1761,8 @@ impl Config {
                 enabled: false,
                 currency: String::new(),
                 plans: Vec::new(),
+                primary_assets: Vec::new(),
+                rails: Vec::new(),
             },
             feed: FeedConfig {
                 enabled: false,
@@ -2217,6 +2317,79 @@ mod tests {
         );
         assert_eq!(p[1].id, "year");
         assert!(parse_premium_plans("").is_empty());
+    }
+
+    fn checkout_rail(kind: &'static str) -> PaymentRailConfig {
+        PaymentRailConfig {
+            kind,
+            asset: "XMR",
+            provider_url: "https://checkout.example.org".into(),
+            store_id: "merchant-1".into(),
+            api_key: "xmrcheckout_realkeyvalue0123456789".into(),
+        }
+    }
+
+    #[test]
+    fn a_complete_checkout_rail_passes() {
+        let mut c = valid();
+        wire_premium(&mut c);
+        c.premium.rails = vec![checkout_rail("xmrcheckout"), checkout_rail("wowcheckout")];
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn a_half_configured_rail_is_refused_by_name() {
+        // A rail with a key but no URL would be advertised and then fail every
+        // invoice. The refusal names the rail so the operator knows which one.
+        for strip in ["url", "store", "key"] {
+            let mut c = valid();
+            wire_premium(&mut c);
+            let mut r = checkout_rail("wowcheckout");
+            match strip {
+                "url" => r.provider_url.clear(),
+                "store" => r.store_id.clear(),
+                _ => r.api_key.clear(),
+            }
+            c.premium.rails = vec![r];
+            let err = c
+                .validate()
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            assert!(err.contains("WOWCHECKOUT"), "missing {strip}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_rail_is_https_in_production_only() {
+        let mut r = checkout_rail("xmrcheckout");
+        r.provider_url = "http://checkout.example.org".into();
+        let err = validate_rail(&r, true)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(err.contains("XMRCHECKOUT_URL"), "{err}");
+        assert!(
+            validate_rail(&r, false).is_ok(),
+            "plain http is fine off production"
+        );
+        r.provider_url = "http://127.0.0.1:8080".into();
+        assert!(validate_rail(&r, true).is_ok(), "loopback is exempt");
+    }
+
+    #[test]
+    fn rail_kinds_are_unique_and_stable() {
+        // Kinds are persisted on invoice rows; a duplicate would route one
+        // processor's invoices to another.
+        let mut kinds: Vec<_> = CHECKOUT_RAILS.iter().map(|(k, _, _)| *k).collect();
+        let n = kinds.len();
+        kinds.sort();
+        kinds.dedup();
+        assert_eq!(kinds.len(), n);
+        assert!(
+            !kinds.contains(&"btcpay"),
+            "a checkout rail must not collide with the primary"
+        );
     }
 
     #[test]

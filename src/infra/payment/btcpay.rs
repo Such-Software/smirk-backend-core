@@ -20,7 +20,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tracing::instrument;
 
 use super::{Invoice, InvoiceRequest, InvoiceStatus, PaymentProvider};
-use crate::config::PaymentConfig;
+use crate::config::{PaymentConfig, PaymentRailConfig};
 use crate::core::secret::Secret;
 use crate::error::AppError;
 
@@ -32,6 +32,12 @@ const MAX_BODY_BYTES: usize = 1024 * 1024;
 /// A BTCPay-compatible invoice processor (one store).
 #[derive(Clone)]
 pub struct BtcPayProvider {
+    /// Rail id persisted on invoice rows (`btcpay`, `xmrcheckout`, ...).
+    kind: &'static str,
+    /// Also send the exact `checkout.confirmationsRequired`. The checkout apps
+    /// honour an exact count; BTCPay Server has only `speedPolicy` buckets, so
+    /// it is not sent there rather than trusting BTCPay to ignore it.
+    exact_confirmations: bool,
     /// Base URL, no trailing slash (e.g. `https://pay.example.org`).
     base_url: String,
     store_id: String,
@@ -43,15 +49,45 @@ impl BtcPayProvider {
     /// Build from the pay-to-register config. Assumes the config was validated
     /// (non-empty URL/store/key); a malformed HTTP client build fails closed.
     pub fn new(cfg: &PaymentConfig) -> Result<Self, AppError> {
+        Self::build(
+            "btcpay",
+            false,
+            &cfg.provider_url,
+            &cfg.store_id,
+            &cfg.api_key,
+        )
+    }
+
+    /// Build a checkout rail (xmrcheckout / wowcheckout): same Greenfield
+    /// routes, its own store and key, and an exact confirmation count.
+    pub fn checkout_rail(rail: &PaymentRailConfig) -> Result<Self, AppError> {
+        Self::build(
+            rail.kind,
+            true,
+            &rail.provider_url,
+            &rail.store_id,
+            &rail.api_key,
+        )
+    }
+
+    fn build(
+        kind: &'static str,
+        exact_confirmations: bool,
+        url: &str,
+        store_id: &str,
+        api_key: &str,
+    ) -> Result<Self, AppError> {
         let http = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .map_err(|_| AppError::ConfigError("failed to build payment HTTP client".into()))?;
         Ok(Self {
-            base_url: cfg.provider_url.trim_end_matches('/').to_string(),
-            store_id: cfg.store_id.clone(),
-            api_key: Secret::new(cfg.api_key.clone()),
+            kind,
+            exact_confirmations,
+            base_url: url.trim_end_matches('/').to_string(),
+            store_id: store_id.to_string(),
+            api_key: Secret::new(api_key.to_string()),
             http,
         })
     }
@@ -161,7 +197,7 @@ impl BtcPayProvider {
 #[async_trait::async_trait]
 impl PaymentProvider for BtcPayProvider {
     fn kind(&self) -> &'static str {
-        "btcpay"
+        self.kind
     }
 
     #[instrument(skip(self, req), fields(store = %self.store_id))]
@@ -174,6 +210,7 @@ impl PaymentProvider for BtcPayProvider {
             checkout: BtcPayCheckout {
                 speed_policy: Self::speed_policy(req.confirmations),
                 expiration_minutes: req.expires_minutes,
+                confirmations_required: self.exact_confirmations.then_some(req.confirmations),
             },
         };
         let resp: BtcPayInvoiceResp = self.post_json(url, "create_invoice", &body).await?;
@@ -209,6 +246,8 @@ struct BtcPayCreateReq<'a> {
 struct BtcPayCheckout {
     speed_policy: &'static str,
     expiration_minutes: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confirmations_required: Option<u32>,
 }
 
 /// The subset of a BTCPay invoice we consume. Extra fields are ignored.
@@ -359,6 +398,7 @@ mod tests {
             checkout: BtcPayCheckout {
                 speed_policy: "MediumSpeed",
                 expiration_minutes: 60,
+                confirmations_required: None,
             },
         };
         let v = serde_json::to_value(&body).unwrap();
@@ -367,5 +407,48 @@ mod tests {
         assert_eq!(v["metadata"]["smirkBind"], "abc");
         assert_eq!(v["checkout"]["speedPolicy"], "MediumSpeed");
         assert_eq!(v["checkout"]["expirationMinutes"], 60);
+    }
+
+    #[test]
+    fn btcpay_server_is_not_sent_an_exact_confirmation_count() {
+        // BTCPay Server expresses finality only as speedPolicy buckets, so the
+        // field is omitted rather than trusting BTCPay to ignore it.
+        let c = BtcPayCheckout {
+            speed_policy: "MediumSpeed",
+            expiration_minutes: 60,
+            confirmations_required: None,
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert!(v.get("confirmationsRequired").is_none());
+    }
+
+    #[test]
+    fn a_checkout_rail_is_sent_the_exact_count() {
+        let c = BtcPayCheckout {
+            speed_policy: "LowMediumSpeed",
+            expiration_minutes: 60,
+            confirmations_required: Some(3),
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["confirmationsRequired"], 3);
+        // speedPolicy still rides along; the checkouts accept and ignore it.
+        assert!(v.get("speedPolicy").is_some());
+    }
+
+    #[test]
+    fn each_rail_reports_its_own_kind() {
+        // The kind is persisted on the invoice row and routes activation, so two
+        // rails must never report the same one.
+        let rail = |kind| crate::config::PaymentRailConfig {
+            kind,
+            asset: "XMR",
+            provider_url: "https://pay.example.org".into(),
+            store_id: "s".into(),
+            api_key: "xmrcheckout_secretkey".into(),
+        };
+        let x = BtcPayProvider::checkout_rail(&rail("xmrcheckout")).unwrap();
+        let w = BtcPayProvider::checkout_rail(&rail("wowcheckout")).unwrap();
+        assert_ne!(x.kind(), w.kind());
+        assert!(x.exact_confirmations && w.exact_confirmations);
     }
 }
