@@ -213,7 +213,7 @@ async fn list_keys(db: &Database) -> Result<(), String> {
         println!(
             "{}  {}  {:<7}  added {}",
             k.id,
-            &k.pubkey,
+            k.pubkey,
             status,
             k.created_at.to_rfc3339()
         );

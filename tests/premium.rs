@@ -33,10 +33,10 @@ async fn activate_premium_is_single_use_and_stacks() {
     // Unique per run so the suite is re-runnable against a persistent test DB.
     let inv_a = format!("inv-a-{}", Uuid::new_v4());
     let inv_b = format!("inv-b-{}", Uuid::new_v4());
-    db.insert_premium_invoice(&inv_a, user_id, "btcpay", "quarter", 90, "5", "USD")
+    db.insert_premium_invoice(&inv_a, user_id, "btcpay", "quarter", 90, "5", "USD", 60)
         .await
         .unwrap();
-    db.insert_premium_invoice(&inv_b, user_id, "btcpay", "quarter", 90, "5", "USD")
+    db.insert_premium_invoice(&inv_b, user_id, "btcpay", "quarter", 90, "5", "USD", 60)
         .await
         .unwrap();
     assert_eq!(
@@ -81,7 +81,7 @@ async fn activate_premium_rejects_cross_user_invoice() {
     let owner = app.create_user().await;
     let attacker = app.create_user().await;
     let inv_x = format!("inv-x-{}", Uuid::new_v4());
-    db.insert_premium_invoice(&inv_x, owner, "btcpay", "quarter", 90, "5", "USD")
+    db.insert_premium_invoice(&inv_x, owner, "btcpay", "quarter", 90, "5", "USD", 60)
         .await
         .unwrap();
 
@@ -154,4 +154,33 @@ async fn premium_endpoints_gated_off_by_default() {
         .request("GET", "/api/v1/premium/status", None, None)
         .await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn expired_checkout_frees_capacity_without_losing_paid_redemption() {
+    let app = require_app!();
+    let db = &app.state.db;
+    let user = app.create_user().await;
+    let expired = format!("expired-{}", Uuid::new_v4());
+    let active = format!("active-{}", Uuid::new_v4());
+    db.insert_premium_invoice(&expired, user, "btcpay", "year", 365, "5", "USD", 60)
+        .await
+        .unwrap();
+    db.insert_premium_invoice(&active, user, "btcpay", "year", 365, "5", "USD", 60)
+        .await
+        .unwrap();
+    let before = db.count_unconsumed_premium_invoices(user).await.unwrap();
+    sqlx::query("UPDATE premium_invoices SET expires_at = NOW() - INTERVAL '1 second' WHERE invoice_id = $1")
+        .bind(&expired).execute(db.pool()).await.unwrap();
+    let after = db.count_unconsumed_premium_invoices(user).await.unwrap();
+    assert!(after < before, "expired checkout releases its pending slot");
+    assert!(after > 0, "live checkout still occupies its slot");
+    assert!(db.get_premium_invoice(&expired).await.unwrap().is_some());
+    // The activation endpoint still requires processor settlement. Once that
+    // proof arrives, checkout expiration must not destroy a paid entitlement.
+    assert!(db
+        .activate_premium(&expired, user, 365)
+        .await
+        .unwrap()
+        .is_some());
 }

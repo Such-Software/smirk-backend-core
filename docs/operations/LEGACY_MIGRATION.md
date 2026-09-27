@@ -1,4 +1,12 @@
-# Legacy (v0.2.x → v0.3) user migration
+# Offline legacy identity import
+
+> Status: stable · Updated 2026-09-27 · Applies to: offline identity-import CLI
+
+This is an offline import procedure for independently operated instances. It is
+separate from the runtime, proof-bound legacy sign-in adoption implemented in
+`src/infra/legacy_directory.rs` and the authentication handlers. Do not use an
+offline import to merge live databases with colliding identities or handles.
+Company production changes require reviewed Fleet plan/apply procedures.
 
 `smirk-admin migrate-legacy` imports **user identity** from a legacy v0.2.x Smirk
 backend database into this v0.3 backend, so users keep their handle (and their
@@ -24,7 +32,7 @@ rotation:
 | `nostr_pubkey` | ✅ | preserves an already-linked Nostr identity; dropped only if that npub is already linked to a *different* v0.3 user (they re-link on v0.3) |
 | `wallet_birthday`, `xmr_start_height`, `wow_start_height` | ✅ | bound the first chain scan |
 | socials (telegram/discord/twitter/…) | ❌ | v0.3 identity is Nostr-native; there are no social columns to import into |
-| tips / tip-links | ❌ | the v0.3 public backend has no tips subsystem |
+| tips / tip-links | ❌ | v0.3 has a separate social-tips subsystem; this identity importer does not migrate tip state |
 | `user_keys` / `wallets` | ❌ | the v0.3 client re-registers these at v3 derivation on first unlock; importing legacy (possibly v1/v2) keys would just plant stale rows |
 
 `pubkey_hash` and `seed_fingerprint` are **peppered at rest** by the DB layer, so

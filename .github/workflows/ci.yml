@@ -92,10 +92,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # landing is here, not only in the DB-less job, because the public stats
-      # block reads the database: without a DB those tests self-skip and the
-      # "no identifier on the public surface" assertion never actually runs.
-      - run: cargo test --locked --test auth_flow --test db_queries --test landing
+      # Run every integration target with Postgres. A hand-picked list silently
+      # skips payment, registration, wallet and admin tests in the DB-less job.
+      - run: cargo test --locked --tests
 
   supply-chain:
     name: cargo-deny

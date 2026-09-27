@@ -1423,6 +1423,11 @@ impl Config {
             // — a settled-then-reversed free registration. An on-chain gate must
             // require at least one confirmation. (A genuinely-final 0-conf rail
             // like Lightning would be a different provider, not this one.)
+            if p.confirmations > 6 {
+                return Err(cfg_err(
+                    "PAYMENT_CONFIRMATIONS exceeds BTCPay's maximum of 6 per invoice",
+                ));
+            }
             if p.confirmations == 0 {
                 return Err(cfg_err(
                     "PAYMENT_CONFIRMATIONS must be >= 1 (0-conf lets a settled payment be \
@@ -1539,6 +1544,11 @@ impl Config {
             // block. A 0-conf invoice settles on first mempool sighting and can
             // then be double-spent AWAY after the premium grant; a 0/oversize
             // expiry is a malformed invoice window.
+            if p.confirmations > 6 {
+                return Err(cfg_err(
+                    "PAYMENT_CONFIRMATIONS exceeds BTCPay's maximum of 6 per invoice",
+                ));
+            }
             if p.confirmations == 0 {
                 return Err(cfg_err(
                     "PAYMENT_CONFIRMATIONS must be >= 1 when PREMIUM_ENABLED is on \
@@ -2452,6 +2462,21 @@ mod tests {
         wire_premium(&mut c);
         c.registration.payment.confirmations = 0;
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn payment_confirmation_policy_must_be_representable() {
+        for confirmations in [7, 100, u32::MAX] {
+            let mut registration = valid();
+            registration.registration.payment = valid_payment();
+            registration.registration.payment.confirmations = confirmations;
+            assert!(registration.validate().is_err());
+
+            let mut premium = valid();
+            wire_premium(&mut premium);
+            premium.registration.payment.confirmations = confirmations;
+            assert!(premium.validate().is_err());
+        }
     }
 
     #[test]

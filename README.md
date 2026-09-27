@@ -1,5 +1,7 @@
 # smirk-backend-core
 
+> Status: stable · Updated 2026-09-27 · Applies to: backend v0.3.0 source
+
 Open, self-hostable backend for the [Smirk](https://smirk.cash) non-custodial
 multi-chain wallet. Rust + Axum + PostgreSQL.
 
@@ -8,17 +10,17 @@ estimation, broadcast), Nostr-native identity, a fiat price feed, an async
 Grin slatepack relay, and a public social-tips subsystem, all **without ever
 holding a spend key or seed**. Run your own; the wallet is backend-agnostic.
 
-> **Status:** v0.3.0 — feature-complete and security-reviewed, but young. The
-> schema/API may still evolve. Run your own chain backends where you can, review
-> the code, and treat early deployments accordingly.
+The source targets v0.3.0. Release readiness depends on the checks for the exact
+candidate and its deployment evidence; the version number is not an audit or a
+deployment record.
 
 ## Non-custodial by construction
 
-The server stores **public addresses, public keys, and (for Monero/Wownero)
-incoming view keys only** — never a spend key, never a seed. View credentials are
-**forwarded per request** to the chain backends that scan with them and are not
-persisted here. The wallet signs and broadcasts locally; the backend reads chains
-and relays bytes.
+The backend stores public addresses and identity keys. For Monero and Wownero,
+it receives private incoming view keys and forwards them to the light wallet
+server, which stores them to scan incoming payments. The backend does not persist
+those view keys in its own database. Spend keys and seeds remain on the client.
+The wallet signs locally, and the backend relays signed transactions to the chain.
 
 ## Chains
 
@@ -35,7 +37,8 @@ is reported `enabled: false` by `/capabilities` rather than failing at call time
 
 The HTTP contract is generated from the handlers and committed to
 [`openapi.json`](openapi.json) — the single source of truth for the API and the
-wallet's generated client. A CI gate fails the build on any drift.
+wallet's generated client. The declared workflow checks regeneration for drift;
+release evidence must confirm that the workflow actually ran for the candidate.
 
 Public surface (`/api/v1`):
 
@@ -124,8 +127,9 @@ then authenticates with the matching key over NIP-98. Full deployment guide:
   are cryptographically distinct from user tokens.
 - **Bounded, hardened upstream I/O** — TLS with hostname verification, streaming
   size caps, and per-request timeouts on every external call.
-- **Adversarially reviewed** — every security-critical subsystem was built clean
-  (never ported) and put through a multi-agent adversarial review before landing.
+- **Verification**: unit tests, database integration tests, schema drift checks,
+  and dependency checks cover different failure modes. Passing them is not a
+  claim of an independent security audit.
 
 Report vulnerabilities privately — see [SECURITY.md](SECURITY.md). Please do not
 open public issues for security reports.
@@ -134,13 +138,26 @@ open public issues for security reports.
 
 ```sh
 cargo test                                        # unit + doc tests (no database needed)
-TEST_DATABASE_URL=postgres://… cargo test --tests # + L1 integration against Postgres
+cargo test --tests # L1 integration, with TEST_DATABASE_URL supplied privately
 ```
 
-Integration tests self-skip when `TEST_DATABASE_URL` is unset. They use only
+Database integration tests self-skip when `TEST_DATABASE_URL` is unset. CI's
+Postgres job supplies it and runs every integration target. A local pass without
+that variable does not verify database behavior. The tests use only
 deterministic, non-sensitive test secrets and ephemeral identities — never a
 funded or otherwise sensitive wallet seed.
 
 ## License
 
 [MIT](LICENSE) © Such Software LLC — run it, embed it, modify it. Built for interop.
+
+## Verification checklist
+
+- [ ] Build and test the exact release candidate with the locked dependencies.
+- [ ] Run all database integration tests against a disposable PostgreSQL database.
+- [ ] Regenerate OpenAPI and the console bundle from their sources and check drift.
+- [ ] Verify each enabled chain against its configured source.
+- [ ] Use reviewed Fleet plan/apply procedures for company production deployments.
+
+Backend CI and private Linux candidate provenance are described in
+[Building the backend](docs/operations/BUILDING.md).

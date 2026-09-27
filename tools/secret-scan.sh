@@ -11,10 +11,15 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-if git rev-parse --is-inside-work-tree >/dev/null 2>&1 && [ -n "$(git ls-files)" ]; then
-  mapfile -t FILES < <(git ls-files)
+FILES=()
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  while IFS= read -r -d '' file; do
+    FILES+=("$file")
+  done < <(git ls-files -z --cached --others --exclude-standard)
 else
-  mapfile -t FILES < <(find . -type f -not -path './.git/*' -not -path './target/*' -printf '%P\n')
+  while IFS= read -r -d '' file; do
+    FILES+=("$file")
+  done < <(find . -type f -not -path './.git/*' -not -path './target/*' -print0)
 fi
 
 # Secret shapes (not names), covering the classes this backend actually handles:
@@ -41,7 +46,8 @@ for f in "${FILES[@]}"; do
   case "$f" in tools/secret-scan.sh) continue ;; esac
   if grep -EnI "$PATTERNS" "$f" >/dev/null 2>&1; then
     echo "SECRET-SCAN: possible key/seed material in $f"
-    grep -EnI "$PATTERNS" "$f" | sed 's/^/    /'
+    # Report locations without echoing the secret-shaped value we caught.
+    grep -EnI "$PATTERNS" "$f" | cut -d: -f1 | sed 's/^/    line /'
     fail=1
   fi
 done

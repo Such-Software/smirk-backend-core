@@ -1,5 +1,7 @@
 # Privacy Policy
 
+> Status: stable · Updated 2026-09-27 · Applies to: backend data handling
+
 The canonical Smirk privacy policy lives at **https://smirk.cash/privacy** and
 describes the data practices of the instance operated by Such Software LLC
 (api.smirk.cash).
@@ -13,12 +15,16 @@ speak for you. What your instance receives from wallets that connect to it:
 - **Monero/Wownero view keys** (to scan for users' incoming funds; a view key
   cannot spend) and their scan/registration state.
 - **Public addresses** for BTC/LTC balance lookups and **signed transactions** to
-  broadcast. Recipient address and amount are not sent on broadcast.
-- A one-way **seed fingerprint** (SHA-256) as a non-reversible wallet identifier.
+  broadcast. A signed Bitcoin or Litecoin transaction contains its output
+  addresses and amounts; sending it through the backend exposes those public
+  transaction fields to the backend.
+- A client-derived **seed fingerprint** used to locate a returning wallet. The
+  backend stores an HMAC of it under an instance-specific pepper, rather than
+  the client value. A fingerprint is not a seed or proof of ownership.
 - If enabled: the **username to npub** mapping published in your NIP-05 directory,
   and, for the relay, encrypted message envelopes (ciphertext only).
-- IP addresses **never in raw form**. The per-IP rate limiter keeps its counters
-  in memory, and the only IP-derived value written to disk is a salted one-way
+- Client IP addresses for rate limiting. The application keeps its rate-limit
+  counters in memory; its persisted restore-attempt identifier is a salted one-way
   hash on `restore_attempts`, which the seed-restore abuse limiter reads back.
   Login events record no IP at all, and the raw-IP columns that older schemas
   carried on `sessions` and `audit_logs` were dropped in migration
@@ -26,7 +32,11 @@ speak for you. What your instance receives from wallets that connect to it:
   than your users: the tamper-evident operator audit chain (`admin_audit_logs`)
   records the IP of privileged admin actions.
 
-Private keys and seed phrases are never transmitted to the backend.
+Private spend keys and seed phrases are never transmitted to the backend.
+Monero and Wownero private incoming view keys are transmitted for scanning, and
+the configured light wallet servers retain them. They reveal incoming payments
+but cannot spend funds. Reverse proxies and chain services have their own logging
+and retention settings, which operators must disclose separately.
 
 ## Retention
 
@@ -49,3 +59,10 @@ how you handle this data, your retention, and your jurisdiction. The knobs that
 affect retention and data exposure (login-event and audit retention, erasure,
 relay retention, landing-page exposure) are documented in
 [docs/operations/CONSOLE.md](docs/operations/CONSOLE.md) and the root `.env.example`.
+
+## Operator checklist
+
+- [ ] Document the light wallet servers that receive and retain view credentials.
+- [ ] Match proxy and chain-service logging to the published privacy policy.
+- [ ] Configure retention and test account export and erasure.
+- [ ] Keep spend keys and recovery phrases on clients.
