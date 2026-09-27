@@ -158,3 +158,6 @@ funded or otherwise sensitive wallet seed.
 - [ ] Regenerate OpenAPI and the console bundle from their sources and check drift.
 - [ ] Verify each enabled chain against its configured source.
 - [ ] Use reviewed Fleet plan/apply procedures for company production deployments.
+
+Backend CI and private Linux candidate provenance are described in
+[Building the backend](docs/operations/BUILDING.md).

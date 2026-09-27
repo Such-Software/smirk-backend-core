@@ -1,0 +1,110 @@
+name: Backend CI (Gitea)
+
+# GitHub remains canonical source. Builds admits an explicitly reviewed commit;
+# this workflow is the fundless CI gate, not deployment or public publication.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: never
+  PYTHONDONTWRITEBYTECODE: '1'
+  EXPECTED_BUILD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  verify:
+    name: backend checks
+    runs-on: ubuntu-latest
+    container:
+      image: node:22-bookworm@sha256:0557ac14e0d45d02ed563067b82856ca5e7aa3437fa28d98d4350ea9c3d9494a
+    env:
+      RUSTUP_HOME: ${{ runner.temp }}/rustup-backend-ci
+      CARGO_HOME: ${{ runner.temp }}/cargo-backend-ci
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Require reviewed source selectors before setup
+        run: |
+          test "$GITHUB_REPOSITORY" = Builds/smirk-backend-core || { echo 'This repository is not admitted for backend Builds.' >&2; exit 1; }
+          test "$(git rev-parse HEAD)" = "$EXPECTED_BUILD_SHA" || { echo 'Checkout differs from the reviewed event or dispatch head.' >&2; exit 1; }
+      - name: Install isolated container dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends python3 build-essential pkg-config libssl-dev postgresql postgresql-client
+      - name: Admit reviewed canonical source
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            canonical_source=$(git rev-parse HEAD)
+          else
+            read -r -a parents <<< "$(git show -s --format=%P HEAD)"
+            test "${#parents[@]}" -eq 2 || { echo 'Builds main requires a two-parent source wrapper.' >&2; exit 1; }
+            canonical_source=${parents[1]}
+          fi
+          git fetch --no-tags https://github.com/Such-Software/smirk-backend-core.git "$canonical_source"
+          python3 tools/check-build-source.py
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Source admission and artifact guard regressions
+        run: python3 -m unittest discover -s tools/tests -v
+      - name: Secret shapes
+        run: ./tools/secret-scan.sh
+      - name: Rust format and clippy
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --all-targets -- -D warnings
+      - name: All fundless tests with disposable PostgreSQL
+        run: ./tools/ci-fundless.sh
+      - name: OpenAPI source agreement
+        run: |
+          cargo run --locked --quiet --bin gen_openapi > "$RUNNER_TEMP/openapi.json"
+          diff openapi.json "$RUNNER_TEMP/openapi.json"
+      - name: Embedded console source agreement
+        working-directory: admin-ui
+        run: |
+          npm ci
+          npm run build
+          git diff --exit-code -- dist
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.0'
+      - name: Redacted history credential scan
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.18.4
+          "$(go env GOPATH)/bin/gitleaks" detect --no-banner --redact --source .
+
+  supply-chain:
+    name: dependency policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  gate:
+    name: backend gate
+    if: always()
+    needs: [verify, supply-chain]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every mandatory check
+        env:
+          VERIFY_RESULT: ${{ needs.verify.result }}
+          DEPENDENCY_RESULT: ${{ needs.supply-chain.result }}
+        run: |
+          if [ "$VERIFY_RESULT" != success ] || [ "$DEPENDENCY_RESULT" != success ]; then
+            echo 'Backend gate refused: required checks failed, were cancelled, or did not run.' >&2
+            exit 1
+          fi
