@@ -11,6 +11,7 @@ on:
         type: string
 
 env:
+  BUILD_LANE: candidate
   CARGO_TERM_COLOR: never
   PYTHONDONTWRITEBYTECODE: '1'
   EXPECTED_BUILD_SHA: ${{ inputs.expected_sha }}
@@ -29,6 +30,12 @@ jobs:
       RUSTUP_HOME: ${{ runner.temp }}/rustup-backend-candidate
       CARGO_HOME: ${{ runner.temp }}/cargo-backend-candidate
     steps:
+      - name: Require exact main dispatch before checkout
+        run: |
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch || { echo 'Candidate event must be workflow_dispatch.' >&2; exit 1; }
+          test "$GITHUB_REF" = refs/heads/main || { echo 'Candidate dispatch must select main.' >&2; exit 1; }
+          [[ "$EXPECTED_BUILD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'Candidate expected_sha must be a full lowercase commit.' >&2; exit 1; }
+          test "$GITHUB_SHA" = "$EXPECTED_BUILD_SHA" || { echo 'Dispatch main moved from the reviewed expected_sha.' >&2; exit 1; }
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0

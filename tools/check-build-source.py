@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Admit one reviewed canonical source or its exact Builds merge wrapper."""
+import json
 import os
+from pathlib import Path
 import re
 import subprocess
 import sys
@@ -11,7 +13,11 @@ class Refusal(ValueError):
 
 
 def git(*args):
-    return subprocess.check_output(["git", *args], text=True, stderr=subprocess.PIPE).strip()
+    try:
+        return subprocess.check_output(["git", *args], text=True, stderr=subprocess.PIPE).strip()
+    except subprocess.CalledProcessError as error:
+        cause = " ".join((error.stderr or "Git returned no diagnostic").split())[:600]
+        raise Refusal(f"Git evidence failed (exit {error.returncode}): {cause}") from None
 
 
 def commit(value, label):
@@ -48,16 +54,36 @@ def admit(source, expected_head=None, require_wrapper=False):
     return {"source_commit": source, "build_commit": head, "source_tree": tree}
 
 
-def main():
-    if os.environ.get("GITHUB_REPOSITORY") != "Builds/smirk-backend-core":
+def build_context(environment):
+    if environment.get("GITHUB_REPOSITORY") != "Builds/smirk-backend-core":
         raise Refusal("this workflow is admitted only on Builds/smirk-backend-core")
-    event = os.environ.get("GITHUB_EVENT_NAME")
-    expected = os.environ.get("EXPECTED_BUILD_SHA")
-    if not expected:
-        raise Refusal("this build requires the exact reviewed event or dispatch head")
-    if event not in {"push", "pull_request", "workflow_dispatch"}:
-        raise Refusal("this build event is not admitted")
-    wrapper = event != "pull_request"
+    event = environment.get("GITHUB_EVENT_NAME")
+    lane = environment.get("BUILD_LANE")
+    expected = commit(environment.get("EXPECTED_BUILD_SHA"), "expected event or dispatch SHA")
+    if lane == "candidate":
+        if event != "workflow_dispatch":
+            raise Refusal("candidate builds require workflow_dispatch")
+    elif lane == "ci":
+        if event not in {"push", "pull_request"}:
+            raise Refusal("fundless CI requires push or pull_request")
+    else:
+        raise Refusal("build lane is not admitted")
+    if event == "pull_request":
+        try:
+            payload = json.loads(Path(environment.get("GITHUB_EVENT_PATH", "")).read_text())
+            head = payload["pull_request"]["head"]["sha"]
+            base = payload["pull_request"]["base"]["ref"]
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise Refusal(f"pull-request event evidence is unavailable: {type(error).__name__}") from None
+        if head != expected or base != "main":
+            raise Refusal("CI checkout does not match the exact main-targeted pull-request event head")
+    elif environment.get("GITHUB_REF") != "refs/heads/main" or environment.get("GITHUB_SHA") != expected:
+        raise Refusal("main event head must equal the reviewed full expected_sha")
+    return expected, event != "pull_request"
+
+
+def main():
+    expected, wrapper = build_context(os.environ)
     canonical = source_for_checkout(wrapper)
     result = admit(canonical, expected, require_wrapper=wrapper)
     print(f"Admitted canonical source {result['source_commit']} at Builds {result['build_commit']}")
@@ -68,5 +94,3 @@ if __name__ == "__main__":
         main()
     except Refusal as error:
         sys.exit(f"Build source refused: {error}")
-    except subprocess.CalledProcessError:
-        sys.exit("Build source refused: Git could not resolve the reviewed source or checkout")

@@ -9,6 +9,7 @@ on:
     branches: [main]
 
 env:
+  BUILD_LANE: ci
   CARGO_TERM_COLOR: never
   PYTHONDONTWRITEBYTECODE: '1'
   EXPECTED_BUILD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}

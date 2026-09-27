@@ -40,8 +40,10 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     os.chdir(ROOT)
-    admitted = source.admit(source.source_for_checkout(True),
-                            os.environ.get("EXPECTED_BUILD_SHA", ""), require_wrapper=True)
+    expected, wrapper = source.build_context(os.environ)
+    if not wrapper or os.environ.get("BUILD_LANE") != "candidate":
+        raise source.Refusal("artifact staging requires the admitted candidate dispatch lane")
+    admitted = source.admit(source.source_for_checkout(True), expected, require_wrapper=True)
     binary = ROOT / "target/x86_64-unknown-linux-gnu/release/smirk-backend-core"
     required = elf_requirements(binary)
     rustc = subprocess.check_output(["rustc", "--version"], text=True).strip()

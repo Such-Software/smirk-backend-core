@@ -101,6 +101,53 @@ class Admission(unittest.TestCase):
                 source.main()
 
 
+class EventBoundary(unittest.TestCase):
+    def setUp(self):
+        self.head = "a" * 40
+        self.environment = {"GITHUB_REPOSITORY": "Builds/smirk-backend-core",
+                            "BUILD_LANE": "candidate", "GITHUB_EVENT_NAME": "workflow_dispatch",
+                            "GITHUB_REF": "refs/heads/main", "GITHUB_SHA": self.head,
+                            "EXPECTED_BUILD_SHA": self.head}
+
+    def test_exact_dispatch_event_admitted(self):
+        self.assertEqual(source.build_context(self.environment), (self.head, True))
+
+    def test_bad_ref_event_sha_or_malformed_input_refused(self):
+        for key, value in (("GITHUB_REF", "refs/heads/topic"), ("GITHUB_EVENT_NAME", "push"),
+                           ("GITHUB_SHA", "b" * 40), ("EXPECTED_BUILD_SHA", "main"),
+                           ("EXPECTED_BUILD_SHA", "a" * 39), ("BUILD_LANE", "unknown")):
+            with self.subTest(key=key, value=value), self.assertRaises(source.Refusal):
+                source.build_context({**self.environment, key: value})
+
+    def test_push_requires_main_and_exact_event_sha(self):
+        env = {**self.environment, "BUILD_LANE": "ci", "GITHUB_EVENT_NAME": "push"}
+        self.assertEqual(source.build_context(env), (self.head, True))
+        with self.assertRaises(source.Refusal):
+            source.build_context({**env, "GITHUB_REF": "refs/heads/topic"})
+
+    def test_pr_binds_actual_event_head_and_target(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            event = Path(directory) / "event.json"
+            event.write_text(json.dumps({"pull_request": {"head": {"sha": self.head}, "base": {"ref": "main"}}}))
+            env = {**self.environment, "BUILD_LANE": "ci", "GITHUB_EVENT_NAME": "pull_request",
+                   "GITHUB_EVENT_PATH": str(event)}
+            self.assertEqual(source.build_context(env), (self.head, False))
+            with self.assertRaises(source.Refusal):
+                source.build_context({**env, "EXPECTED_BUILD_SHA": "b" * 40})
+            event.write_text(json.dumps({"pull_request": {"head": {"sha": self.head}, "base": {"ref": "topic"}}}))
+            with self.assertRaises(source.Refusal):
+                source.build_context(env)
+
+    def test_git_refusal_reports_bounded_underlying_cause(self):
+        failure = subprocess.CalledProcessError(128, ["git"], stderr="fatal: object unavailable " + "x" * 2000)
+        with patch.object(subprocess, "check_output", side_effect=failure):
+            with self.assertRaises(source.Refusal) as caught:
+                source.git("rev-parse", "HEAD")
+        self.assertIn("object unavailable", str(caught.exception))
+        self.assertLess(len(str(caught.exception)), 700)
+
+
 class BinaryCompatibility(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="smirk-elf-fixture-")
