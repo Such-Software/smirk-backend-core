@@ -93,15 +93,17 @@ impl BtcPayProvider {
     }
 
     /// Map the operator's numeric confirmations-to-finalize onto BTCPay's
-    /// coarser `speedPolicy` buckets. BTCPay expresses finality as a policy, not
-    /// an arbitrary N, so this rounds UP to the nearest bucket (an operator
-    /// needing an exact/deeper count sets it on the processor merchant default).
-    fn speed_policy(confirmations: u32) -> &'static str {
+    /// coarser `speedPolicy` buckets without weakening the requested depth.
+    /// BTCPay cannot express more than six confirmations on an invoice.
+    fn speed_policy(confirmations: u32) -> Result<&'static str, AppError> {
         match confirmations {
-            0 => "HighSpeed",          // 0-conf
-            1 => "MediumSpeed",        // 1 conf
-            2..=5 => "LowMediumSpeed", // 2 conf
-            _ => "LowSpeed",           // 6 conf
+            0 => Ok("HighSpeed"),
+            1 => Ok("MediumSpeed"),
+            2 => Ok("LowMediumSpeed"),
+            3..=6 => Ok("LowSpeed"),
+            _ => Err(AppError::ConfigError(
+                "BTCPay supports at most six confirmations per invoice".into(),
+            )),
         }
     }
 
@@ -208,8 +210,15 @@ impl PaymentProvider for BtcPayProvider {
             currency: &req.currency,
             metadata: serde_json::json!({ "smirkBind": req.bind }),
             checkout: BtcPayCheckout {
-                speed_policy: Self::speed_policy(req.confirmations),
+                // Checkout rails enforce the exact count independently. Their
+                // compatibility speedPolicy remains within BTCPay's vocabulary.
+                speed_policy: Self::speed_policy(if self.exact_confirmations {
+                    req.confirmations.min(6)
+                } else {
+                    req.confirmations
+                })?,
                 expiration_minutes: req.expires_minutes,
+                payment_tolerance: 0,
                 confirmations_required: self.exact_confirmations.then_some(req.confirmations),
             },
         };
@@ -246,6 +255,8 @@ struct BtcPayCreateReq<'a> {
 struct BtcPayCheckout {
     speed_policy: &'static str,
     expiration_minutes: u32,
+    // Override a store's underpayment tolerance: only full payment grants access.
+    payment_tolerance: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
     confirmations_required: Option<u32>,
 }
@@ -309,6 +320,49 @@ mod tests {
         assert_eq!(p.base_url, "https://pay.example.org");
     }
 
+    #[tokio::test]
+    async fn invoice_request_preserves_finality_and_requires_full_payment() {
+        use axum::{routing::post, Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        let seen = Arc::new(Mutex::new(None));
+        let capture = seen.clone();
+        let router = Router::new().route(
+            "/api/v1/stores/store-123/invoices",
+            post(move |Json(body): Json<serde_json::Value>| async move {
+                *capture.lock().unwrap() = Some(body);
+                Json(serde_json::json!({
+                    "id": "test-invoice", "status": "New",
+                    "checkoutLink": "https://pay.example.org/invoice/test-invoice"
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = cfg();
+        config.provider_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = BtcPayProvider::new(&config).unwrap();
+        provider
+            .create_invoice(&InvoiceRequest {
+                amount: "5".into(),
+                currency: "USD".into(),
+                confirmations: 5,
+                bind: "test-user".into(),
+                expires_minutes: 60,
+            })
+            .await
+            .unwrap();
+        server.abort();
+        let body = seen
+            .lock()
+            .unwrap()
+            .take()
+            .expect("processor received a request");
+        assert_eq!(body["checkout"]["speedPolicy"], "LowSpeed");
+        assert_eq!(body["checkout"]["paymentTolerance"], 0);
+        assert_eq!(body["amount"], "5");
+    }
+
     #[test]
     fn api_key_is_redacted_in_debug() {
         let p = BtcPayProvider::new(&cfg()).unwrap();
@@ -317,13 +371,20 @@ mod tests {
     }
 
     #[test]
-    fn speed_policy_buckets() {
-        assert_eq!(BtcPayProvider::speed_policy(0), "HighSpeed");
-        assert_eq!(BtcPayProvider::speed_policy(1), "MediumSpeed");
-        assert_eq!(BtcPayProvider::speed_policy(2), "LowMediumSpeed");
-        assert_eq!(BtcPayProvider::speed_policy(5), "LowMediumSpeed");
-        assert_eq!(BtcPayProvider::speed_policy(6), "LowSpeed");
-        assert_eq!(BtcPayProvider::speed_policy(100), "LowSpeed");
+    fn speed_policy_never_weakens_confirmation_depth() {
+        for requested in 0..=6 {
+            let actual = match BtcPayProvider::speed_policy(requested).unwrap() {
+                "HighSpeed" => 0,
+                "MediumSpeed" => 1,
+                "LowMediumSpeed" => 2,
+                "LowSpeed" => 6,
+                other => panic!("unknown policy: {other}"),
+            };
+            assert!(actual >= requested);
+        }
+        for unsupported in [7, 100, u32::MAX] {
+            assert!(BtcPayProvider::speed_policy(unsupported).is_err());
+        }
     }
 
     #[test]
@@ -398,6 +459,7 @@ mod tests {
             checkout: BtcPayCheckout {
                 speed_policy: "MediumSpeed",
                 expiration_minutes: 60,
+                payment_tolerance: 0,
                 confirmations_required: None,
             },
         };
@@ -416,6 +478,7 @@ mod tests {
         let c = BtcPayCheckout {
             speed_policy: "MediumSpeed",
             expiration_minutes: 60,
+            payment_tolerance: 0,
             confirmations_required: None,
         };
         let v = serde_json::to_value(&c).unwrap();
@@ -427,6 +490,7 @@ mod tests {
         let c = BtcPayCheckout {
             speed_policy: "LowMediumSpeed",
             expiration_minutes: 60,
+            payment_tolerance: 0,
             confirmations_required: Some(3),
         };
         let v = serde_json::to_value(&c).unwrap();

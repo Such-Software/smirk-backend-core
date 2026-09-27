@@ -185,6 +185,7 @@ pub async fn invoice(
             plan.days,
             &plan.amount,
             &currency,
+            pay.expires_minutes,
         )
         .await?;
 

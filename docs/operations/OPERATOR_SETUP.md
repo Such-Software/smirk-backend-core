@@ -1,8 +1,13 @@
 # Operator setup
 
+> Status: stable · Updated 2026-09-27 · Applies to: independent backend operators
+
 Deploy a `smirk-backend-core` instance. It holds no seed and no spend key; it
 forwards view credentials to your chain backends per request and relays signed
-bytes. Run your own for full privacy.
+bytes. Self-hosting changes which operator receives view credentials and network
+metadata; it does not remove those data flows. See [privacy boundaries](../../PRIVACY.md).
+Company production deployments use reviewed Fleet plan/apply procedures rather
+than the manual setup examples below.
 
 ## Prerequisites
 

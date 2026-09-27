@@ -1,212 +1,89 @@
-# Spec — Premium relay access (recurring)
+# Premium relay access
 
-Status: **implemented** — a design overview of the as-built feature (shipped v0.3.0).
+> Status: stable · Updated 2026-09-27 · Applies to: backend v0.3.0 source
 
-## 1. Summary
+Premium buys a prepaid period of general posting on this instance's Nostr relay.
+It does not grant custody, change wallet balances, or charge a user automatically.
+The feature defaults off. Plans and payment methods come from the configured
+instance, so examples here are not production pricing or deployment evidence.
 
-A **premium tier**: registration and wallet use stay **free** (PoW-gated); an
-optional **recurring fee** (e.g. $5 / quarter) grants **posting access to the
-operator's Nostr relay**. This reframes payment from *pay-to-register* (a
-one-time gate on wallet creation) to a *subscription* (a recurring gate on relay
-writes). Everything else — register, unlock, balances, tip stats, receiving DMs,
-posting to public relays — remains free.
+## Access policy
 
-This is the flagship **cookbook recipe** (`examples/paid-relay/`): a complete,
-working demonstration of operator monetization, built entirely on seams that
-already exist (PaymentProvider + the relay admission engine).
+`RELAY_WRITE_POLICY=premium-post` admits registered users' wallet events for free:
+NIP-59 gift wraps (kind 1059, including encrypted messages and tip payloads) and
+NIP-17 relay lists (kind 10050). Active premium permits other Nostr event kinds.
+The operator's explicit write allowlist also permits general posting; a note on
+the feed therefore does not prove that its author paid for premium.
 
-## 2. Goals / non-goals
+External authors may deliver gift wraps to registered recipients, subject to the
+configured proof of work. Reads remain open. Other public relays apply their own
+policies. Wallet registration can have independently configured gates; premium
+does not determine those gates.
 
-**Goals**
-- Recurring revenue with real utility (relay posting), not a cosmetic badge.
-- Compose from existing seams — no new architecture.
-- Operator-configurable + advertised via `/capabilities`; self-hosting bypasses it.
-- Rigorous: migration, OpenAPI, capabilities golden, unit + L2 + E2E tests.
+The authority is `src/infra/relay/policy.rs`, called by the relay admission service.
+The wallet uses `/premium/status` to display the server's `can_post_general`
+decision. A client display is never sufficient authorization to publish.
 
-**Non-goals (v1)**
-- **Read-gating.** Reads stay open (or DM-reads via NIP-42 later). Paid relays
-  conventionally gate *writes*; gating reads needs NIP-42 AUTH + a premium check
-  and is a possible v2.
-- **Auto-charge subscriptions.** Crypto has no card-on-file; premium is a
-  **prepaid period** — the user re-pays each term or posting lapses. Honest + simple.
-- **Fiat.** Uses the existing crypto PaymentProvider; fiat on-ramp is separate.
+## Purchase and renewal
 
-## 3. Model
+1. The authenticated client selects a plan and optional payment rail from
+   `/capabilities`, then posts `{plan, rail}` to `/premium/invoice`.
+2. The backend mints an invoice for the server-configured price and period. It
+   records the user, processor, amount, currency, period and payment-window expiry.
+3. The user pays at the returned checkout URL. The client calls
+   `/premium/activate` with the invoice ID after payment.
+4. The backend queries the processor that minted that invoice. A settled payment
+   bound to this user can be consumed once. Consumption and extending
+   `premium_until` occur in one database transaction.
 
-The free tier includes everything that makes the **wallet** work — including
-publishing **wallet-functional events** to the operator's relay (encrypted DMs that
-ride with tips, and future P2P atomic-swap coordination). Premium adds using that
-relay as a **general-purpose Nostr relay** (notes, reactions, anything).
+Early renewal extends from the later of the current expiry and now. A consumed
+invoice cannot extend the period twice. Disabling a payment rail leaves existing
+invoice bindings intact; activation refuses until that rail is available again.
 
-| Capability | Free | Premium |
-|---|---|---|
-| Register / unlock / use wallet (all chains) | ✅ | ✅ |
-| Login, view tip/balance stats | ✅ | ✅ |
-| Receive DMs (gift-wrap delivery to you) | ✅ | ✅ |
-| Publish **wallet events** to the operator's relay (encrypted DMs, tips, swap coordination) | ✅ | ✅ |
-| Publish to **public** relays (damus, nos.lol…) | ✅ | ✅ |
-| Publish **general Nostr** to the operator's relay (kind-1 notes, reactions, …) | ❌ | ✅ while `premium_until > now` |
+The backend limits unconsumed invoices whose payment windows remain open. Expired
+windows release capacity, but their rows remain so a paid invoice can still be
+redeemed after confirmation. Existing rows created before expiry was recorded
+receive the previous maximum window of seven days in the additive migration.
 
-The value line: **the relay is free for what makes your wallet work; you pay to use
-it as your everyday Nostr relay.** Free users are never cut off from wallet features.
+## Payment requirements
 
-## 4. Data model
+The primary rail uses BTCPay's Greenfield API. Additional `xmrcheckout` and
+`wowcheckout` rails use compatible endpoints and their own configured credentials.
+An invoice always records its originating rail, rather than polling whichever
+processor is currently first in the configuration.
 
-Migration `..._premium.sql`:
-```sql
-ALTER TABLE users ADD COLUMN premium_until TIMESTAMPTZ;  -- NULL = never premium
--- No standalone index on premium_until: is_premium_npub keys on the existing UNIQUE
--- index on users.nostr_pubkey and `premium_until > NOW()` is a cheap per-row filter,
--- so an index here would only add write cost to every users UPDATE.
-```
-A **dedicated `premium_invoices` table** (not a `purpose` column on `payment_invoices`),
-because premium binds on the authenticated `user_id` (a logged-in purchase) while
-registration invoices bind on plaintext `pubkey_hash` — cleaner than a nullable
-either-or. Columns: `invoice_id` PK, `user_id` FK (ON DELETE CASCADE), `provider`,
-`plan_id`, `period_days`, `amount`, `currency`, `created_at`, `consumed_at`; a partial
-`WHERE consumed_at IS NULL` index for the single-use lookup + a per-user pending cap.
+BTCPay supports confirmation depths of 1, 2 or 6 through its invoice policy.
+Requests for 3 through 5 round up to 6; a larger configured depth is refused.
+Checkout rails also receive the exact confirmation count. Invoice creation pins
+underpayment tolerance to zero, so a store's default cannot reduce the payment
+required for access. Processor credentials remain server-side.
 
-DB fns (`infra/db/premium_invoices.rs` + `users.rs`):
-- `is_premium_npub(nostr_pubkey) -> bool` — `SELECT EXISTS(... WHERE nostr_pubkey = $1 AND premium_until > NOW())` (npub is public → not peppered).
-- `activate_premium(invoice_id, user_id, days) -> Option<premium_until>` — consume the
-  single-use invoice AND extend `premium_until` in **one transaction** (so a mid-flight
-  failure rolls the consume back and the paid invoice stays redeemable). Extends from
-  `GREATEST(COALESCE(premium_until, NOW()), NOW())`, so early/longer renewals stack.
-- `count_unconsumed_premium_invoices(user_id)` — bounds pending invoices per user.
+## Configuration and deployment
 
-## 5. Admission policy change
+`PREMIUM_ENABLED` defaults to `false`. Enabling it requires a configured primary
+payment processor, relay, `premium-post` admission policy, and valid plans.
+`PREMIUM_PLANS` defines `id:days:amount` entries in `PREMIUM_CURRENCY`.
+The [example configuration](../../.env.example) owns the variable names and defaults.
+The [paid relay recipe](../../examples/paid-relay/README.md) illustrates independent
+self-hosting; company production changes use reviewed Fleet plan/apply procedures.
 
-The pure engine (`infra/relay/policy.rs::decide`) classifies each event and gates on
-**kind × membership**. A new `WritePolicy::PremiumPost` and an `author_premium` input:
+The admission service binds to loopback by default. Setting `RELAY_MODE=external`
+does not by itself authorize cross-host admission access. A relocation must
+establish a protected admission path and preserve the same write policy.
 
-- **Wallet-functional kinds are free for registered users.** Define `WALLET_KINDS` —
-  the events that make the wallet + its peer features work: `1059` (NIP-59 gift-wrap /
-  encrypted DMs, incl. tip + swap-coordination payloads), `10050` (NIP-17 DM relay
-  list), and the tip / atomic-swap coordination kinds as those features define their
-  on-Nostr shape. Extensible constant.
-- **`PremiumPost` decision order** in the pure engine (first match wins). The
-  `max_event_bytes` size cap is enforced in the `nauthz` adapter *before* the pure
-  engine runs (fail-closed), so it is not a branch here:
-  1. `author_premium` → **Permit** (any kind — the general-purpose relay).
-  2. `author_registered` && `kind ∈ WALLET_KINDS` → **Permit** (free wallet use).
-  3. `author_registered` (non-wallet kind, not premium) → **Deny** (premium required).
-  4. external author → gift-wrap inbox delivery only (`kind == 1059` to a registered
-     recipient, PoW-gated), else **Deny**.
-- Existing `Open` / `AuthorAllowlist` / `InboxOutbox` unchanged.
+## Verification
 
-`nauthz.rs::event_admit` passes the event `kind`, `is_registered_npub(author)`, and
-the new `is_premium_npub(author)` into `decide`. Fail-closed on error (deny).
+The relevant checks cover policy decisions, configuration refusal, real invoice
+request serialization, single-use activation, renewal, cross-user binding and
+expired-window capacity. Database tests require a disposable PostgreSQL database;
+a run that skips them does not establish payment correctness. OpenAPI is generated
+from the handlers and must be regenerated when the public contract changes.
 
-Config (`config.rs`): `RELAY_WRITE_POLICY=premium-post`; validate() keeps the
-loopback-admission requirement (non-open policies need the admission service).
+## Release checklist
 
-## 6. Payment flow (recurring + tiered, reuses the PaymentProvider seam)
-
-- `POST /premium/invoice` (JWT auth), body `{ plan }` → mint an invoice for the
-  selected plan's amount via the PaymentProvider, recorded in `premium_invoices`
-  bound to the caller's `user_id` with the plan's `days`. Returns the invoice (pay
-  URL / address).
-- `POST /premium/activate` (JWT auth), body `{ invoice_id }` → the client-driven
-  settle path (pull model, no background poller): verify the invoice is `Settled` at
-  the processor, then `activate_premium` (single-use consume + `premium_until` extend,
-  in one transaction). Never holds funds — status reads only.
-- `GET /premium/status` (JWT auth) → `{ active, premium_until }`.
-
-**Tiered plans (a built-in discount feature).** `PREMIUM_PLANS` is a list
-of `{ id, days, amount }`:
-
-| id | days | price | vs. quarterly |
-|---|---|---|---|
-| `quarter` | 90 | $5 | — |
-| `halfyear` | 182 | $9 | ~10% off |
-| `year` | 365 | $15 | ~25% off |
-
-The invoice endpoint validates `plan` against the configured list; `/capabilities`
-advertises it so the client shows the tiers with the discount visible.
-`extend_premium` stacks from `max(now, current_expiry)`, so buying early (or a longer
-plan) just extends. Single shared `PREMIUM_CURRENCY`.
-
-Config: `PREMIUM_ENABLED` (default false), `PREMIUM_CURRENCY`, `PREMIUM_PLANS`
-(`id:days:amount` entries), reuses `PAYMENT_PROVIDER_*`. `validate()`:
-`PREMIUM_ENABLED` ⇒ provider configured **and** `RELAY_ENABLED` **and**
-`RELAY_WRITE_POLICY=premium-post` **and** ≥1 valid plan (fail closed otherwise).
-
-## 6.5 Resource governance — a shared host
-
-When the relay runs **on the same host as the wallet backend and the LWS scanners**,
-it must stay within a budget and never starve them. A paid base is naturally bounded
-(only paying users post general content); set hard limits regardless:
-- **Size + retention** — `RELAY_MAX_EVENT_BYTES` (64 KB) and `RELAY_RETENTION_DAYS`
-  (30) cap storage; general (non-DM) content can carry a shorter retention than
-  gift-wraps if needed.
-- **Connection / subscription / rate limits** — cap max connections, subscriptions
-  per connection, and ingest rate in the nostr-rs-relay config so a burst can't
-  monopolize CPU / DB / bandwidth.
-- **DB isolation** — the relay uses its own tables + retention job; the wallet
-  backend's hot auth / LWS paths are untouched.
-- **Escape hatch** — the `paid-relay` recipe ships a suggested cap set: if relay load
-  approaches the wallet backend's headroom, move the relay to its own host — the seam
-  already supports `RELAY_MODE=external`.
-
-## 7. Capabilities + OpenAPI
-
-- `/capabilities`: `features.premium_relay: bool` + a `premium` object
-  `{ currency, plans: [{ id, days, amount }], relay_url }` (present only when enabled),
-  so the client renders the plan tiers with the discount visible. The client greys the
-  **general-Nostr-posting** affordance unless `premium.active`; wallet events + DMs
-  stay available free.
-- OpenAPI: document `POST /premium/invoice`, `POST /premium/activate`, and
-  `GET /premium/status`; the existing **OpenAPI no-drift check** must pass.
-  Capabilities **golden test** updated to include `premium_relay` + `premium`.
-
-## 8. Free ↔ premium enforcement points (defense in depth)
-
-1. **Relay admission (authoritative):** the gRPC hook denies non-premium *general*
-   writes to the relay regardless of client behavior (wallet events stay free). This
-   is the real gate.
-2. **Client UX:** reads `premium.active` from `/premium/status` and disables the
-   affordance — a courtesy, never the enforcement.
-
-The client is never trusted; a user who bypasses the UI still hits admission-deny.
-
-## 9. Migration / compatibility
-
-- Additive column; existing users get `premium_until = NULL` (free). No break.
-- v0.2 backend unaffected. `PREMIUM_ENABLED=false` (default) → zero behavior change:
-  `POST /premium/invoice` and `/premium/activate` return **400** (`VALIDATION_ERROR`,
-  "Premium is not available on this instance."), `GET /premium/status` returns **200**
-  with `{ active: false, premium_until: null }`, and `/capabilities` omits the
-  `premium` object (`features.premium_relay: false`).
-- The relay stays **off** until an operator opts in (`RELAY_ENABLED=true` +
-  `premium-post`) — see the `examples/paid-relay/` recipe.
-
-## 10. Testing (Ps and Qs)
-
-- **Unit** — `policy.rs`: PremiumPost permits a premium author (any kind), permits a
-  registered author's wallet kinds, denies a registered author's general post, and
-  delivers an external gift-wrap to a registered recipient (else denies).
-- **Unit** — config fail-closed matrix (relay / policy / plans / creds / 0-conf /
-  days cap) and the `PREMIUM_PLANS` parser.
-- **Integration** — `activate_premium` is single-use, stacks from `max(now, current)`,
-  and rejects a cross-user invoice; `is_premium_npub` respects expiry (npub is public,
-  not peppered); the premium routes are feature-gated off by default.
-- **Golden** — capabilities includes `premium_relay` + `premium` when enabled, omits when off.
-- **No-drift** — OpenAPI covers the three premium endpoints.
-
-## 11. Design decisions & limitations
-
-1. **Expiry is a hard cutoff** — no grace window; early-renewal stacking
-   (`activate_premium` extends from `max(now, current)`) softens it.
-2. **Writes are gated, reads stay open** — read-gating would need NIP-42 AUTH plus a
-   premium check; a possible future addition.
-3. **Prepaid periods, not auto-charge** — crypto has no card-on-file, so a member
-   re-pays each term or posting lapses (honest + simple).
-4. **No refunds** — prepaid access to a service; stated in the recipe README / ToS.
-
-## 12. Cookbook tie-in
-
-`examples/paid-relay/` = `PREMIUM_ENABLED=true` + `RELAY_ENABLED=true` +
-`RELAY_WRITE_POLICY=premium-post` + open+PoW registration. Its README is the
-operator playbook: pricing, the NCMEC/DMCA content posture (Terms §6/§9.1),
-resource expectations, and the "reads open, writes paid" decision. See
-[`examples/README.md`](../../examples/README.md).
+- [ ] Keep premium and additional rails disabled until explicitly configured.
+- [ ] Verify the configured processor can create and read its own invoices.
+- [ ] Run database regressions and payment transport tests for the exact candidate.
+- [ ] Confirm paid activation, expiry and renewal with the selected processor.
+- [ ] Verify free wallet events and premium general posting at relay admission.
+- [ ] Describe prepaid access and the actual instance's price in client copy.

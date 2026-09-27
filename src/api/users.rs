@@ -756,7 +756,7 @@ mod tests {
         assert!(is_grin_slatepack_address("  grin1qqv9hlxpazdvs0zt  "));
 
         for c in "0123456789abcdefABCDEF".chars() {
-            let key: String = std::iter::repeat(c).take(64).collect();
+            let key: String = std::iter::repeat_n(c, 64).collect();
             assert!(
                 !is_grin_slatepack_address(&key),
                 "hex public key of {c:?} must not read as an address"

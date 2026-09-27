@@ -436,9 +436,8 @@ impl LwsClient {
     ///
     /// The LWS `add_account` starts every account at the chain TIP and ignores
     /// any supplied start height, so a restore needs an explicit backwards
-    /// rescan. Read the post-add scan height and only rescan when strictly
-    /// lowering it — honoring the `rescan` backwards-only invariant (a rescan to
-    /// `height >= current` is undefined behavior in monero-lws).
+    /// rescan. Read its durable start height on every import so a failed backfill
+    /// can resume, and only rescan when strictly lowering the scan cursor.
     #[instrument(skip(self, view_key), fields(net = %self.network, start_height, provision_minors))]
     pub async fn import_account(
         &self,
@@ -447,76 +446,35 @@ impl LwsClient {
         start_height: u64,
         provision_minors: u32,
     ) -> Result<(), AppError> {
-        // Only a NEWLY added account needs the backwards rescan to its birthday
-        // (monero-lws `add_account` starts every account at the chain tip). An
-        // account that ALREADY exists has already been imported from its
-        // birthday, so re-registration MUST be an idempotent no-op here.
-        //
-        // Rescanning an existing account resets its scan cursor to the birthday,
-        // so a client that re-registers on every balance poll (passing the fixed
-        // wallet birthday) would perpetually wipe scan progress: the account
-        // reads a 0 balance, slowly re-backfills, then gets reset again on the
-        // next poll and never catches up. A genuine re-restore to an EARLIER
-        // birthday goes through the explicit admin `rescan` path, not this one.
-        match self.account_scan_height(address).await? {
-            // Already registered: never reset an existing account from here.
-            //
-            // It is still brought up to the required subaddress ceiling. The
-            // upsert is idempotent and touches no scan state, so the
-            // anti-reset-loop invariant is untouched, while an account that was
-            // registered before provisioning was enabled (or before the ceiling
-            // was raised) can finally be provisioned instead of being locked out
-            // of the feature forever by this short-circuit.
-            Some(_) => {
-                self.provision_account0_covering(address, view_key, provision_minors)
-                    .await?;
-                Ok(())
-            }
-            None => {
-                self.admin_add_account(address, view_key).await?;
-                // Provision subaddress ranges BEFORE the backwards rescan (money
-                // gate G3): the rescan re-scans forward from the birthday, so the
-                // subaddresses must ALREADY be registered for the LWS to attribute
-                // historical subaddress receipts in that backfill.
-                //
-                // The result is HELD, not propagated with `?`. The account now
-                // exists at the LWS, so returning early here would strand it at
-                // the chain tip: every later re-registration takes the `Some(_)`
-                // branch above, answers 200, and never runs the backwards scan,
-                // leaving the wallet reading a zero balance forever. The rescan
-                // therefore always runs, and the provisioning failure is surfaced
-                // afterwards.
-                let provisioned = self
-                    .provision_account0_covering(address, view_key, provision_minors)
-                    .await;
-                let rescanned = self.rescan_back_to(address, start_height).await;
-                // A failed backfill is the graver of the two (it is the one a
-                // retry can no longer reach), so it is reported first; otherwise
-                // the provisioning failure is surfaced, never swallowed.
-                rescanned?;
-                provisioned?;
-                Ok(())
-            }
+        if self.account_scan_height(address).await?.is_none() {
+            self.admin_add_account(address, view_key).await?;
         }
+        // Provision before backfilling so historical subaddress receipts can be
+        // attributed. A provisioning error must not strand the primary address
+        // at the tip, so attempt both operations and report either failure.
+        let provisioned = self
+            .provision_account0_covering(address, view_key, provision_minors)
+            .await;
+        self.rescan_back_to(address, view_key, start_height).await?;
+        provisioned?;
+        Ok(())
     }
 
-    /// Lower a freshly added account's scan cursor to `start_height`, retrying a
-    /// transient failure. A no-op when the account is already at or below it
-    /// (the `rescan` backwards-only invariant).
-    async fn rescan_back_to(&self, address: &str, start_height: u64) -> Result<(), AppError> {
-        let current = self.account_scan_height(address).await?.unwrap_or(u64::MAX);
-        if start_height >= current {
-            return Ok(());
-        }
-        // The account is added at the chain tip. If this backfill rescan fails,
-        // the account is stranded at the tip: it reads a 0 balance and the
-        // `Some(_)` short-circuit in `import_account` (which exists to prevent
-        // the reset loop) means a later re-registration will NOT retry it. So
-        // retry a transient failure here, where we still know this is a fresh
-        // account that owes a backwards scan.
+    /// Complete a restore only when the LWS's durable start height covers it.
+    /// Account existence alone does not prove that an earlier backfill worked.
+    /// Once start_height is lowered, later imports preserve scan progress.
+    async fn rescan_back_to(
+        &self,
+        address: &str,
+        view_key: &str,
+        start_height: u64,
+    ) -> Result<(), AppError> {
         let mut attempt = 0u32;
         loop {
-            match self.rescan(vec![address.to_string()], start_height).await {
+            let result = self
+                .ensure_restore_range(address, view_key, start_height)
+                .await;
+            match result {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     attempt += 1;
@@ -528,6 +486,43 @@ impl LwsClient {
                 }
             }
         }
+    }
+
+    async fn ensure_restore_range(
+        &self,
+        address: &str,
+        view_key: &str,
+        start_height: u64,
+    ) -> Result<(), AppError> {
+        // These fields are required here. The balance response's compatibility
+        // defaults cannot stand in for evidence that a restore has completed.
+        #[derive(Deserialize)]
+        struct ScanRange {
+            #[serde(deserialize_with = "string_or_u64::deserialize")]
+            start_height: u64,
+            #[serde(deserialize_with = "string_or_u64::deserialize")]
+            scanned_height: u64,
+        }
+        let body = GetAddressInfoRequest {
+            address: address.to_string(),
+            view_key: view_key.to_string(),
+        };
+        let url = format!("{}/get_address_info", self.user_url);
+        let before: ScanRange = self
+            .post_json(url.clone(), "get_address_info", &body)
+            .await?;
+        if before.start_height <= start_height {
+            return Ok(());
+        }
+        if start_height >= before.scanned_height {
+            return Err(self.node_err("rescan", "restore range has an inconsistent scan cursor"));
+        }
+        self.rescan(vec![address.to_string()], start_height).await?;
+        let after: ScanRange = self.post_json(url, "get_address_info", &body).await?;
+        if after.start_height > start_height {
+            return Err(self.node_err("rescan", "LWS did not confirm the requested restore range"));
+        }
+        Ok(())
     }
 
     async fn admin_add_account(&self, address: &str, view_key: &str) -> Result<(), AppError> {

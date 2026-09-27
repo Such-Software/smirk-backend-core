@@ -43,11 +43,12 @@ impl Database {
         period_days: i32,
         amount: &str,
         currency: &str,
+        expires_minutes: u32,
     ) -> Result<(), AppError> {
         sqlx::query(
             "INSERT INTO premium_invoices \
-             (invoice_id, user_id, provider, plan_id, period_days, amount, currency) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+             (invoice_id, user_id, provider, plan_id, period_days, amount, currency, expires_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() + make_interval(mins => $8))",
         )
         .bind(invoice_id)
         .bind(user_id)
@@ -56,6 +57,10 @@ impl Database {
         .bind(period_days)
         .bind(amount)
         .bind(currency)
+        .bind(
+            i32::try_from(expires_minutes)
+                .map_err(|_| AppError::ValidationError("invoice expiration is too large".into()))?,
+        )
         .execute(self.pool())
         .await?;
         Ok(())
@@ -111,13 +116,12 @@ impl Database {
         ))
     }
 
-    /// How many unconsumed premium invoices this user currently holds — bounds how
-    /// many outstanding invoices one authenticated user can accrue at the processor
-    /// (served by the partial `premium_invoices_unconsumed_idx`).
+    /// Count unconsumed invoices whose payment window is still open. Expiration
+    /// frees a slot without deleting the binding needed to redeem a paid invoice.
     #[instrument(skip(self))]
     pub async fn count_unconsumed_premium_invoices(&self, user_id: Uuid) -> Result<i64, AppError> {
         let n = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM premium_invoices WHERE user_id = $1 AND consumed_at IS NULL",
+            "SELECT COUNT(*) FROM premium_invoices WHERE user_id = $1 AND consumed_at IS NULL AND expires_at > NOW()",
         )
         .bind(user_id)
         .fetch_one(self.pool())
